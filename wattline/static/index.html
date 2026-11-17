@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wattline</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/monitor.css">
+
+</head>
+<body>
+<div class="shell">
+  <aside class="rail">
+    <div class="rail-inner">
+      <div class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>Wattline</div>
+      <nav aria-label="机器导航" id="rail-nav"></nav>
+    </div>
+  </aside>
+  <div class="top">
+    <header class="topbar">
+      <nav class="breadcrumb" id="breadcrumb" aria-label="当前位置"></nav>
+      <div class="top-actions">
+        <span class="status stale" id="sync-state">等待数据</span>
+        <span class="time" id="clock"></span>
+      </div>
+    </header>
+    <main class="content">
+      <p class="message" id="sync-error" role="status" hidden></p>
+      <div id="content" aria-busy="true"><p class="empty">正在读取机器清单…</p></div>
+    </main>
+  </div>
+</div>
+<dialog class="machine-dialog" id="machine-dialog" aria-labelledby="machine-dialog-title">
+  <form id="machine-form">
+    <h2 id="machine-dialog-title">新增机器</h2>
+    <p id="machine-target" class="mono" hidden></p>
+    <fieldset id="machine-fields" aria-label="机器设置">
+      <div id="machine-connection" class="form-grid">
+        <label>IP 或主机名<input name="host" type="text" maxlength="128" placeholder="例如 jg04" autocomplete="off" spellcheck="false" required></label>
+        <label>SSH 用户名 <small>可选</small><input name="ssh_user" type="text" maxlength="64" placeholder="按现有 SSH 配置" autocomplete="off" spellcheck="false"></label>
+        <p class="full-width">也可填写已有 SSH 别名。保存时会验证公钥登录和已信任的主机密钥。</p>
+      </div>
+      <div class="form-grid">
+        <label>显示别名<input name="alias" type="text" maxlength="80" placeholder="留空使用默认名称" autocomplete="off"></label>
+        <label>巡检间隔（秒）<input name="interval_seconds" type="number" min="1" max="300" step="any" required></label>
+        <label id="ssh-timeout-field">SSH 连接超时（秒）<input name="ssh_connect_timeout_seconds" type="number" min="1" max="60" step="1" required></label>
+      </div>
+      <label class="check-label"><input name="enabled" type="checkbox">启用后台巡检</label>
+      <fieldset class="check-options">
+        <legend>巡检项目</legend>
+        <label class="check-label"><input name="checks" type="checkbox" value="gpu">GPU 指标</label>
+        <label class="check-label"><input name="checks" type="checkbox" value="processes">GPU 进程与归属</label>
+        <label class="check-label"><input name="checks" type="checkbox" value="cpu">CPU 与负载</label>
+        <label class="check-label"><input name="checks" type="checkbox" value="memory">内存</label>
+        <label class="check-label"><input name="checks" type="checkbox" value="system">系统盘与运行时长</label>
+      </fieldset>
+    </fieldset>
+    <p id="machine-error" class="form-error" role="alert" hidden></p>
+    <div class="dialog-actions">
+      <button id="machine-cancel" type="button" class="control">取消</button>
+      <button id="machine-save" type="submit" class="control primary-control">保存</button>
+    </div>
+  </form>
+</dialog>
+<dialog class="machine-dialog" id="remove-dialog" aria-labelledby="remove-title" aria-describedby="remove-description">
+  <form id="remove-form">
+    <h2 id="remove-title">移除节点？</h2>
+    <p><strong id="remove-name"></strong> <span class="mono" id="remove-address"></span></p>
+    <p id="remove-description">将停止巡检，删除该节点的配置和全部监控数据，包括冷归档。此操作不可撤销。</p>
+    <p id="remove-error" class="form-error" role="alert" hidden></p>
+    <div class="dialog-actions">
+      <button id="remove-cancel" type="button" class="control" autofocus>取消</button>
+      <button id="remove-confirm" type="submit" class="control danger-confirm">确认移除</button>
+    </div>
+  </form>
+</dialog>
+<script src="/static/monitor.js" defer></script>
+</body>
+</html>

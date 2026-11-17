@@ -1,0 +1,6 @@
+{
+  "data_dir": "./.data",
+  "port": 8090,
+  "archive_timezone": "UTC",
+  "machines": []
+}

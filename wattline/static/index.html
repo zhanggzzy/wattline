@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-localizing>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -9,73 +9,76 @@
 
 </head>
 <body>
-<a class="skip-link" href="#main">跳到主要内容</a>
+<a class="skip-link" href="#main"><span data-i18n="skip_to_main_content">跳到主要内容</span></a>
 <div class="shell">
   <aside class="rail">
     <div class="rail-inner">
       <div class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>Wattline</div>
-      <p class="brand-caption">算力监控工作台</p>
-      <nav aria-label="机器导航" id="rail-nav"></nav>
+      <p class="brand-caption"><span data-i18n="compute_monitoring_workbench">算力监控工作台</span></p>
+      <nav aria-label="机器导航" data-i18n-aria-label="machine_navigation" id="rail-nav"></nav>
     </div>
   </aside>
   <div class="top">
     <header class="topbar">
-      <nav class="breadcrumb" id="breadcrumb" aria-label="当前位置"></nav>
+      <nav class="breadcrumb" id="breadcrumb" aria-label="当前位置" data-i18n-aria-label="current_location"></nav>
       <div class="top-actions">
-        <span class="status stale" id="sync-state">等待数据</span>
+        <label class="locale-control"><span data-i18n="language">语言</span><select id="locale-select" aria-label="语言" data-i18n-aria-label="language"></select></label>
+        <span class="status stale" id="sync-state"><span data-i18n="waiting_for_data">等待数据</span></span>
         <span class="time" id="clock"></span>
       </div>
     </header>
     <main class="content" id="main" tabindex="-1">
       <p class="message" id="sync-error" role="status" hidden></p>
-      <div id="content" aria-busy="true"><div class="loading-state" role="status"><span class="loading-mark" aria-hidden="true"></span><h1>正在连接工作台</h1><p>正在读取机器清单与最新样本…</p></div></div>
+      <div id="content" aria-busy="true"><div class="loading-state" role="status"><span class="loading-mark" aria-hidden="true"></span><h1><span data-i18n="connecting_to_workbench">正在连接工作台</span></h1><p><span data-i18n="loading_machines_and_latest_samples">正在读取机器清单与最新样本…</span></p></div></div>
     </main>
   </div>
 </div>
 <dialog class="machine-dialog" id="machine-dialog" aria-labelledby="machine-dialog-title">
   <form id="machine-form">
-    <h2 id="machine-dialog-title">新增机器</h2>
+    <h2 id="machine-dialog-title"><span data-i18n="add_machine">新增机器</span></h2>
     <p id="machine-target" class="mono" hidden></p>
-    <fieldset id="machine-fields" aria-label="机器设置">
+    <fieldset id="machine-fields" aria-label="机器设置" data-i18n-aria-label="machine_settings_m174">
       <div id="machine-connection" class="form-grid">
-        <label>IP 或主机名<input name="host" type="text" maxlength="128" placeholder="例如 jg04" autocomplete="off" spellcheck="false" required></label>
-        <label>SSH 用户名 <small>可选</small><input name="ssh_user" type="text" maxlength="64" placeholder="按现有 SSH 配置" autocomplete="off" spellcheck="false"></label>
-        <p class="full-width">也可填写已有 SSH 别名。保存时会验证公钥登录和已信任的主机密钥。</p>
+        <label><span data-i18n="ip_or_hostname">IP 或主机名</span><input name="host" type="text" maxlength="128" placeholder="例如 jg04" data-i18n-placeholder="e_g_jg04" autocomplete="off" spellcheck="false" required></label>
+        <label><span data-i18n="ssh_username">SSH 用户名 </span><small><span data-i18n="optional">可选</span></small><input name="ssh_user" type="text" maxlength="64" placeholder="按现有 SSH 配置" data-i18n-placeholder="use_existing_ssh_configuration" autocomplete="off" spellcheck="false"></label>
+        <p class="full-width"><span data-i18n="an_existing_ssh_alias_also_works_saving_verifies_public_key_login">也可填写已有 SSH 别名。保存时会验证公钥登录和已信任的主机密钥。</span></p>
       </div>
       <div class="form-grid">
-        <label>显示别名<input name="alias" type="text" maxlength="80" placeholder="留空使用默认名称" autocomplete="off"></label>
-        <label>巡检间隔（秒）<input name="interval_seconds" type="number" min="1" max="300" step="any" required></label>
-        <label id="ssh-timeout-field">SSH 连接超时（秒）<input name="ssh_connect_timeout_seconds" type="number" min="1" max="60" step="1" required></label>
+        <label><span data-i18n="display_alias">显示别名</span><input name="alias" type="text" maxlength="80" placeholder="留空使用默认名称" data-i18n-placeholder="leave_blank_for_default_name" autocomplete="off"></label>
+        <label><span data-i18n="check_interval_seconds">巡检间隔（秒）</span><input name="interval_seconds" type="number" min="1" max="300" step="any" required></label>
+        <label id="ssh-timeout-field"><span data-i18n="ssh_connection_timeout_seconds">SSH 连接超时（秒）</span><input name="ssh_connect_timeout_seconds" type="number" min="1" max="60" step="1" required></label>
       </div>
-      <label class="check-label"><input name="enabled" type="checkbox">启用后台巡检</label>
+      <label class="check-label"><input name="enabled" type="checkbox"><span data-i18n="enable_background_monitoring">启用后台巡检</span></label>
       <fieldset class="check-options">
-        <legend>巡检项目</legend>
-        <label class="check-label"><input name="checks" type="checkbox" value="gpu">GPU 指标</label>
-        <label class="check-label"><input name="checks" type="checkbox" value="processes">GPU 进程与归属</label>
-        <label class="check-label"><input name="checks" type="checkbox" value="cpu">CPU 与负载</label>
-        <label class="check-label"><input name="checks" type="checkbox" value="memory">内存</label>
-        <label class="check-label"><input name="checks" type="checkbox" value="system">系统盘与运行时长</label>
+        <legend><span data-i18n="monitoring_checks">巡检项目</span></legend>
+        <label class="check-label"><input name="checks" type="checkbox" value="gpu"><span data-i18n="gpu_metrics">GPU 指标</span></label>
+        <label class="check-label"><input name="checks" type="checkbox" value="processes"><span data-i18n="gpu_processes_and_ownership">GPU 进程与归属</span></label>
+        <label class="check-label"><input name="checks" type="checkbox" value="cpu"><span data-i18n="cpu_and_load">CPU 与负载</span></label>
+        <label class="check-label"><input name="checks" type="checkbox" value="memory"><span data-i18n="memory">内存</span></label>
+        <label class="check-label"><input name="checks" type="checkbox" value="system"><span data-i18n="system_disk_and_uptime">系统盘与运行时长</span></label>
       </fieldset>
     </fieldset>
     <p id="machine-error" class="form-error" role="alert" hidden></p>
     <div class="dialog-actions">
-      <button id="machine-cancel" type="button" class="control">取消</button>
-      <button id="machine-save" type="submit" class="control primary-control">保存</button>
+      <button id="machine-cancel" type="button" class="control"><span data-i18n="cancel">取消</span></button>
+      <button id="machine-save" type="submit" class="control primary-control"><span data-i18n="save">保存</span></button>
     </div>
   </form>
 </dialog>
 <dialog class="machine-dialog" id="remove-dialog" aria-labelledby="remove-title" aria-describedby="remove-description">
   <form id="remove-form">
-    <h2 id="remove-title">移除节点？</h2>
+    <h2 id="remove-title"><span data-i18n="remove_node_m193">移除节点？</span></h2>
     <p><strong id="remove-name"></strong> <span class="mono" id="remove-address"></span></p>
-    <p id="remove-description">将停止巡检，删除该节点的配置和全部监控数据，包括冷归档。此操作不可撤销。</p>
+    <p id="remove-description"><span data-i18n="stops_monitoring_and_deletes_this_node_s_configuration_and_all_mo">将停止巡检，删除该节点的配置和全部监控数据，包括冷归档。此操作不可撤销。</span></p>
     <p id="remove-error" class="form-error" role="alert" hidden></p>
     <div class="dialog-actions">
-      <button id="remove-cancel" type="button" class="control" autofocus>取消</button>
-      <button id="remove-confirm" type="submit" class="control danger-confirm">确认移除</button>
+      <button id="remove-cancel" type="button" class="control" autofocus><span data-i18n="cancel">取消</span></button>
+      <button id="remove-confirm" type="submit" class="control danger-confirm"><span data-i18n="confirm_removal">确认移除</span></button>
     </div>
   </form>
 </dialog>
+<script src="/static/locales.js" defer></script>
+<script src="/static/i18n.js" defer></script>
 <script src="/static/monitor.js" defer></script>
 </body>
 </html>

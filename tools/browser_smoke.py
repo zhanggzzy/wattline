@@ -212,7 +212,101 @@ with sync_playwright() as p:
     assert not errors, errors
     assert any(path.endswith("/order") for _,path,_ in mutations)
     assert any(path.endswith("/settings") for _,path,_ in mutations)
+    # English end-to-end: preference, current selection, dialogs and raw evidence.
+    page.set_viewport_size({"width":1440,"height":1100})
+    page.locator('#locale-select').select_option('en')
+    expect(page.locator('html')).to_have_attribute('lang','en')
+    expect(page.locator('#page-heading')).to_have_text('Compute at a glance')
+    expect(page.locator('#chart-summary')).to_contain_text('11 valid periods')
+    assert page.evaluate("localStorage.getItem('wattline.locale')") == 'en'
+    page.get_by_role('searchbox').fill('Beta')
+    page.locator('#locale-select').select_option('zh-CN')
+    expect(page.get_by_role('searchbox')).to_have_value('Beta')
+    page.locator('#locale-select').select_option('en')
+    expect(page.locator('#host-rows tr')).to_have_count(1)
+    page.get_by_role('searchbox').fill('')
+    page.reload()
+    expect(page.locator('html')).to_have_attribute('lang','en')
+    expect(page.locator('#page-heading')).to_have_text('Compute at a glance')
+    page.screenshot(path=str(OUT/'english-overview.png'), full_page=True)
+    for width in layout_widths:
+        page.set_viewport_size({"width":width,"height":1100})
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), ('en',width)
+        assert page.locator('.metric').evaluate_all('''tiles => tiles.every(tile => {
+            const range=document.createRange(); range.selectNodeContents(tile.querySelector('strong .value'));
+            const r=range.getBoundingClientRect(), card=tile.getBoundingClientRect();
+            return r.left >= card.left && r.right <= card.right;
+        })'''), ('en tiles',width)
+    page.set_viewport_size({"width":390,"height":844})
+    page.screenshot(path=str(OUT/'english-mobile.png'), full_page=True)
+    page.get_by_role('button',name='Unavailable',exact=True).click()
+    expect(page.locator('#host-rows tr')).to_have_count(1)
+    page.get_by_role('button',name='All',exact=True).click()
+    page.locator('#host-rows [data-sort-host="demo-2"]').press('ArrowDown')
+    page.locator('#host-rows [data-host="demo-2"]').click()
+    expect(page.get_by_role('heading',name='Current GPU processes')).to_be_visible()
+    expect(page.locator('.process-table')).to_contain_text('demo-user')
+    page.get_by_role('button',name='View GPU 0',exact=True).click()
+    expect(page.get_by_role('heading',name='GPU 0 device information')).to_be_visible()
+    page.get_by_role('button',name='7 days',exact=True).click()
+    expect(page.locator('#chart-summary')).to_contain_text('11 valid periods')
+    page.locator('#trend-chart').press('ArrowLeft')
+    expect(page.locator('#chart-announcement')).to_contain_text('GPU utilization')
+    page.locator('#locale-select').select_option('zh-CN')
+    expect(page.get_by_role('button',name='7 天',exact=True)).to_have_attribute('aria-pressed','true')
+    page.locator('#locale-select').select_option('en')
+    expect(page.get_by_role('button',name='7 days',exact=True)).to_have_attribute('aria-pressed','true')
+    page.set_viewport_size({"width":1440,"height":1100})
+    page.locator('#trend-chart').blur()
+    page.evaluate('window.scrollTo(0,0)')
+    page.screenshot(path=str(OUT/'english-gpu.png'), full_page=True)
+    page.get_by_role('button',name='Configure',exact=True).click()
+    page.locator('[name="alias"]').fill('English synthetic alias')
+    # App validation is localized; failed validation retains the draft.
+    for checkbox in page.locator('input[name="checks"]').all():
+        checkbox.uncheck(force=True)
+    page.get_by_role('button',name='Save',exact=True).click()
+    expect(page.locator('#machine-error')).to_have_text('Select at least one check when monitoring is enabled.')
+    expect(page.locator('[name="alias"]')).to_have_value('English synthetic alias')
+    page.locator('input[name="checks"][value="cpu"]').check()
+    page.get_by_role('button',name='Save',exact=True).click()
+    expect(page.locator('#machine-dialog')).not_to_be_visible()
+    page.get_by_role('button',name='Remove node',exact=True).click()
+    expect(page.locator('#remove-description')).to_contain_text('This cannot be undone.')
+    page.get_by_role('button',name='Confirm removal',exact=True).click()
+    expect(page.locator('#remove-error')).to_contain_text('Could not remove.')
+    expect(page.locator('#remove-error')).to_contain_text('合成验证错误')
+    page.keyboard.press('Escape')
+    page.get_by_role('button',name='Overview',exact=True).first.click()
+    page.get_by_role('button',name='Add machine',exact=True).click()
+    page.locator('[name="host"]').fill('unreachable.invalid')
+    page.get_by_role('button',name='Save',exact=True).click()
+    expect(page.locator('#machine-error')).to_contain_text('Could not save.')
+    page.screenshot(path=str(OUT/'english-validation.png'), full_page=True)
+    page.keyboard.press('Escape')
+    mode = 'empty'
+    page.reload()
+    expect(page.locator('#host-rows')).to_contain_text('No machines yet.')
+    mode = 'error'
+    page.reload()
+    expect(page.get_by_role('heading',name='Workbench unavailable')).to_be_visible()
+    mode = 'normal'
+    page.evaluate("localStorage.setItem('wattline.locale','unsupported')")
+    page.reload()
+    expect(page.locator('html')).to_have_attribute('lang','zh-CN')
+    expect(page.locator('#page-heading')).to_have_text('算力，一目了然')
+    # A separate page with blocked storage remains usable, including session switching.
+    blocked = browser.new_page()
+    blocked.route('**/*',handle)
+    blocked.add_init_script("Object.defineProperty(window,'localStorage',{get(){throw new Error('blocked')}})")
+    blocked.goto('http://wattline.test')
+    expect(blocked.locator('#page-heading')).to_have_text('算力，一目了然')
+    blocked.locator('#locale-select').select_option('en')
+    expect(blocked.locator('#page-heading')).to_have_text('Compute at a glance')
+    blocked.close()
+    assert not errors, errors
+
     print(json.dumps({"result":"PASS", "browser":browser.version, "page_errors":errors,
-                      "mutations":len(mutations), "screenshots":10,
+                      "mutations":len(mutations), "screenshots":14, "locales":["zh-CN","en"],
                       "metric_layouts":layout_results, "focus_refreshes":focus_results}, ensure_ascii=False))
     browser.close()

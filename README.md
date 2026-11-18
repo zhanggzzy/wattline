@@ -1,6 +1,6 @@
 # Wattline
 
-A standalone workbench for monitoring Linux machines and NVIDIA GPUs over SSH. The web interface is in Simplified Chinese.
+A standalone workbench for monitoring Linux machines and NVIDIA GPUs over SSH. The web interface supports Simplified Chinese (default) and English, with a persistent language selector in the top bar. See [localization](docs/localization.md) for preferences, fallback rules and adding languages.
 
 - The background sampler collects machine health, CPU and memory, GPU utilization, VRAM, temperature and power. The GPU process view shows Linux user and workload evidence when available.
 - Enroll machines from the overview, set per-machine checks and polling intervals, drag to reorder, and remove nodes with their monitoring data.
@@ -42,6 +42,7 @@ service or SSH connection is started):
 ~~~sh
 python -m pip install -e '.[test,browser-test]'
 python -m playwright install chromium
+node tools/test_i18n.cjs
 python tools/browser_smoke.py
 ~~~
 

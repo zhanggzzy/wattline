@@ -322,3 +322,8 @@ dialog::backdrop { overflow: hidden; overscroll-behavior: contain; }
   .status, .meter, .metric, .panel, .rail-nav[aria-current] { border: 1px solid CanvasText; }
   .meter::before { background: Highlight; }
 }
+
+[data-localizing] body { visibility: hidden; }
+.locale-control { display: flex; align-items: center; gap: .35rem; font-size: .75rem; }
+.locale-control select { max-width: 7rem; padding: .3rem; border: 1px solid #c7d8ce; border-radius: .35rem; background: #fff; color: #234b3e; }
+@media (max-width: 515px) { .locale-control > span { display: none; } .top-actions { flex-wrap: wrap; justify-content: flex-end; } }

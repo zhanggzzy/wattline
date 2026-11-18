@@ -87,6 +87,8 @@ function renderPage(force = false) {
   layoutKey = shape;
   const focused = document.activeElement;
   const focusId = focused?.id;
+  const focusContainerId = focused?.parentElement?.closest('[id]')?.id;
+  const focusClass = focused?.className;
   const focusData = focused?.tagName === 'BUTTON' ? Object.entries(focused.dataset) : [];
   const inputFocused = document.activeElement?.id === 'host-search';
   const focusedSort = document.activeElement?.dataset.sortHost;
@@ -120,9 +122,20 @@ function renderPage(force = false) {
   bindChart();
   // Snapshot refreshes may replace controls; keep keyboard users on the same action.
   if (focused && !focused.isConnected) {
-    const replacement = (focusId && byId(focusId)) || [...document.querySelectorAll('button')].find(
-      button => focusData.length && focusData.every(([key,value]) => button.dataset[key] === value));
+    // Rows, attention items and rail links can share data-host. Restore within
+    // the original container and control kind, not the first global match.
+    const controls = byId(focusContainerId)?.querySelectorAll('button') || [];
+    const replacement = (focusId && byId(focusId)) || [...controls].find(button =>
+      button.className === focusClass && focusData.length &&
+      Object.keys(button.dataset).length === focusData.length &&
+      focusData.every(([key,value]) => button.dataset[key] === value));
     replacement?.focus({preventScroll:true});
+    if (replacement) {
+      const rect = replacement.getBoundingClientRect();
+      if (rect.top < 0 || rect.bottom > innerHeight || rect.left < 0 || rect.right > innerWidth) {
+        replacement.scrollIntoView({block:'nearest', inline:'nearest'});
+      }
+    }
   }
 }
 

@@ -81,6 +81,40 @@ with sync_playwright() as p:
     page.goto("http://wattline.test")
     expect(page.locator("#host-rows tr")).to_have_count(3)
     expect(page.locator("#chart-summary")).to_contain_text("11 个有效时段")
+    # A tile can clip its number even when the document fits the viewport.
+    layout_widths = [320, 390, 514, 515, 516, 640, 729, 730, 731, 732,
+                     759, 760, 761, 974, 975, 976, 977, 1024, 1440]
+    page.evaluate("""() => {
+      for (const host of state.snapshot.machines) {
+        if (host.metrics) {
+          host.metrics.gpu_power_w = 1234;
+          for (const gpu of host.metrics.gpus) gpu.power_w = 1234;
+        }
+      }
+      paint();
+    }""")
+    expect(page.locator('.metric [data-value="watts"]')).to_have_text("2,468")
+    layout_results = []
+    for width in layout_widths:
+        page.set_viewport_size({"width":width,"height":1100})
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), width
+        tiles = page.locator(".metric").evaluate_all("""tiles => tiles.map(tile => {
+          const card = tile.getBoundingClientRect();
+          const value = tile.querySelector('strong .value');
+          const range = document.createRange();
+          range.selectNodeContents(value);
+          const text = range.getBoundingClientRect();
+          return {value: value.textContent, left: text.left, right: text.right,
+                  cardLeft: card.left, cardRight: card.right,
+                  fits: text.left >= card.left && text.right <= card.right};
+        })""")
+        assert len(tiles) == 4 and all(tile["fits"] for tile in tiles), (width, tiles)
+        layout_results.append({"width":width, "values_fit":True})
+        if width in [731, 760]:
+            page.locator(".metrics").screenshot(path=str(OUT/f"metrics-{width}.png"))
+    page.set_viewport_size({"width":1440,"height":1100})
+    page.reload()
+    expect(page.locator("#host-rows tr")).to_have_count(3)
     page.screenshot(path=str(OUT/"desktop.png"), full_page=True)
     page.get_by_role("button", name="需关注", exact=True).click()
     expect(page.locator("#host-rows")).to_contain_text("没有符合条件")
@@ -121,11 +155,31 @@ with sync_playwright() as p:
     page.get_by_role("button", name="保存", exact=True).click()
     expect(page.locator("#machine-error")).to_contain_text("合成验证错误")
     page.keyboard.press("Escape")
-    # A snapshot-driven re-render preserves focus on a navigation control.
-    nav = page.locator('[data-host="demo-2"]').first
-    nav.focus()
-    page.evaluate("state.snapshot.machines[0].reason = 'changed'; renderPage(); paint()")
-    expect(page.locator('[data-host="demo-2"]').first).to_be_focused()
+    # Rebuild the shape while focus is in a row, attention item, or rail.
+    # These controls share data-host: global .first() would hide a focus jump.
+    focus_results = []
+    for width in [390, 731, 1440]:
+        page.set_viewport_size({"width":width,"height":700})
+        for selector in ['#host-rows [data-host="demo-2"]',
+                         '#content .issue[data-host="demo-3"]',
+                         '#rail-nav [data-host="demo-2"]']:
+            control = page.locator(selector)
+            control.scroll_into_view_if_needed()
+            control.focus()
+            expect(control).to_be_focused()
+            # Assert an actual replacement occurred, not the no-op render path.
+            previous = control.element_handle()
+            page.evaluate("state.snapshot.machines[0].reason += 'changed'; renderPage(); paint()")
+            assert previous.evaluate("el => !el.isConnected")
+            expect(control).to_be_focused()
+            assert control.evaluate("""el => {
+              const r = el.getBoundingClientRect();
+              return r.top >= 0 && r.bottom <= innerHeight &&
+                     r.left >= 0 && r.right <= innerWidth;
+            }"""), (width, selector)
+            focus_results.append({"width":width, "selector":selector, "visible":True})
+            if width == 390 and selector.startswith("#host-rows"):
+                page.screenshot(path=str(OUT/"focus-row-390.png"))
     mode = "empty"
     page.reload()
     expect(page.locator("#host-rows")).to_contain_text("尚未添加机器")
@@ -159,5 +213,6 @@ with sync_playwright() as p:
     assert any(path.endswith("/order") for _,path,_ in mutations)
     assert any(path.endswith("/settings") for _,path,_ in mutations)
     print(json.dumps({"result":"PASS", "browser":browser.version, "page_errors":errors,
-                      "mutations":len(mutations), "screenshots":7}, ensure_ascii=False))
+                      "mutations":len(mutations), "screenshots":10,
+                      "metric_layouts":layout_results, "focus_refreshes":focus_results}, ensure_ascii=False))
     browser.close()

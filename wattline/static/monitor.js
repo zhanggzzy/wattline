@@ -74,17 +74,20 @@ function navigation(hosts, host) {
 }
 
 function renderPage(force = false) {
-  if (rowDrag) return;
+  if (rowDrag || document.querySelector('dialog[open]')) return;
   const hosts = nodes();
   const host = hosts.find(node => node.id === state.machine);
   const device = getDevice(host);
-  const shape = JSON.stringify([host?.id, device?.uuid, state.filter, state.snapshot?.registry_loaded,
+  const shape = JSON.stringify([host?.id, device?.uuid, state.filter, state.syncFailed, state.snapshot?.registry_loaded,
     hosts.map(node => [node.id, node.name, node.address, node.status, node.require_gpu, node.scope, checks(node), reason(node)]),
     host?.devices, host?.metrics?.gpus.map(gpu => [gpu.uuid, gpu.state, gpu.process_visibility,
       gpu.processes.map(proc => [proc.pid, proc.name, proc.uid, proc.user, proc.workload, proc.used_memory_mib])]),
     host?.metrics?.driver_version, unlimitedMemory(host)]);
   if (!force && shape === layoutKey) return;
   layoutKey = shape;
+  const focused = document.activeElement;
+  const focusId = focused?.id;
+  const focusData = focused?.tagName === 'BUTTON' ? Object.entries(focused.dataset) : [];
   const inputFocused = document.activeElement?.id === 'host-search';
   const focusedSort = document.activeElement?.dataset.sortHost;
   const caret = inputFocused ? document.activeElement.selectionStart : null;
@@ -95,7 +98,10 @@ function renderPage(force = false) {
   navigation(hosts, host);
   const content = byId('content');
   if (!state.snapshot) {
-    content.setAttribute('aria-busy', 'true');
+    content.setAttribute('aria-busy', String(!state.syncFailed));
+    content.innerHTML = state.syncFailed
+      ? '<div class="loading-state" role="status"><h1>暂时无法连接工作台</h1><p>尚未取得机器清单，将自动重试。请检查监控服务连接。</p></div>'
+      : '<div class="loading-state" role="status"><span class="loading-mark" aria-hidden="true"></span><h1>正在连接工作台</h1><p>正在读取机器清单与最新样本…</p></div>';
     return;
   }
   content.removeAttribute('aria-busy');
@@ -112,12 +118,18 @@ function renderPage(force = false) {
   }
   if (deviceExpanded && byId('smi')) byId('smi').open = true;
   bindChart();
+  // Snapshot refreshes may replace controls; keep keyboard users on the same action.
+  if (focused && !focused.isConnected) {
+    const replacement = (focusId && byId(focusId)) || [...document.querySelectorAll('button')].find(
+      button => focusData.length && focusData.every(([key,value]) => button.dataset[key] === value));
+    replacement?.focus({preventScroll:true});
+  }
 }
 
 function overviewPage(hosts) {
   const issues = hosts.filter(host => ['warning','offline','unknown','stale'].includes(host.status));
   const filters = [['all','全部'],['normal','正常'],['warning','需关注'],['unavailable','不可用']];
-  return `<section class="page-title"><div>${heading('机器总览')}
+  return `<section class="page-title"><div><p class="eyebrow">WATTLINE / OVERVIEW</p>${heading('算力，一目了然')}
       <p>查看机器与物理 GPU 的当前状态和最近 24 小时趋势。</p></div>
       <button type="button" class="control primary-control" data-add-machine ${configUnavailable() ? 'disabled' : ''}>新增机器</button></section>
     <section class="metrics" aria-label="当前采样概览">
@@ -132,7 +144,7 @@ function overviewPage(hosts) {
         ${filters.map(([key,label]) => toggle(label, 'data-filter', key, state.filter === key)).join('')}
         </div><input class="search" id="host-search" type="search" aria-label="搜索机器" placeholder="搜索名称或地址"></div>
       <p id="order-message" class="order-message" role="status" ${orderMessage ? '' : 'hidden'}>${escape(orderMessage)}</p>
-      <div class="scroll"><table class="machine-table">
+      <div class="scroll machine-scroll" tabindex="0" role="region" aria-label="机器列表"><table class="machine-table">
         <thead><tr><th>机器</th><th>状态</th><th><span class="wide-label">GPU 利用率</span><span class="compact-label" title="GPU 平均利用率">GPU</span></th>
         <th aria-label="GPU 功耗"><span class="power-label">GPU 功耗</span><span class="narrow-power-label">功耗</span></th><th>CPU</th><th>内存</th></tr></thead>
         <tbody id="host-rows"></tbody></table></div>
@@ -162,10 +174,10 @@ function drawRows(hosts) {
       <button type="button" class="row-open" data-host="${escape(node.id)}" aria-label="查看 ${escape(node.name)}">
       ${machineIcon}<span><strong>${escape(node.name)}</strong><small class="mono">${escape(node.address)}</small>
       ${node.scope === 'container' ? '<small>容器视角</small>' : ''}</span></button></div></td>
-    <td>${status(node.status, machineStates[node.status])}</td>
-    ${['gpu','power','cpu','memory'].map(key => `<td class="number-cell">${field(node.id+'-'+key)}
+    <td data-label="状态">${status(node.status, machineStates[node.status])}</td>
+    ${['gpu','power','cpu','memory'].map(key => `<td class="number-cell" data-label="${{gpu:'GPU 利用率',power:'GPU 功耗',cpu:'CPU',memory:'内存'}[key]}">${field(node.id+'-'+key)}
       ${key === 'power' ? '' : meter(node.id+'-'+key, key === 'memory' ? 'memory' : '')}</td>`).join('')}
-  </tr>`).join('') : '<tr><td colspan="6" class="empty">没有符合条件的机器。</td></tr>';
+  </tr>`).join('') : `<tr><td colspan="6" class="empty">${hosts.length ? '没有符合条件的机器，请调整筛选或搜索。' : '尚未添加机器。点击“新增机器”开始监控。'}</td></tr>`;
 }
 
 function showOrderMessage(message) {
@@ -269,8 +281,8 @@ function chartPanel(host, device) {
         .filter(([hours]) => hours <= (state.snapshot?.machine_history_hours ?? 24))
         .map(([hours,label]) => toggle(label,'data-range',hours,state.hours===hours)).join('')}</div></div>` : ''}
     <div class="plot ${host ? 'large' : ''}"><canvas id="trend-chart" tabindex="0" role="img"
-      aria-label="资源时间序列。聚焦后用左右方向键查看样本。"></canvas><div class="chart-tip" id="chart-tip" hidden></div></div>
-    <div class="chart-legend" id="chart-legend"></div><p class="chart-error" id="chart-error" hidden>历史指标暂不可读取</p>
+      aria-label="资源时间序列。聚焦后用左右方向键查看样本。" aria-describedby="chart-summary"></canvas><div class="chart-tip" id="chart-tip" hidden></div></div>
+    <p class="chart-summary" id="chart-summary"></p><div class="sr-only" id="chart-announcement" role="status"></div><div class="chart-legend" id="chart-legend"></div><p class="chart-error" id="chart-error" hidden>历史指标暂不可读取</p>
   </section>`;
 }
 
@@ -280,7 +292,7 @@ function hostPage(host, device) {
   const container = host.scope === 'container';
   const unlimited = unlimitedMemory(host);
   const active = checks(host);
-  return `<section class="page-title"><div>${heading(host.name,statusBadge)}
+  return `<section class="page-title"><div><p class="eyebrow">WATTLINE / NODE</p>${heading(host.name,statusBadge)}
     <p><span class="mono">${escape(host.address)}</span> · ${host.mode==='ssh' ? 'SSH' : '本机'}
     ${container ? ' · 容器视角' : ''}${device ? ' · '+escape(device.name || 'NVIDIA GPU') : ''}</p></div>
     <div class="title-actions"><span class="time">最近有效采样 ${field('host-time')}</span>
@@ -356,7 +368,7 @@ function processTable(host, device) {
   }
   return `<section class="panel">
     <div class="panel-head"><h2>当前 GPU 进程</h2><small>${device ? 'GPU '+device.index : '整机'} · ${rows.length} 条可见记录</small></div>
-    ${rows.length ? `<div class="scroll"><table class="process-table">
+    ${rows.length ? `<div class="scroll" tabindex="0" role="region" aria-label="GPU 进程列表"><table class="process-table">
       <thead><tr><th>进程 / PID</th><th>宿主账户</th><th>归属证据</th><th>设备</th><th>进程显存</th></tr></thead>
       <tbody>${rows.map(({gpu,process}) => `<tr><td><strong>${escape(process.name || '未核实')}</strong><small class="mono">PID ${escape(process.pid)}</small></td>
       <td>${escape(process.user || (process.uid == null ? '未核实' : 'UID '+process.uid))}
@@ -570,6 +582,9 @@ function bindChart() {
     else if (chart.points.length) chart.keyboardAt = clamp((chart.keyboardAt ?? chart.points.length-1)
       + (event.key === 'ArrowLeft' ? -1 : 1),0,chart.points.length-1);
     drawChart();
+    const point = chart.points[chart.keyboardAt];
+    byId('chart-announcement').textContent = point
+      ? tooltipTime.format(point.time)+'，'+chartSeries().map((item,i) => item.label+' '+fmt(point.values[i],item.unit,1)).join('，') : '';
   });
   canvas.addEventListener('blur',() => {chart.keyboardAt = null;drawChart();});
   drawChart();
@@ -637,6 +652,11 @@ function drawChart() {
     ctx.textAlign = i === 0 ? 'left' : i === intervals ? 'right' : 'center';
     ctx.fillText(tickFormat.format(timestamp),x(timestamp),bottom+13);
   }
+  const valid = points.filter(point => point.values.some(Number.isFinite));
+  byId('chart-summary').textContent = state.historyError ? '历史读取失败，稍后自动重试。'
+    : !history ? '正在读取历史样本…' : !valid.length ? '所选窗口暂无有效样本。'
+    : valid.length+' 个有效时段 · 最近 '+series.map((item,i) =>
+      item.label+' '+fmt(valid.at(-1).values[i],item.unit,1)).join(' / ');
   const bucket = history?.bucket_ms;
   byId('chart-legend').innerHTML = series.map(item =>
     '<span><i class="legend-line" aria-hidden="true" data-series="'+item.key+'"></i>'+item.label+

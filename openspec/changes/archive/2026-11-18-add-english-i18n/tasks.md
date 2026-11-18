@@ -14,8 +14,8 @@
 - [x] 3a.2 Run Python, i18n, JS, browser and strict checks; record results and deliver a reviewable rework commit.
 
 ## 4. Independent handoff
-- [ ] 4.1 Independent reviewer verifies change, diff and checks; Mika records review conclusion.
-- [ ] 4.2 Mika integrates reviewed commit and verifies remote main SHA.
+- [x] 4.1 Independent reviewer verifies change, diff and checks; Mika records review conclusion.
+- [x] 4.2 Mika integrates reviewed commit and verifies remote main SHA.
 
 ## Workflow follow-up
 - After independent review passes, synchronize specs and archive with official skills.

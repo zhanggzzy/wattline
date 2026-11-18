@@ -21,3 +21,12 @@ Provide a small native localization boundary and bilingual UX. Preserve monitori
 
 ## Migration Plan
 Static assets ship together through normal package data. No database migration. Revert the commit to roll back. Mika owns review, main integration and any separately authorized deployment.
+
+## AN-43 round 1 refinement (2026-11-18)
+The review found that action handlers destroy nested translation markers when
+writing button textContent. Place data-i18n on each action button itself, and
+update its message key together with its text for busy and restored states.
+This preserves the existing DOM translation contract across repeated operations
+and locale switches. Add/settings/remove success and failure must retain the
+correct visible text and accessible name after switching both ways without reload.
+This refines the existing bilingual behavior; API and architecture scope are unchanged.

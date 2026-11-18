@@ -9,6 +9,10 @@
 ## 3. Integration verification
 - [x] 3.1 Run Python regression, JS syntax, packaging, browser smoke, strict validation and diff checks; record actual evidence and limits.
 
+## 3a. AN-43 rework round 1
+- [x] 3a.1 Preserve action-button localization across busy/restored states; verify add/settings/remove success/failure and both locale directions without reload in browser smoke.
+- [x] 3a.2 Run Python, i18n, JS, browser and strict checks; record results and deliver a reviewable rework commit.
+
 ## 4. Independent handoff
 - [ ] 4.1 Independent reviewer verifies change, diff and checks; Mika records review conclusion.
 - [ ] 4.2 Mika integrates reviewed commit and verifies remote main SHA.

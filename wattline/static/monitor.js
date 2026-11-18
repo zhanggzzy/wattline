@@ -709,6 +709,12 @@ function openHost(id) {
   byId('page-heading')?.focus({preventScroll:true});
 }
 
+// Keep the marker on the button so text replacement cannot remove localization.
+function setButtonLabel(button, key) {
+  button.dataset.i18n = key;
+  button.textContent = t(key);
+}
+
 const machineDialog = byId('machine-dialog');
 const machineForm = byId('machine-form');
 const machineFields = byId('machine-fields');
@@ -778,7 +784,7 @@ machineForm.addEventListener('submit', async event => {
     settings.ssh_user = fields.get('ssh_user').trim() || null;
   }
   machineSave.disabled = machineCancel.disabled = machineFields.disabled = true;
-  machineSave.textContent = id ? t('saving') : t('verifying_connection');
+  setButtonLabel(machineSave, id ? 'saving' : 'verifying_connection');
   machineError.hidden = true;
   try {
     const response = await fetch(id ? '/api/machines/'+encodeURIComponent(id)+'/settings' : '/api/machines', {
@@ -808,7 +814,7 @@ machineForm.addEventListener('submit', async event => {
     machineError.hidden = false;
   } finally {
     machineSave.disabled = machineCancel.disabled = machineFields.disabled = false;
-    machineSave.textContent = t('save');
+    setButtonLabel(machineSave, 'save');
   }
 });
 
@@ -835,7 +841,7 @@ removeForm.addEventListener('submit', async event => {
   if (removeConfirm.disabled) return;
   const id = removeForm.dataset.machine;
   removeConfirm.disabled = removeCancel.disabled = true;
-  removeConfirm.textContent = t('removing');
+  setButtonLabel(removeConfirm, 'removing');
   removeError.hidden = true;
   try {
     const response = await fetch('/api/machines/'+encodeURIComponent(id), {
@@ -853,7 +859,7 @@ removeForm.addEventListener('submit', async event => {
     removeError.hidden = false;
   } finally {
     removeConfirm.disabled = removeCancel.disabled = false;
-    removeConfirm.textContent = t('confirm_removal');
+    setButtonLabel(removeConfirm, 'confirm_removal');
   }
 });
 

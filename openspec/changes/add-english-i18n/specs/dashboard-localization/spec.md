@@ -10,6 +10,10 @@ The dashboard SHALL present navigation, overview, machine/GPU details, charts, f
 - **WHEN** an operator chooses English and opens machine/GPU details or configuration/removal dialogs
 - **THEN** dashboard labels, chart descriptions and application validation messages use English while identifiers remain intact
 
+#### Scenario: Switch language after a machine mutation
+- **WHEN** an operator saves or removes a machine successfully or unsuccessfully, closes the dialog, switches between Chinese and English, and reopens without reloading
+- **THEN** action buttons use the selected language in visible text and accessible names, and show the proper busy/restored labels during submissions
+
 ### Requirement: Stable language preference
 The dashboard SHALL default to Chinese, offer an accessible language selector, persist supported preferences in browser storage, and fall back to Chinese for unsupported preferences or unavailable storage. Selected language SHALL apply before dashboard content becomes visible and update document language.
 

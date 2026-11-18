@@ -72,6 +72,93 @@ def handle(route):
         return route.fulfill(json=n)
     return route.fulfill(status=422, json={"detail":"合成验证错误：地址不可达"})
 
+def check_dialog_locales(browser):
+    """Exercise real submissions, hold busy states, then switch without navigation."""
+    global machines
+    results = []
+    labels = {
+        'zh-CN': {'save':'保存', 'confirm':'确认移除', 'add_busy':'验证连接…',
+                  'settings_busy':'保存中…', 'remove_busy':'移除中…'},
+        'en': {'save':'Save', 'confirm':'Confirm removal', 'add_busy':'Verifying connection…',
+               'settings_busy':'Saving…', 'remove_busy':'Removing…'},
+    }
+    for source, target in [('zh-CN','en'), ('en','zh-CN')]:
+        for action in ['add','settings','remove']:
+            for success in [True, False]:
+                machines = [node(1),node(2)]
+                test_page = browser.new_page(viewport={'width':1440,'height':1100})
+                page_errors, pending = [], []
+                test_page.on('pageerror', lambda error: page_errors.append(str(error)))
+                test_page.route('**/*', handle)
+                test_page.route('**/api/machines**', lambda route: pending.append(route))
+                test_page.goto('http://wattline.test')
+                expect(test_page.locator('#host-rows tr')).to_have_count(2)
+                test_page.evaluate('window.dialogTestDocument = {}')
+                document_handle = test_page.evaluate_handle('window.dialogTestDocument')
+                test_page.locator('#locale-select').select_option(source)
+
+                def open_dialog(machine_id='demo-1'):
+                    if action == 'add':
+                        test_page.locator('[data-overview]').first.click()
+                        test_page.locator('[data-add-machine]').click()
+                    else:
+                        test_page.locator('#rail-nav [data-host="'+machine_id+'"]').click()
+                        test_page.locator('[data-configure-machine]' if action == 'settings'
+                                          else '[data-remove-machine]').click()
+
+                open_dialog()
+                button = test_page.locator('#remove-confirm' if action == 'remove' else '#machine-save')
+                idle_key = 'confirm' if action == 'remove' else 'save'
+                expect(button).to_have_text(labels[source][idle_key])
+                expect(button).to_have_accessible_name(labels[source][idle_key])
+                if action == 'add':
+                    test_page.locator('[name="host"]').fill('synthetic.invalid')
+                if action != 'remove':
+                    test_page.locator('[name="alias"]').fill('Dialog matrix alias')
+                button.click()
+                expect(button).to_have_text(labels[source][action+'_busy'])
+                expect(button).to_have_accessible_name(labels[source][action+'_busy'])
+                expect(button).to_be_disabled()
+                # Reapplying localization must retain the active operation's busy label.
+                test_page.evaluate('WattlineI18n.apply()')
+                expect(button).to_have_text(labels[source][action+'_busy'])
+                assert len(pending) == 1
+                route = pending.pop()
+                if not success:
+                    route.fulfill(status=422,json={'detail':'synthetic mutation failure'})
+                    expect(test_page.locator('#remove-error' if action == 'remove' else '#machine-error')).to_be_visible()
+                elif action == 'remove':
+                    machines = [machine for machine in machines if machine['id'] != 'demo-1']
+                    route.fulfill(json={'removed':True,'cleanup_pending':False})
+                else:
+                    saved = node(3) if action == 'add' else machines[0]
+                    saved.update(route.request.post_data_json)
+                    saved['name'] = saved['alias']
+                    if action == 'add':
+                        machines.append(saved)
+                    route.fulfill(json=saved)
+                expect(button).to_be_enabled()
+                expect(button).to_have_text(labels[source][idle_key])
+                if success:
+                    expect(test_page.locator('#remove-dialog' if action == 'remove' else '#machine-dialog')).not_to_be_visible()
+                else:
+                    expect(button).to_have_accessible_name(labels[source][idle_key])
+                    test_page.keyboard.press('Escape')
+                test_page.locator('#locale-select').select_option(target)
+                open_dialog('demo-2' if action == 'remove' and success else 'demo-1')
+                expect(button).to_have_text(labels[target][idle_key])
+                expect(button).to_have_accessible_name(labels[target][idle_key])
+                expect(button).to_be_enabled()
+                assert test_page.evaluate('(original) => window.dialogTestDocument === original',document_handle)
+                assert not page_errors, page_errors
+                result = {'source':source,'target':target,'action':action,'success':success,
+                          'label':button.inner_text(),'no_reload':True,'page_errors':page_errors}
+                results.append(result)
+                if action in ['add','remove'] and not success:
+                    test_page.screenshot(path=str(OUT/f'dialog-{action}-{source}-to-{target}.png'))
+                test_page.close()
+    return results
+
 with sync_playwright() as p:
     browser = p.chromium.launch(**({"executable_path":args.browser} if args.browser else {}))
     page = browser.new_page(viewport={"width":1440,"height":1100}, device_scale_factor=1)
@@ -306,7 +393,9 @@ with sync_playwright() as p:
     blocked.close()
     assert not errors, errors
 
+    page.close()
+    dialog_locales = check_dialog_locales(browser)
     print(json.dumps({"result":"PASS", "browser":browser.version, "page_errors":errors,
-                      "mutations":len(mutations), "screenshots":14, "locales":["zh-CN","en"],
+                      "mutations":len(mutations), "screenshots":18, "locales":["zh-CN","en"], "dialog_locales":dialog_locales,
                       "metric_layouts":layout_results, "focus_refreshes":focus_results}, ensure_ascii=False))
     browser.close()

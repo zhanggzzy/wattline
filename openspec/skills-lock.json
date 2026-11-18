@@ -1,0 +1,13 @@
+{
+  "openspecCliVersion": "1.14.2",
+  "source": "Authorized workspace official skills, originally reused unchanged from AlayaJet-MaaS .agents/skills; metadata generatedBy 1.14.2",
+  "verification": "SHA-256 over unchanged SKILL.md bytes; compared byte-for-byte with the workspace skills on 2026-11-18",
+  "sha256": {
+    ".agents/skills/openspec-propose/SKILL.md": "c634cb2e46f17f8daaf8ccbb02b5a61d89e3d2ff5d616b72e1cdb0e5ed37401b",
+    ".agents/skills/openspec-apply-change/SKILL.md": "3293c6dc09dc1de6259a65b76e1c22f352c5342d4e5fa6566583cf7418d33998",
+    ".agents/skills/openspec-update-change/SKILL.md": "f2034d76337ff1a60c891993108bbf5a08af8782961fc1c2862d5cf5b9ee8028",
+    ".agents/skills/openspec-sync-specs/SKILL.md": "8f9276bc6c59ddaf09350301cd19c1442188ecb15c369c2ee07f6b53272ba37d",
+    ".agents/skills/openspec-archive-change/SKILL.md": "37bebbaf12073286d59cf3859c9a692c3dfba8437b90f4bf0ed2853981377eec",
+    ".agents/skills/openspec-explore/SKILL.md": "7d435629c7cad4c6028ad529144210adb0f5ace3eb74a8d78074e48b178670e6"
+  }
+}

@@ -48,4 +48,17 @@ python tools/browser_smoke.py
 Screenshots are written to the ignored `artifacts/` directory. An existing
 Chromium binary can be supplied with `--browser /path/to/chromium`.
 See [design and verification notes](docs/frontend-redesign.md) for guidance
-sources, coverage, compatibility, and deployment handoff.
+sources, coverage, compatibility, and review handoff.
+
+## Development changes
+
+All source, tests, configuration, dependency, build script, and repository
+documentation changes follow the versioned [repository instructions](AGENTS.md)
+and [OpenSpec workflow](openspec/README.md). Use the six unchanged official
+skills in `.agents/skills/` and the pinned OpenSpec CLI **1.14.2**.
+
+The [AN-25 retrospective](docs/history/an25-frontend-retrospective.md) records
+the frontend work merged in PR #2, its independent review and known limitations.
+It was written after implementation; that frontend change did not use OpenSpec.
+Product maintenance delivers reviewed main commits. Instance updates remain a
+separate deployment session requested by the user.

@@ -1,0 +1,16 @@
+schema: spec-driven
+context: |
+  Product maintenance and user-instance deployment are separate responsibilities.
+  Mika integrates main only after necessary checks and independent review.
+  Do not read private node configurations or run real collection for development.
+  Use synthetic fixtures and temporary data. Documents stay local unless requested.
+  Historical backfills must identify retrospective authorship and actual event dates.
+rules:
+  proposal:
+    - State the issue, scope, acceptance conditions, and compatibility impact.
+  tasks:
+    - Keep independent review and unfinished integration work unchecked.
+operations:
+  archive:
+    guidance:
+      - Archive only after implementation, verification and independent review pass.

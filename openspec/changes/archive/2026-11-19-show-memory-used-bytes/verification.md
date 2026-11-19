@@ -66,3 +66,11 @@ The reviewer independently passed pytest (16 tests), JavaScript syntax, i18n (26
 Evidence: Multica AN-46 final comment `01a1f1a6-79aa-7dbd-897e-8246acf7e332`; report attachment `01a1f1a6-799b-79c8-be45-59c59bd46d69` (AN-46-review.md); reproducible scripts/results/screenshots attachment `01a1f1a6-79a5-7809-a0b2-ab3fc2320081` (AN-46-review-evidence.zip). The source bundle exports HEAD rather than the branch name; import with `git fetch <bundle> HEAD:an47-review` when using the attached bundle.
 
 Mika integrated the exact reviewed commits by fast-forward in a dedicated task checkout and synchronized all four ADDED requirements into the new `dashboard-memory-metrics` main spec, preserving the delta Purpose verbatim. No implementation code changed after independent review. Integration checks: OpenSpec 1.14.2 `validate --specs --strict` (3 specs), `validate show-memory-used-bytes --strict`, `node --check wattline/static/monitor.js`, `node tools/test_i18n.cjs` (261 keys), and `git diff --check` all exited 0. No redundant application test run was needed because the reviewed implementation is unchanged.
+
+## Remote integration and archive (2026-11-19)
+
+`git push origin HEAD:main` fast-forwarded remote main from `5dc41ba` to `dd0259030696800a65e8ae8914831bf36a5182fc`. `git ls-remote origin refs/heads/main` returned the exact same SHA as local HEAD. This records actual completion of task 3.2, before archiving; the final archive commit follows this integration commit. No application code is changed by that follow-up.
+
+The task checkout's runtime-injected Git identity contained empty name/email, so the first commit attempt failed. The successful integration commit used command-scoped `-c user.name=zhiyi.zhang -c user.email=zhiyi.zhang@alayadb.com`, matching the requester and latest valid project history. No global, shared-repository or worktree Git configuration was changed; existing reviewed commits were not rewritten.
+
+All seven tracked tasks are complete. The delta's four ADDED requirements and Purpose were synchronized to the new main spec and validated strictly. The official archive workflow moves this change to `openspec/changes/archive/2026-11-19-show-memory-used-bytes/`. User acceptance remains pending on AN-45; no deployment, service operation or live collection occurred.

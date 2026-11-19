@@ -14,7 +14,7 @@
 ## 3. Review and delivery
 
 - [x] 3.1 Independent reviewer verifies the change, diff, screenshots and checks (AN-46 passed on 2026-11-19; see verification.md).
-- [ ] 3.2 Mika integrates the reviewed commit and verifies the remote SHA.
+- [x] 3.2 Mika integrates the reviewed commit and verifies the remote SHA (`dd0259030696800a65e8ae8914831bf36a5182fc`, origin/main, 2026-11-19).
 
 ## Workflow follow-up
 

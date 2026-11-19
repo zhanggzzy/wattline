@@ -159,6 +159,34 @@ def check_dialog_locales(browser):
                 test_page.close()
     return results
 
+def check_unlimited_container(browser):
+    """A container without a cgroup limit shows used GiB once, never a fabricated percent or zero."""
+    global machines
+    sample = node(1)
+    sample.update(scope='container', checks=['cpu', 'memory'])
+    sample['metrics']['memory'] = {'total_bytes': None, 'used_bytes': 1024**3, 'available_bytes': None}
+    sample['metrics']['memory_percent'] = None
+    machines = [sample]
+    test_page = browser.new_page(viewport={'width':1440,'height':1100})
+    page_errors = []
+    test_page.on('pageerror', lambda error: page_errors.append(str(error)))
+    test_page.route('**/*', handle)
+    test_page.goto('http://wattline.test')
+    expect(test_page.locator('#host-rows tr')).to_have_count(1)
+    cell = test_page.locator('#host-rows tr [data-label="内存"]')
+    expect(cell.locator('[data-value="demo-1-memory"]')).to_have_text('1.0 GiB')
+    expect(cell.locator('.memory-used')).to_be_hidden()
+    expect(cell).not_to_contain_text('0.0 GiB')
+    used_text = cell.locator('[data-value="demo-1-memory"]').inner_text()
+    test_page.get_by_role('button', name='查看 训练节点 Alpha', exact=True).click()
+    expect(test_page.locator('.metric [data-value="card-memory"]')).to_have_text('1.0')
+    expect(test_page.locator('.metric [data-value="memory-detail"]')).to_contain_text('无 cgroup 内存上限')
+    expect(test_page.locator('.metric [data-value="memory-detail"]')).not_to_contain_text('0.0 GiB')
+    test_page.screenshot(path=str(OUT/'container-unlimited.png'), full_page=True)
+    assert not page_errors, page_errors
+    test_page.close()
+    return {'used_text':used_text, 'duplicate_hidden':True, 'page_errors':page_errors}
+
 with sync_playwright() as p:
     browser = p.chromium.launch(**({"executable_path":args.browser} if args.browser else {}))
     page = browser.new_page(viewport={"width":1440,"height":1100}, device_scale_factor=1)
@@ -168,6 +196,12 @@ with sync_playwright() as p:
     page.goto("http://wattline.test")
     expect(page.locator("#host-rows tr")).to_have_count(3)
     expect(page.locator("#chart-summary")).to_contain_text("11 个有效时段")
+    alpha_memory = page.locator('#host-rows tr[data-machine-row="demo-1"] [data-label="内存"]')
+    expect(alpha_memory).to_contain_text("38%")
+    expect(alpha_memory.locator(".memory-used")).to_contain_text("48.0 GiB 已用")
+    offline_memory = page.locator('#host-rows tr[data-machine-row="demo-3"] [data-label="内存"]')
+    expect(offline_memory.locator(".memory-used")).to_be_hidden()
+    expect(offline_memory).not_to_contain_text("0.0 GiB")
     # A tile can clip its number even when the document fits the viewport.
     layout_widths = [320, 390, 514, 515, 516, 640, 729, 730, 731, 732,
                      759, 760, 761, 974, 975, 976, 977, 1024, 1440]
@@ -200,8 +234,13 @@ with sync_playwright() as p:
         if width in [731, 760]:
             page.locator(".metrics").screenshot(path=str(OUT/f"metrics-{width}.png"))
     page.set_viewport_size({"width":1440,"height":1100})
+    page.evaluate("delete state.snapshot.machines[0].metrics.memory.used_bytes; paint()")
+    expect(alpha_memory).to_contain_text("38%")
+    expect(alpha_memory.locator(".memory-used")).to_be_hidden()
+    expect(alpha_memory).not_to_contain_text("0.0 GiB")
     page.reload()
     expect(page.locator("#host-rows tr")).to_have_count(3)
+    expect(alpha_memory.locator(".memory-used")).to_contain_text("48.0 GiB 已用")
     page.screenshot(path=str(OUT/"desktop.png"), full_page=True)
     page.get_by_role("button", name="需关注", exact=True).click()
     expect(page.locator("#host-rows")).to_contain_text("没有符合条件")
@@ -214,6 +253,8 @@ with sync_playwright() as p:
     page.get_by_role("button", name="查看 训练节点 Alpha", exact=True).click()
     expect(page.get_by_role("heading", name="当前 GPU 进程")).to_be_visible()
     expect(page.locator(".process-table")).to_contain_text("demo-user")
+    expect(page.locator('.metric [data-value="card-memory"]')).to_have_text("38")
+    expect(page.locator('.metric [data-value="memory-detail"]')).to_have_text("48.0 GiB / 128.0 GiB 已用")
     page.get_by_role("button", name="查看 GPU 0", exact=True).click()
     expect(page.locator(".gpu-info")).to_contain_text("GPU-synthetic-01")
     page.get_by_role("button", name="7 天", exact=True).click()
@@ -237,6 +278,7 @@ with sync_playwright() as p:
     page.locator(".machine-scroll").screenshot(path=str(OUT/"mobile-list.png"))
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     expect(page.locator('#host-rows tr').first.locator('[data-label="内存"]')).to_be_visible()
+    expect(page.locator('#host-rows tr').first.locator('.memory-used')).to_contain_text("48.0 GiB 已用")
     page.get_by_role("button", name="新增机器", exact=True).click()
     page.locator('[name="host"]').fill("unreachable.invalid")
     page.get_by_role("button", name="保存", exact=True).click()
@@ -315,6 +357,7 @@ with sync_playwright() as p:
     page.reload()
     expect(page.locator('html')).to_have_attribute('lang','en')
     expect(page.locator('#page-heading')).to_have_text('Compute at a glance')
+    expect(page.locator('#host-rows tr[data-machine-row="demo-1"] [data-label="Memory"] .memory-used')).to_contain_text('48.0 GiB used')
     page.screenshot(path=str(OUT/'english-overview.png'), full_page=True)
     for width in layout_widths:
         page.set_viewport_size({"width":width,"height":1100})
@@ -333,6 +376,7 @@ with sync_playwright() as p:
     page.locator('#host-rows [data-host="demo-2"]').click()
     expect(page.get_by_role('heading',name='Current GPU processes')).to_be_visible()
     expect(page.locator('.process-table')).to_contain_text('demo-user')
+    expect(page.locator('.metric [data-value="memory-detail"]')).to_have_text('48.0 GiB / 128.0 GiB used')
     page.get_by_role('button',name='View GPU 0',exact=True).click()
     expect(page.get_by_role('heading',name='GPU 0 device information')).to_be_visible()
     page.get_by_role('button',name='7 days',exact=True).click()
@@ -395,7 +439,9 @@ with sync_playwright() as p:
 
     page.close()
     dialog_locales = check_dialog_locales(browser)
+    unlimited_container = check_unlimited_container(browser)
     print(json.dumps({"result":"PASS", "browser":browser.version, "page_errors":errors,
-                      "mutations":len(mutations), "screenshots":18, "locales":["zh-CN","en"], "dialog_locales":dialog_locales,
-                      "metric_layouts":layout_results, "focus_refreshes":focus_results}, ensure_ascii=False))
+                      "mutations":len(mutations), "screenshots":19, "locales":["zh-CN","en"], "dialog_locales":dialog_locales,
+                      "metric_layouts":layout_results, "focus_refreshes":focus_results,
+                      "unlimited_container":unlimited_container}, ensure_ascii=False))
     browser.close()

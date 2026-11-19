@@ -196,7 +196,8 @@ function drawRows(hosts) {
       ${node.scope === 'container' ? `<small>${t('container_scope')}</small>` : ''}</span></button></div></td>
     <td data-label="${t('status')}">${status(node.status, machineStates[node.status])}</td>
     ${['gpu','power','cpu','memory'].map(key => `<td class="number-cell" data-label="${{gpu:t('gpu_utilization'),power:t('gpu_power'),cpu:'CPU',memory:t('memory')}[key]}">${field(node.id+'-'+key)}
-      ${key === 'power' ? '' : meter(node.id+'-'+key, key === 'memory' ? 'memory' : '')}</td>`).join('')}
+      ${key === 'power' ? '' : meter(node.id+'-'+key, key === 'memory' ? 'memory' : '')}
+      ${key === 'memory' ? `<small class="memory-used">· ${field(node.id+'-memory-used')}<span>${t('used')}</span></small>` : ''}</td>`).join('')}
   </tr>`).join('') : `<tr><td colspan="6" class="empty">${hosts.length ? t('no_matching_machines_adjust_the_filter_or_search') : t('no_machines_yet_select_add_machine_to_start_monitoring')}</td></tr>`;
 }
 
@@ -440,7 +441,7 @@ function paint() {
     values['available'] = fmt(gib(memory?.available_bytes),' GiB',1);
     values['uptime'] = uptime(metrics?.uptime_seconds);
     values['memory-detail'] = memory?.total_bytes != null
-      ? fmt(gib(memory.used_bytes),'',1)+' / '+fmt(gib(memory.total_bytes),' GiB',1)+(host.scope === 'container' ? t('used_including_cache') : t('used'))
+      ? fmt(gib(memory.used_bytes),' GiB',1)+' / '+fmt(gib(memory.total_bytes),' GiB',1)+(host.scope === 'container' ? t('used_including_cache') : t('used'))
       : memory ? t('no_cgroup_memory_limit_usage_includes_cache') : t('no_current_reading');
     for (const device of host.devices) {
       const reading = currentDevice(host,device)?.utilization_percent;
@@ -487,12 +488,15 @@ function paint() {
         scales[id] = value;
       }
       if (unlimitedMemory(node)) values[node.id+'-memory'] = fmt(gib(node.metrics.memory.used_bytes),' GiB',1);
+      else values[node.id+'-memory-used'] = fmt(gib(node.metrics?.memory?.used_bytes),' GiB',1);
     }
   }
 
   for (const node of document.querySelectorAll('[data-value]')) {
     const value = values[node.dataset.value] ?? '—';
     node.textContent = value;
+    const used = node.closest('.memory-used');
+    if (used) used.hidden = value === '—';
     const unit = node.parentElement.nextElementSibling;
     if (node.closest('.metric') && node.parentElement.tagName === 'STRONG' && unit?.classList.contains('unit')) {
       unit.hidden = value === '—';

@@ -97,6 +97,8 @@
   .row-open small { display: block; color: var(--muted); font-size: 12px; }
   .number-cell { font-size: 12px; white-space: nowrap; }
   .number-cell .meter { width: 46px; margin-top: 3px; }
+  .number-cell .memory-used { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
+  .number-cell .memory-used[hidden] { display: none; }
   .meter { display: block; height: 4px; width: 100%; border-radius: 10px; background: #edf2ee; overflow: hidden; }
   .meter::before { content: ""; display: block; width: var(--fill, 0%); height: 100%; border-radius: inherit; background: #22967e; }
   .meter.memory::before { background: #7394cb; }

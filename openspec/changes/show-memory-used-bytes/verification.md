@@ -56,3 +56,13 @@ Assertions added to `tools/browser_smoke.py` cover:
 - The host fixture uses the service-normalized `memory.used_bytes`; the no-limit container case injects the snapshot shape already produced by the backend.
 - Screenshots live in the ignored `artifacts/` directory and are attached to the issue comment, not committed.
 - This is implementer self-verification, not independent review. Independent review and main integration remain open in `tasks.md`, and Mika owns them.
+
+## Independent review and specification sync (2026-11-19)
+
+Reviewer-Codex / gpt-6.1-sol independently reviewed Executor-OMP / DeepSeek 4.1 Flash commit `49280e38719bfb8451f485a15820c2abeb8b097c` in AN-46 and returned **PASS, no blocking findings**. The earlier paragraph describes the implementer's original handoff state; this section records the subsequent review.
+
+The reviewer independently passed pytest (16 tests), JavaScript syntax, i18n (261 keys), browser smoke, wheel build and OpenSpec 1.14.2 strict validation. Additional synthetic checks passed 26 locale/state groups, 8 in-place updates and 76 width/view combinations without page errors. Coverage includes real zero vs missing values, stale/offline samples, capped/uncapped containers and responsive layouts. Limit: synthetic APIs and Chromium only; no live collection, real node/container, other browser engines or deployed-instance verification.
+
+Evidence: Multica AN-46 final comment `01a1f1a6-79aa-7dbd-897e-8246acf7e332`; report attachment `01a1f1a6-799b-79c8-be45-59c59bd46d69` (AN-46-review.md); reproducible scripts/results/screenshots attachment `01a1f1a6-79a5-7809-a0b2-ab3fc2320081` (AN-46-review-evidence.zip). The source bundle exports HEAD rather than the branch name; import with `git fetch <bundle> HEAD:an47-review` when using the attached bundle.
+
+Mika integrated the exact reviewed commits by fast-forward in a dedicated task checkout and synchronized all four ADDED requirements into the new `dashboard-memory-metrics` main spec, preserving the delta Purpose verbatim. No implementation code changed after independent review. Integration checks: OpenSpec 1.14.2 `validate --specs --strict` (3 specs), `validate show-memory-used-bytes --strict`, `node --check wattline/static/monitor.js`, `node tools/test_i18n.cjs` (261 keys), and `git diff --check` all exited 0. No redundant application test run was needed because the reviewed implementation is unchanged.

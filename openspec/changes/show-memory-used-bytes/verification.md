@@ -4,7 +4,8 @@
 
 - Task: AN-47 / parent AN-45, memory used capacity alongside usage percentage.
 - Repository base: `5dc41ba` (`AN-42: record independent review and archive English localization`).
-- Implementation branch: `agent/executor-omp/838e9045f08d` (delivery commit SHA recorded in the task comment).
+- Implementation branch: `agent/executor-omp/838e9045f08d`.
+- Implementation commit: `5a9687d` (`AN-47: show used memory capacity alongside usage`); this evidence update is a follow-up commit on the same branch.
 - Changed implementation: `wattline/static/monitor.js`, `wattline/static/monitor.css`.
 - Changed synthetic check: `tools/browser_smoke.py`.
 - No backend, API schema, history schema, dependency, configuration or deployment changes.

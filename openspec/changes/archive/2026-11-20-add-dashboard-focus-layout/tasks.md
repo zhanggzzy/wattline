@@ -15,8 +15,8 @@
 ## 4. Integration and handoff
 
 - [x] 4.1 Run repository regression, browser checks, syntax/diff checks and strict validation; deliver guidance mapping, screenshots, exact commands/results and reviewable commit/PR.
-- [ ] 4.2 Independent Reviewer-DeepSeek review passes against actual diff, specification and evidence (owned by reviewer/Mika).
-- [ ] 4.3 Mika integrates reviewed changes into main and verifies remote SHA (owned by Mika).
+- [x] 4.2 Independent Reviewer-DeepSeek review passes against actual diff, specification and evidence (owned by reviewer/Mika).
+- [x] 4.3 Mika integrates reviewed changes into main and verifies remote SHA (owned by Mika).
 
 ## Workflow follow-up
 

@@ -85,5 +85,5 @@ containers it becomes labeled device cards; its named region can also be
 scrolled with the keyboard. Select a GPU to open details, close with the visible
 button or Escape, or use **查看此 GPU 趋势 / View this GPU’s trends** to inspect
 that device’s history. CPU, memory, logical CPU count/load and system facts
-remain above trends. See the active `add-dashboard-focus-layout` OpenSpec change
-for implementation verification and review status.
+remain above trends. See the [archived dashboard layout change](openspec/changes/archive/2026-11-20-add-dashboard-focus-layout/closeout.md)
+for implementation verification, independent review and integration status.

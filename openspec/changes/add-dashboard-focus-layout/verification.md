@@ -2,6 +2,8 @@
 
 Recorded 2026-11-20 by Executor-Codex. These are implementation self-checks; independent review remains pending in AN-49. Change: add-dashboard-focus-layout. Base: d6e6597617dec7447aac4b3d845d2f11e223a238 (main at checkout). One review branch contains the complete feature.
 
+Review entry: [PR #3](https://github.com/zhanggzzy/wattline/pull/3), targeting main from agent/executor-codex/7ba1c8520c19. Implementation commit: 8d5c79fdc29254fe4c14601197909810cd43a080; subsequent handoff changes only update this record and task progress. Obtain the exact current review head with gh pr view 3 --json headRefOid,baseRefOid. The PR was OPEN and draft; no checks were registered at the delivery snapshot.
+
 ## Reproduce
 
 Use Python 3.11+ and Node/npm; the OpenSpec cache must contain the pinned official version. From the review checkout:
@@ -55,7 +57,7 @@ For repeatable future retrieval, use modern-web-guidance@1.0.1; latest resolved 
 ### Modern Web Guidance
 
 - **[responsive-table](https://github.com/GoogleChrome/modern-web-guidance/blob/v1.0.1/skills/modern-web-guidance/guides/ui-atoms/responsive-table.md)**: I used container-stacked rows, labeled cells and a named keyboard-scrollable region ("Use standard" table elements). Sticky headers retain context in the scrolling fallback; narrow rows label every data cell.
-- **[dialog](https://github.com/GoogleChrome/modern-web-guidance/blob/v1.0.1/skills/modern-web-guidance/guides/ui-components/dialog.md)**: I used showModal(), a native close form, safe autofocus and existing scroll-containment CSS ("Don't implement focus traps"). The invoker stays attached for native focus return; overscroll containment degrades gracefully without locking the root scrollbar.
+- **[dialog](https://github.com/GoogleChrome/modern-web-guidance/blob/v1.0.1/skills/modern-web-guidance/guides/ui-components/dialog.md)**: I used showModal(), a native close form, safe autofocus and existing scroll-containment CSS ("Use the native"). The invoker stays attached for native focus return; overscroll containment degrades gracefully without locking the root scrollbar.
 - **[responsive-design](https://github.com/GoogleChrome/modern-web-guidance/blob/v1.0.1/skills/modern-web-guidance/guides/css/responsive-design.md)**: I used dynamic viewport bounds ("Use dynamic viewport units") and per-Canvas ResizeObservers. Table layout follows its container; horizontal scrolling remains available without container queries.
 - **[accessibility](https://github.com/GoogleChrome/modern-web-guidance/blob/v1.0.1/skills/modern-web-guidance/guides/accessibility/accessibility.md)**: I preserved named status controls and added lazy sample tables ("Provide semantic data tables as alternatives"). Native buttons, selected states, outlines, focus restoration and independent chart announcements were exercised with keyboard interactions.
 

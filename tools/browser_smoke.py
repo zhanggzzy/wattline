@@ -187,6 +187,205 @@ def check_unlimited_container(browser):
     test_page.close()
     return {'used_text':used_text, 'duplicate_hidden':True, 'page_errors':page_errors}
 
+def check_focus_layout(browser):
+    """AN-48 synthetic acceptance: navigation, metric comparisons, hardware and modal focus."""
+    global machines, mode
+    machines = [node(1), node(2), node(3, 'offline')]
+    idle = copy.deepcopy(gpu)
+    idle.update(uuid='GPU-synthetic-02', index=1, state='free', processes=[],
+                utilization_percent=0, memory_used_mib=0, power_w=35, temperature_c=30)
+    machines[0]['devices'] = [copy.deepcopy(gpu), idle]
+    machines[0]['metrics']['gpus'].append(idle)
+    page = browser.new_page(viewport={'width':1440,'height':1100})
+    errors, requests = [], []
+    page.on('pageerror',lambda error:errors.append(str(error)))
+    page.on('request',lambda request:requests.append(request.url) if '/api/history?' in request.url else None)
+    page.route('**/*',handle)
+    page.goto('http://wattline.test')
+    expect(page.locator('#host-rows tr')).to_have_count(3)
+    toggle_rail = page.locator('#rail-toggle')
+    toggle_rail.press('Enter')
+    expect(toggle_rail).to_have_attribute('aria-expanded','false')
+    rail = page.locator('#rail-nav [data-host="demo-1"]')
+    expect(rail).to_have_accessible_name('训练节点 Alpha · 正常')
+    assert rail.locator('strong').is_hidden()
+    assert rail.locator('.machine-icon').is_hidden()
+    assert rail.locator('.status-dot').is_visible()
+    rail.press('Enter')
+    expect(page.locator('#rail-nav [data-host="demo-1"]')).to_have_attribute('aria-current','page')
+    # CPU/system facts remain on the machine page and trends span the whole detail row.
+    expect(page.locator('[data-value="card-cpu"]')).to_have_text('42')
+    expect(page.locator('[data-value="cores"]')).to_contain_text('64')
+    expect(page.locator('[data-value="load"]')).to_have_text('12.00')
+    expect(page.locator('[data-value="disk"]')).to_contain_text('500.0')
+    assert page.locator('.chart-panel').bounding_box()['width'] == page.locator('.hardware-panel').bounding_box()['width']
+    assert page.locator('.hardware-panel').bounding_box()['y'] > page.locator('.chart-panel').bounding_box()['y']
+    expect(page.locator('.hardware-table tbody tr')).to_have_count(2)
+    expect(page.locator('.hardware-table tbody tr').first).to_contain_text('PID 120')
+    expect(page.locator('.hardware-table tbody tr').first).to_contain_text('demo-user')
+    expect(page.locator('.hardware-table tbody tr').nth(1)).to_contain_text('未发现 GPU 进程')
+    page.screenshot(path=str(OUT/'an48-desktop.png'),full_page=True)
+    for width in [320,390,640,731,975,1440]:
+        page.set_viewport_size({'width':width,'height':1100})
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), ('compact',width)
+        assert toggle_rail.is_visible()
+    page.set_viewport_size({'width':390,'height':844})
+    page.screenshot(path=str(OUT/'an48-narrow.png'),full_page=True)
+    button = page.get_by_role('button',name='查看 GPU 1',exact=True)
+    button.press('Enter')
+    expect(page.locator('#gpu-dialog')).to_be_visible()
+    expect(page.locator('#gpu-dialog')).to_have_accessible_name('GPU 1 设备信息')
+    expect(page.locator('#gpu-dialog .gpu-info')).to_contain_text('GPU-synthetic-02')
+    expect(page.locator('#gpu-dialog')).to_contain_text('未发现 GPU 进程')
+    page.screenshot(path=str(OUT/'an48-dialog-narrow.png'))
+    # A snapshot shape change is deferred while the invoker must stay attached.
+    page.evaluate("state.snapshot.machines[0].reason='synthetic update during inspection'; renderPage()")
+    assert button.is_visible()
+    page.keyboard.press('Escape')
+    expect(button).to_be_focused()
+    page.evaluate('renderPage(); paint()')
+    expect(page.get_by_role('button',name='查看 GPU 1',exact=True)).to_be_focused()
+    page.locator('#rail-toggle').press('Space')
+    expect(page.locator('#rail-toggle')).to_have_attribute('aria-expanded','true')
+    assert not page.evaluate('document.documentElement.scrollWidth > innerWidth')
+    # Inspect a device without changing trends, then explicitly enter per-device trends.
+    page.get_by_role('button',name='查看 GPU 0',exact=True).click()
+    expect(page.locator('#gpu-dialog .process-table')).to_contain_text('Docker')
+    page.get_by_role('button',name='查看此 GPU 趋势',exact=True).click()
+    expect(page.locator('[data-metric="gpu"]')).to_have_attribute('aria-pressed','true')
+    # Inspecting another device must not overwrite the selected device's metric card.
+    page.get_by_role('button',name='查看 GPU 1',exact=True).click()
+    expect(page.locator('[data-value="selected-gpu-memory"]')).to_have_text('24.0 / 80.0 GiB')
+    expect(page.locator('#gpu-dialog [data-value="gpu-memory"]')).to_have_text('0.0 / 80.0 GiB')
+    page.get_by_role('button',name='关闭详情',exact=True).click()
+    expect(page.get_by_role('button',name='查看 GPU 1',exact=True)).to_be_focused()
+    page.locator('[data-metric="power"]').click()
+    page.set_viewport_size({'width':1440,'height':1100})
+    page.locator('#focus-trends').press('Enter')
+    expect(page.locator('#exit-trends')).to_be_focused()
+    expect(page.locator('.trend-stack canvas')).to_have_count(1)
+    page.screenshot(path=str(OUT/'an48-single-power.png'),full_page=True)
+    page.locator('[data-metric="gpu"]').press('Space')
+    expect(page.locator('.trend-stack canvas')).to_have_count(2)
+    for summary in page.locator('.chart-summary').all():
+        expect(summary).to_contain_text('11 个有效时段')
+    expect(page.locator('[data-range="24"]')).to_have_attribute('aria-pressed','true')
+    assert page.evaluate('state.focusMetrics.join(",")') == 'power,gpu'
+    assert page.evaluate('Object.values(state.histories).every(h => h.to-h.from === 24*3600000)')
+    assert any('gpu=GPU-synthetic-01' in url and 'metric=power' in url for url in requests)
+    # Every plot has its own backing size, announcement and tooltip after resizing.
+    resized = []
+    for width in [1440,975,731,640,390,320]:
+        page.set_viewport_size({'width':width,'height':1100})
+        page.wait_for_function("""() => [...document.querySelectorAll('.trend-stack canvas')].every(c =>
+          Math.abs(c.width-c.clientWidth*devicePixelRatio)<=1 && Math.abs(c.height-c.clientHeight*devicePixelRatio)<=1)""")
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), ('focus',width)
+        bounds = [canvas.bounding_box() for canvas in page.locator('.trend-stack canvas').all()]
+        assert bounds[0]['y']+bounds[0]['height'] <= bounds[1]['y']
+        resized.append({'width':width,'plots':len(bounds),'overflow':False})
+    page.set_viewport_size({'width':390,'height':844})
+    page.screenshot(path=str(OUT/'an48-two-charts-narrow.png'),full_page=True)
+    page.set_viewport_size({'width':1440,'height':1100})
+    page.screenshot(path=str(OUT/'an48-power-utilization-24h.png'),full_page=True)
+    for canvas, label in zip(page.locator('.trend-stack canvas').all(),['GPU 功耗','GPU 利用率']):
+        canvas.press('ArrowLeft')
+        suffix = canvas.get_attribute('id').removeprefix('trend-chart')
+        expect(page.locator('#chart-announcement'+suffix)).to_contain_text(label)
+        expect(page.locator('#chart-tip'+suffix)).to_be_visible()
+        canvas.press('Escape')  # Clear the point without leaving focus mode.
+        expect(page.locator('#exit-trends')).to_be_visible()
+    page.locator('#chart-data summary').click()
+    expect(page.locator('#chart-data tbody tr')).to_have_count(11)
+    expect(page.locator('#chart-data table')).to_contain_text('50.0 W')
+    page.locator('#chart-data summary').click()
+    # Selection cannot become empty and can include every supported metric.
+    page.locator('[data-metric="gpu"]').click()
+    page.locator('[data-metric="power"]').click()
+    expect(page.locator('.trend-stack canvas')).to_have_count(1)
+    page.locator('[data-metric="vram"]').click()
+    page.locator('[data-metric="temp"]').click()
+    expect(page.locator('.trend-stack canvas')).to_have_count(3)
+    page.locator('[data-range="168"]').click()
+    expect(page.locator('#chart-summary')).to_contain_text('11 个有效时段')
+    page.wait_for_function('Object.values(state.histories).length === 3 && Object.values(state.histories).every(h => h.to-h.from === 168*3600000)')
+    # Independent failure: one chart errors without losing another chart's samples.
+    def fail_temperature(route):
+        if 'metric=temp' in route.request.url:
+            return route.fulfill(status=503,json={'detail':'synthetic chart failure'})
+        handle(route)
+    page.route('**/api/history?**',fail_temperature)
+    page.locator('[data-range="72"]').click()
+    expect(page.locator('#chart-error-temp')).to_be_visible()
+    expect(page.locator('#chart-summary')).to_contain_text('11 个有效时段')
+    page.unroute('**/api/history?**',fail_temperature)
+    page.evaluate('refresh()')
+    expect(page.locator('#chart-error-temp')).to_be_hidden()
+    # Hold obsolete six-hour requests, switch to 24h, then release old responses.
+    held = []
+    def hold_old(route):
+        if 'hours=6&' in route.request.url:
+            held.append(route)
+        else:
+            handle(route)
+    page.route('**/api/history?**',hold_old)
+    page.locator('[data-range="6"]').click()
+    page.wait_for_function('state.hours === 6')
+    page.locator('[data-range="24"]').click()
+    expect(page.locator('#chart-summary')).to_contain_text('11 个有效时段')
+    assert held
+    for route in held:
+        handle(route)
+    page.wait_for_function('Object.values(state.histories).length === 3 && Object.values(state.histories).every(h => h.to-h.from === 24*3600000)')
+    page.unroute('**/api/history?**',hold_old)
+    page.locator('#exit-trends').press('Escape')
+    expect(page.locator('#focus-trends')).to_be_focused()
+    expect(page.locator('.hardware-table')).to_be_visible()
+    page.locator('#focus-trends').click()
+    page.locator('#exit-trends').click()
+    expect(page.locator('#focus-trends')).to_be_focused()
+    # Overview also supports a stack and localized controls.
+    page.locator('#rail-nav [data-overview]').click()
+    page.locator('#locale-select').select_option('en')
+    page.locator('#focus-trends').click()
+    page.locator('[data-metric="cpu"]').click()
+    expect(page.locator('.chart-title').first).to_contain_text('GPU utilization')
+    expect(page.locator('.chart-title').nth(1)).to_contain_text('CPU usage')
+    page.locator('#exit-trends').click()
+    page.locator('#rail-nav [data-host="demo-3"]').click()
+    expect(page.locator('.hardware-table')).to_contain_text('No fresh sample')
+    expect(page.locator('[data-value="GPU-synthetic-01-memory"]')).to_have_text('—')
+    # Unknown/partial visibility and empty inventory keep precise empty states.
+    page.locator('#rail-nav [data-host="demo-1"]').click()
+    page.evaluate("state.snapshot.machines[0].metrics.gpus[1].process_visibility='partial'; renderPage(); paint()")
+    expect(page.locator('.hardware-table tbody tr').nth(1)).to_contain_text('No verifiable GPU process records available')
+    page.evaluate("state.snapshot.machines[0].devices=[]; state.snapshot.machines[0].metrics.gpus=[]; renderPage(); paint()")
+    expect(page.locator('.hardware-panel')).to_contain_text('No verified devices yet')
+    page.evaluate("state.snapshot.machines[0].checks=['cpu','memory']; state.snapshot.machines[0].require_gpu=false; renderPage(); paint()")
+    expect(page.locator('.hardware-panel')).to_contain_text('Monitored as a CPU-only machine')
+    expect(page.locator('[data-value="card-cpu"]')).to_have_text('42')
+    assert not errors, errors
+    page.close()
+    # Persistence and unavailable storage are exercised separately.
+    saved = browser.new_context(viewport={'width':390,'height':844})
+    persistent = saved.new_page()
+    persistent.route('**/*',handle)
+    persistent.goto('http://wattline.test')
+    persistent.locator('#rail-toggle').click()
+    persistent.reload()
+    expect(persistent.locator('#rail-toggle')).to_have_attribute('aria-expanded','false')
+    saved.close()
+    blocked = browser.new_page(viewport={'width':320,'height':844})
+    blocked.route('**/*',handle)
+    blocked.add_init_script("Object.defineProperty(window,'localStorage',{get(){throw Error('blocked')}})")
+    blocked.goto('http://wattline.test')
+    blocked.locator('#rail-toggle').press('Space')
+    expect(blocked.locator('#rail-toggle')).to_have_attribute('aria-expanded','false')
+    blocked.locator('#rail-toggle').press('Space')
+    expect(blocked.locator('#rail-toggle')).to_have_attribute('aria-expanded','true')
+    blocked.close()
+    return {'result':'PASS','resized':resized,'held_obsolete_requests':len(held),'page_errors':errors,
+            'screenshots':['an48-desktop.png','an48-narrow.png','an48-dialog-narrow.png','an48-power-utilization-24h.png','an48-single-power.png','an48-two-charts-narrow.png']}
+
 with sync_playwright() as p:
     browser = p.chromium.launch(**({"executable_path":args.browser} if args.browser else {}))
     page = browser.new_page(viewport={"width":1440,"height":1100}, device_scale_factor=1)
@@ -251,12 +450,14 @@ with sync_playwright() as p:
     page.get_by_role("button", name="排序 训练节点 Alpha", exact=True).press("ArrowDown")
     expect(page.locator("#host-rows tr").first).to_have_attribute("data-machine-row", "demo-2")
     page.get_by_role("button", name="查看 训练节点 Alpha", exact=True).click()
-    expect(page.get_by_role("heading", name="当前 GPU 进程")).to_be_visible()
-    expect(page.locator(".process-table")).to_contain_text("demo-user")
+    expect(page.get_by_role("heading", name="硬件与 GPU 进程")).to_be_visible()
+    expect(page.locator(".hardware-table")).to_contain_text("demo-user")
     expect(page.locator('.metric [data-value="card-memory"]')).to_have_text("38")
     expect(page.locator('.metric [data-value="memory-detail"]')).to_have_text("48.0 GiB / 128.0 GiB 已用")
     page.get_by_role("button", name="查看 GPU 0", exact=True).click()
     expect(page.locator(".gpu-info")).to_contain_text("GPU-synthetic-01")
+    expect(page.locator("#gpu-dialog .process-table")).to_contain_text("demo-user")
+    page.get_by_role("button", name="查看此 GPU 趋势", exact=True).click()
     page.get_by_role("button", name="7 天", exact=True).click()
     expect(page.get_by_role("button", name="7 天", exact=True)).to_have_attribute("aria-pressed","true")
     expect(page.locator("#chart-summary")).to_contain_text("11 个有效时段")
@@ -374,11 +575,13 @@ with sync_playwright() as p:
     page.get_by_role('button',name='All',exact=True).click()
     page.locator('#host-rows [data-sort-host="demo-2"]').press('ArrowDown')
     page.locator('#host-rows [data-host="demo-2"]').click()
-    expect(page.get_by_role('heading',name='Current GPU processes')).to_be_visible()
-    expect(page.locator('.process-table')).to_contain_text('demo-user')
+    expect(page.get_by_role('heading',name='Hardware & GPU processes')).to_be_visible()
+    expect(page.locator('.hardware-table')).to_contain_text('demo-user')
     expect(page.locator('.metric [data-value="memory-detail"]')).to_have_text('48.0 GiB / 128.0 GiB used')
     page.get_by_role('button',name='View GPU 0',exact=True).click()
-    expect(page.get_by_role('heading',name='GPU 0 device information')).to_be_visible()
+    expect(page.locator('#gpu-dialog-title')).to_have_text('GPU 0 device information')
+    expect(page.locator('#gpu-dialog .process-table')).to_contain_text('demo-user')
+    page.get_by_role('button',name='View this GPU’s trends',exact=True).click()
     page.get_by_role('button',name='7 days',exact=True).click()
     expect(page.locator('#chart-summary')).to_contain_text('11 valid periods')
     page.locator('#trend-chart').press('ArrowLeft')
@@ -440,8 +643,9 @@ with sync_playwright() as p:
     page.close()
     dialog_locales = check_dialog_locales(browser)
     unlimited_container = check_unlimited_container(browser)
-    print(json.dumps({"result":"PASS", "browser":browser.version, "page_errors":errors,
-                      "mutations":len(mutations), "screenshots":19, "locales":["zh-CN","en"], "dialog_locales":dialog_locales,
+    focus_layout = check_focus_layout(browser)
+    print(json.dumps({"focus_layout":focus_layout,"result":"PASS", "browser":browser.version, "page_errors":errors,
+                      "mutations":len(mutations), "screenshots":25, "locales":["zh-CN","en"], "dialog_locales":dialog_locales,
                       "metric_layouts":layout_results, "focus_refreshes":focus_results,
                       "unlimited_container":unlimited_container}, ensure_ascii=False))
     browser.close()

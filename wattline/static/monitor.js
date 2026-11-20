@@ -27,11 +27,30 @@ function localizeLabels() {
   powerModes = {average:t('average_power'), instantaneous:t('instantaneous_power'), reported:t('driver_reported_power')};
 }
 localizeLabels();
+let railCollapsed = false;
+try { railCollapsed = localStorage.getItem('wattline.railCollapsed') === 'true'; } catch {}
+function updateRail() {
+  document.querySelector('.shell').classList.toggle('rail-collapsed', railCollapsed);
+  const button = byId('rail-toggle');
+  button.textContent = railCollapsed ? '›' : '‹';
+  button.setAttribute('aria-expanded', String(!railCollapsed));
+  button.setAttribute('aria-label', t(railCollapsed ? 'expand_sidebar' : 'collapse_sidebar'));
+  button.title = button.getAttribute('aria-label');
+}
+byId('rail-toggle').addEventListener('click', () => {
+  railCollapsed = !railCollapsed;
+  try { localStorage.setItem('wattline.railCollapsed', String(railCollapsed)); } catch {}
+  updateRail();
+});
+updateRail();
 const machineIcon = '<span class="machine-icon" aria-hidden="true"><i></i><i></i></span>';
 const state = {snapshot:null, received:0, syncFailed:false, machine:null, gpu:null, metric:'cpu',
-  hours:24, filter:'all', query:'', history:null, historyError:false};
+  hours:24, filter:'all', query:'', history:null, historyError:false,
+  focused:false, focusMetrics:[], histories:{}, historyErrors:{}};
 let layoutKey = '';
 let chart = null;
+let charts = [];
+let focusScroll = 0;
 let historyRequest = null;
 let snapshotRevision = 0;
 let rowDrag = null;
@@ -69,10 +88,10 @@ const configUnavailable = () => state.snapshot.registry_loaded === false;
 const unlimitedMemory = host => host?.scope === 'container' && host.metrics?.memory?.total_bytes === null;
 
 function navigation(hosts, host) {
-  byId('rail-nav').innerHTML = `<button class="rail-nav" type="button" data-overview ${host ? '' : 'aria-current="page"'}>
+  byId('rail-nav').innerHTML = `<button class="rail-nav" type="button" data-overview aria-label="${t('overview')}" title="${t('overview')}" ${host ? '' : 'aria-current="page"'}>
       <span class="overview-icon" aria-hidden="true"></span><strong>${t('overview')}</strong></button>
     <p class="rail-label">${t('machine')}</p>${hosts.map(node => `<button class="rail-nav rail-machine" type="button"
-      data-host="${escape(node.id)}" ${node.id === host?.id ? 'aria-current="page"' : ''}>
+      data-host="${escape(node.id)}" aria-label="${escape(node.name)} · ${escape(machineStates[node.status])}" title="${escape(node.name)} · ${escape(machineStates[node.status])}" ${node.id === host?.id ? 'aria-current="page"' : ''}>
       ${machineIcon}<strong>${escape(node.name)}</strong><span class="status-dot ${escape(node.status)}" title="${escape(machineStates[node.status])}"></span>
     </button>`).join('')}`;
   byId('breadcrumb').innerHTML = host
@@ -100,8 +119,8 @@ function renderPage(force = false) {
   const inputFocused = document.activeElement?.id === 'host-search';
   const focusedSort = document.activeElement?.dataset.sortHost;
   const caret = inputFocused ? document.activeElement.selectionStart : null;
-  const deviceExpanded = byId('smi')?.open;
-  if (chart) chart.observer.disconnect();
+  for (const instance of charts) instance.observer.disconnect();
+  charts = [];
   chart = null;
 
   navigation(hosts, host);
@@ -114,8 +133,9 @@ function renderPage(force = false) {
     return;
   }
   content.removeAttribute('aria-busy');
-  content.innerHTML = host ? hostPage(host, device) : overviewPage(hosts);
-  if (!host) {
+  document.body.classList.toggle('trends-focused', state.focused);
+  content.innerHTML = state.focused ? focusPage(host, device) : host ? hostPage(host, device) : overviewPage(hosts);
+  if (!host && !state.focused) {
     byId('host-search').value = state.query;
     drawRows(hosts);
     if (inputFocused) {
@@ -125,7 +145,6 @@ function renderPage(force = false) {
       byId('host-rows').querySelector(`[data-sort-host="${CSS.escape(focusedSort)}"]`)?.focus({preventScroll:true});
     }
   }
-  if (deviceExpanded && byId('smi')) byId('smi').open = true;
   bindChart();
   // Snapshot refreshes may replace controls; keep keyboard users on the same action.
   if (focused && !focused.isConnected) {
@@ -292,23 +311,55 @@ document.addEventListener('keydown', event => {
   if (target) void moveMachine(row.dataset.machineRow,target.dataset.machineRow,down);
 });
 
-function chartPanel(host, device) {
-  return `<section class="panel chart-panel">
-    <div class="panel-head"><h2>${host ? t('resource_trends') : t('last_24_hours')}</h2>
-      <small>${host ? device ? 'GPU ' + device.index : (host.scope === 'container' ? t('container_scope') : t('whole_machine')) : t('average_of_valid_samples_in_each_period')}</small></div>
-    ${host ? `<div class="trend-controls"><div class="seg" role="group" aria-label="${t('trend_metric')}">
-      ${supported(host,device).map(key => toggle(descriptors[key][0],'data-metric',key,state.metric===key)).join('')}</div>
-      <div class="seg" role="group" aria-label="${t('time_range')}">${[[1,t('1_hour')],[6,t('6_hours')],[24,t('24_hours')],[72,t('3_days')],[168,t('7_days')]]
-        .filter(([hours]) => hours <= (state.snapshot?.machine_history_hours ?? 24))
-        .map(([hours,label]) => toggle(label,'data-range',hours,state.hours===hours)).join('')}</div></div>` : ''}
-    <div class="plot ${host ? 'large' : ''}"><canvas id="trend-chart" tabindex="0" role="img"
-      aria-label="${t('resource_timeline_focus_and_use_left_and_right_arrows_to_inspect_')}" aria-describedby="chart-summary"></canvas><div class="chart-tip" id="chart-tip" hidden></div></div>
-    <p class="chart-summary" id="chart-summary"></p><div class="sr-only" id="chart-announcement" role="status"></div><div class="chart-legend" id="chart-legend"></div><p class="chart-error" id="chart-error" hidden>${t('historical_metrics_unavailable')}</p>
+function chartControls(host, device) {
+  const available = host ? supported(host,device) : ['gpu','cpu'];
+  return `<div class="trend-controls"><div class="seg" role="group" aria-label="${t('trend_metric')}">
+    ${available.map(key => toggle(descriptors[key][0],'data-metric',key,
+      state.focused ? state.focusMetrics.includes(key) : state.metric===key)).join('')}</div>
+    ${host ? `<div class="seg" role="group" aria-label="${t('time_range')}">${[[1,t('1_hour')],[6,t('6_hours')],[24,t('24_hours')],[72,t('3_days')],[168,t('7_days')]]
+      .filter(([hours]) => hours <= (state.snapshot?.machine_history_hours ?? 24))
+      .map(([hours,label]) => toggle(label,'data-range',hours,state.hours===hours)).join('')}</div>` : ''}</div>`;
+}
+
+function chartPlot(host, key = null, index = 0) {
+  const suffix = index ? '-'+key : '';
+  return `<section class="chart-instance" data-chart-metric="${key || ''}" data-chart-suffix="${suffix}">
+    ${key ? `<h2 class="chart-title">${descriptors[key][0]} <small>${descriptors[key][1].trim()}</small></h2>` : ''}
+    <div class="plot ${host ? 'large' : ''}"><canvas id="trend-chart${suffix}" tabindex="0" role="img"
+      aria-label="${key ? descriptors[key][0]+' · ' : ''}${t('resource_timeline_focus_and_use_left_and_right_arrows_to_inspect_')}" aria-describedby="chart-summary${suffix}"></canvas><div class="chart-tip" id="chart-tip${suffix}" hidden></div></div>
+    <p class="chart-summary" id="chart-summary${suffix}"></p><div class="sr-only" id="chart-announcement${suffix}" role="status"></div><div class="chart-legend" id="chart-legend${suffix}"></div><p class="chart-error" id="chart-error${suffix}" hidden>${t('historical_metrics_unavailable')}</p>
+    <details class="chart-values" id="chart-data${suffix}"><summary>${t('view_chart_data')}</summary><div class="scroll" tabindex="0" role="region" aria-label="${t('view_chart_data')}"></div></details>
   </section>`;
 }
 
+function chartPanel(host, device) {
+  return `<section class="panel chart-panel"><div class="panel-head"><div><h2>${host ? t('resource_trends') : t('last_24_hours')}</h2><small>${host ? device ? 'GPU '+device.index : host.scope === 'container' ? t('container_scope') : t('whole_machine') : t('average_of_valid_samples_in_each_period')}</small></div>
+    <div class="title-actions">${device ? `<button type="button" class="control" data-all-gpus>${t('back_to_machine')}</button>` : ''}<button type="button" id="focus-trends" class="control" data-focus-trends>${t('focus_charts')}</button></div></div>
+    ${host ? chartControls(host,device) : ''}${chartPlot(host)}
+  </section>`;
+}
+
+function setTrendFocus(enabled) {
+  if (enabled) {
+    focusScroll = window.scrollY;
+    state.focusMetrics = [getHost() ? state.metric : 'gpu'];
+  }
+  state.focused = enabled;
+  renderPage(true);
+  paint();
+  void refreshHistory(true);
+  window.scrollTo(0,enabled ? 0 : focusScroll);
+  byId(enabled ? 'exit-trends' : 'focus-trends')?.focus({preventScroll:true});
+}
+
+function focusPage(host, device) {
+  return `<section class="focus-heading"><div><p class="eyebrow">WATTLINE / ${t('resource_trends')}</p>${heading(host?.name || t('overview'))}<p>${device ? 'GPU '+device.index+' · ' : ''}${t('choose_charts')}</p></div>
+    <button type="button" id="exit-trends" class="control" data-exit-focus>${t('return_to_dashboard')}</button></section>
+    ${chartControls(host,device)}<div class="trend-stack" style="--chart-count:${state.focusMetrics.length}">
+      ${state.focusMetrics.map((key,index) => `<div class="panel">${chartPlot(host,key,index)}</div>`).join('')}</div>`;
+}
+
 function hostPage(host, device) {
-  const gpu = device && currentDevice(host, device);
   const statusBadge = status(host.status, machineStates[host.status]);
   const container = host.scope === 'container';
   const unlimited = unlimitedMemory(host);
@@ -323,9 +374,9 @@ function hostPage(host, device) {
     ${host.reason || host.warnings?.length ? '<p class="message">'+escape(reason(host))+'</p>' : ''}
     <section class="metrics" aria-label="${t('live_machine_resources')}" ${active.some(key => ['gpu','cpu','memory'].includes(key)) ? '' : 'hidden'}>
       ${active.includes('gpu') ? metricTile(device ? t('gpu_device_utilization',{index:device.index}) : t('average_gpu_utilization'),'card-gpu','%','≋',
-        device ? field('gpu-memory') : t('only_devices_reporting_utilization')) : ''}
+        device ? field('selected-gpu-memory') : t('only_devices_reporting_utilization')) : ''}
       ${active.includes('gpu') ? metricTile(device ? t('gpu_device_power',{index:device.index}) : container ? t('visible_gpu_power') : t('total_gpu_power'),'card-power','W','⌁',
-        device ? field('gpu-limit') : container ? t('total_power_of_devices_visible_to_container') : t('calculated_when_device_power_modes_agree')) : ''}
+        device ? field('selected-gpu-limit') : container ? t('total_power_of_devices_visible_to_container') : t('calculated_when_device_power_modes_agree')) : ''}
       ${active.includes('cpu') ? metricTile(t('cpu_usage'),'card-cpu','%','◉',container ? t('share_of_container_cpu_capacity') : t('machine_logical_cpus')) : ''}
       ${active.includes('memory') ? metricTile(unlimited ? t('memory_used') : t('memory_usage'),'card-memory',unlimited ? 'GiB' : '%','▤',field('memory-detail')) : ''}
     </section>
@@ -335,25 +386,40 @@ function hostPage(host, device) {
       ${!container && active.includes('system') ? `<span>${t('system_disk_available')} <strong>${field('disk')}</strong></span><span>${t('uptime')} <strong>${field('uptime')}</strong></span>` : ''}
       ${active.includes('memory') && !unlimited ? `<span>${container ? t('memory_limit_headroom') : t('memory_available')} <strong>${field('available')}</strong></span>` : ''}
       ${host.metrics.driver_version ? `<span>${t('nvidia_driver')} <strong>`+escape(host.metrics.driver_version)+'</strong></span>' : ''}</div>` : ''}
-    <div class="layout details-layout">${chartPanel(host,device)}<section class="panel">
-      <div class="panel-head"><h2>${t('physical_gpus')}</h2>
-        ${device ? `<button type="button" class="control" data-all-gpus>${t('back_to_machine')}</button>` : '<small>'+t('observed_device_count',{count:host.devices.length})+'</small>'}</div>
-      ${host.devices.length ? `<div class="gpu-list">${host.devices.map(card => gpuButton(host,device,card)).join('')}</div>`
-        : '<p class="empty">'+(active.includes('gpu') ? t('no_verified_devices_yet')
-          : host.require_gpu ? t('gpu_checks_are_disabled') : t('monitored_as_a_cpu_only_machine'))+'</p>'}
-    </section></div>
-    <div class="column device-details">${device ? gpuInfo(host,device,gpu) : ''}
-      ${active.includes('processes') ? processTable(host,device) : ''}</div>`;
+    <div class="column details-layout">${chartPanel(host,device)}${hardwareTable(host)}</div>`;
 }
 
-function gpuButton(host, device, card) {
-  const gpu = currentDevice(host, card);
-  return `<button class="gpu-row" type="button" data-gpu="${escape(card.uuid)}" aria-label="${t('view_gpu')} ${card.index}"
-    aria-pressed="${card.uuid === device?.uuid}">
-    <div class="gpu-row-name"><strong>GPU ${card.index}</strong><span>${escape(card.name || 'NVIDIA GPU')}</span></div>
-    ${status(gpu?.state ?? 'stale', gpuStates[gpu?.state] || t('no_fresh_sample'))}
-    ${meter(card.uuid)}<span class="number-cell">${field(card.uuid)}</span>
-  </button>`;
+function hardwareTable(host) {
+  const active = checks(host);
+  const label = t('hardware_and_processes');
+  return `<section class="panel hardware-panel"><div class="panel-head"><h2>${label}</h2><small>${t('observed_device_count',{count:host.devices.length})}</small></div>
+    ${host.devices.length ? `<div class="scroll hardware-scroll" tabindex="0" role="region" aria-label="${label}"><table class="hardware-table">
+      <caption class="sr-only">${label}</caption><thead><tr>${[t('device'),t('status')+' / '+t('gpu_utilization'),t('vram_used_total'),t('gpu_power')+' / '+t('gpu_temperature'),t('current_gpu_processes')].map(text => `<th scope="col">${text}</th>`).join('')}</tr></thead>
+      <tbody>${host.devices.map(device => {
+        const gpu = currentDevice(host,device);
+        const processes = active.includes('processes') ? gpu?.processes || [] : [];
+        const empty = !active.includes('processes') ? t('process_checks_disabled')
+          : !gpu || gpu.process_visibility !== 'complete' || gpu.state === 'unknown' ? t('no_verifiable_gpu_process_records_available') : t('no_gpu_processes_found');
+        return `<tr><th scope="row"><button type="button" class="gpu-open" data-gpu="${escape(device.uuid)}" aria-haspopup="dialog" aria-label="${t('view_gpu')} ${device.index}"><strong>GPU ${device.index}</strong><span>${escape(device.name || 'NVIDIA GPU')}</span></button></th>
+          <td data-label="${t('status')} / ${t('gpu_utilization')}">${status(gpu?.state || 'stale',gpuStates[gpu?.state] || t('no_fresh_sample'))}<strong>${field(device.uuid)}</strong></td>
+          <td data-label="${t('vram_used_total')}">${field(device.uuid+'-memory')}</td>
+          <td data-label="${t('gpu_power')} / ${t('gpu_temperature')}">${field(device.uuid+'-power')}<small>${field(device.uuid+'-temperature')}</small></td>
+          <td data-label="${t('current_gpu_processes')}">${processes.length ? `<ul class="gpu-processes">${processes.map(process => `<li><strong>${escape(process.name || t('unverified'))}</strong> <span class="mono">PID ${escape(process.pid)}</span><small>${t('host_account')}: ${escape(process.user || (process.uid == null ? t('unverified') : 'UID '+process.uid))}${process.user && process.uid != null ? ' · UID '+escape(process.uid) : ''}</small><small>${t('ownership_evidence')}: ${escape(workloadEvidence(process))} · ${t('process_vram')}: ${fmt(vram(process.used_memory_mib),' GiB',1)}</small></li>`).join('')}</ul>` : `<span class="process-empty">${empty}</span>`}
+          ${gpu?.process_visibility === 'partial' ? `<small>${t('process_enumeration_is_only_partially_visible_for_this_device')}</small>` : ''}</td></tr>`;
+      }).join('')}</tbody></table></div>` : `<p class="empty">${active.includes('gpu') ? t('no_verified_devices_yet') : host.require_gpu ? t('gpu_checks_are_disabled') : t('monitored_as_a_cpu_only_machine')}</p>`}
+  </section>`;
+}
+
+const gpuDialog = byId('gpu-dialog');
+function openGpuDialog(uuid) {
+  const host = getHost();
+  const device = host?.devices.find(item => item.uuid === uuid);
+  if (!device) return;
+  gpuDialog.dataset.gpu = uuid;
+  byId('gpu-dialog-title').textContent = t('gpu_device_info',{index:device.index});
+  byId('gpu-dialog-content').innerHTML = gpuInfo(host,device,currentDevice(host,device)) + (checks(host).includes('processes') ? processTable(host,device) : '');
+  gpuDialog.showModal();
+  paint();
 }
 
 function gpuInfo(host, device, gpu) {
@@ -432,6 +498,8 @@ function paint() {
     const memory = metrics?.memory;
     values['card-gpu'] = fmt(selected ? gpu?.utilization_percent : metrics?.gpu_percent);
     values['card-power'] = fmt(selected ? gpu?.power_w : metrics?.gpu_power_w);
+    values['selected-gpu-memory'] = gpu ? fmt(vram(gpu.memory_used_mib),'',1)+' / '+fmt(vram(gpu.memory_total_mib),' GiB',1) : t('no_current_reading');
+    values['selected-gpu-limit'] = t('current_power_limit_m146')+fmt(gpu?.power_limit_w,' W');
     values['card-cpu'] = fmt(metrics?.cpu_percent);
     values['card-memory'] = unlimitedMemory(host) ? fmt(gib(memory.used_bytes),'',1) : fmt(metrics?.memory_percent);
     values['host-time'] = time(host.last_success_at);
@@ -446,9 +514,16 @@ function paint() {
     for (const device of host.devices) {
       const reading = currentDevice(host,device)?.utilization_percent;
       values[device.uuid] = fmt(reading,'%');
+      const live = currentDevice(host,device);
+      values[device.uuid+'-memory'] = live ? fmt(vram(live.memory_used_mib),'',1)+' / '+fmt(vram(live.memory_total_mib),' GiB',1) : '—';
+      values[device.uuid+'-power'] = fmt(live?.power_w,' W',1);
+      values[device.uuid+'-temperature'] = fmt(live?.temperature_c,' °C');
       scales[device.uuid] = reading;
     }
-    if (selected) {
+    const detailDevice = gpuDialog.open ? host.devices.find(item => item.uuid === gpuDialog.dataset.gpu) : selected;
+    const detailGpu = detailDevice && currentDevice(host,detailDevice);
+    if (detailDevice) {
+      const selected = detailDevice, gpu = detailGpu;
       values['gpu-memory'] = gpu ? fmt(vram(gpu.memory_used_mib),'',1)+' / '+fmt(vram(gpu.memory_total_mib),' GiB',1) : t('no_current_reading');
       values['gpu-temperature'] = fmt(gpu?.temperature_c,' °C');
       values['gpu-power'] = fmt(gpu?.power_w,' W',1) + (gpu?.power_kind ? ' · '+powerModes[gpu.power_kind] : '');
@@ -515,39 +590,48 @@ async function get(path, signal = AbortSignal.timeout(5000)) {
   return response.json();
 }
 
+const activeMetrics = () => state.focused ? state.focusMetrics : [state.machine ? state.metric : 'overview'];
 async function refreshHistory(reset = false) {
   if (reset) {
     historyRequest?.abort();
     state.history = null;
+    state.histories = {};
+    state.historyErrors = {};
     state.historyError = false;
-    if (chart) chart.pointer = chart.keyboardAt = null;
+    for (const instance of charts) instance.pointer = instance.keyboardAt = null;
     drawChart();
   } else if (historyRequest) return;
   if (!state.snapshot) return;
-
-  const host = getHost();
-  const gpu = getDevice(host);
-  const params = new URLSearchParams({hours:state.hours});
-  if (host) {
-    params.set('machine',host.id);
-    params.set('metric',state.metric);
-    if (gpu) params.set('gpu',gpu.uuid);
-  }
+  const host = getHost(), gpu = getDevice(host);
   const controller = new AbortController();
   historyRequest = controller;
-  try {
-    const history = await get('/api/history?'+params, AbortSignal.any([controller.signal,AbortSignal.timeout(5000)]));
-    if (historyRequest === controller) {
-      state.history = history;
-      state.historyError = false;
+  const metrics = [...activeMetrics()];
+  await Promise.all(metrics.map(async metric => {
+    const params = new URLSearchParams({hours:state.hours});
+    if (host) {
+      params.set('machine',host.id);
+      params.set('metric',metric);
+      if (gpu) params.set('gpu',gpu.uuid);
     }
-  } catch {
-    if (historyRequest === controller) state.historyError = true;
-  } finally {
-    if (historyRequest === controller) {
-      historyRequest = null;
-      drawChart();
+    try {
+      let history = await get('/api/history?'+params, AbortSignal.any([controller.signal,AbortSignal.timeout(5000)]));
+      if (!host && metric !== 'overview') {
+        const index = history.keys.indexOf(metric);
+        history = {...history, keys:[metric], points:history.points.map(point => ({...point,
+          values:[index < 0 ? null : point.values[index]], breaks:[point.breaks?.[index]]}))};
+      }
+      if (historyRequest !== controller) return;
+      state.histories[metric] = history;
+      state.historyErrors[metric] = false;
+      if (metric === metrics[0]) state.history = history;
+    } catch {
+      if (historyRequest === controller) state.historyErrors[metric] = true;
     }
+    if (historyRequest === controller) drawChart();
+  }));
+  if (historyRequest === controller) {
+    state.historyError = Boolean(state.historyErrors[metrics[0]]);
+    historyRequest = null;
   }
 }
 
@@ -568,17 +652,18 @@ async function refresh() {
   if (replaced) {
     state.gpu = null;
     state.metric = 'gpu';
+    state.focusMetrics = ['gpu'];
   }
   renderPage();
   paint();
   const lastQuery = state.history?.to ?? 0;
   const liveTrendDue = state.hours <= 24 && state.snapshot?.server_time-lastQuery >= 5000;
-  if (replaced || !state.history || liveTrendDue) void refreshHistory(Boolean(replaced));
+  if (replaced || !state.history || liveTrendDue || Object.values(state.historyErrors).some(Boolean)) void refreshHistory(Boolean(replaced));
   window.setTimeout(refresh,2000);
 }
 
-function chartSeries() {
-  const keys = state.history?.keys || (state.machine ? [state.metric] : ['gpu','cpu']);
+function chartSeries(instance) {
+  const keys = state.histories[instance.metric]?.keys || (instance.metric === 'overview' ? ['gpu','cpu'] : [instance.metric]);
   return keys.map(key => {
     const [title,unit] = descriptors[key];
     const label = !state.machine ? key === 'gpu' ? t('device_average_gpu') : t('machine_average_cpu')
@@ -588,34 +673,42 @@ function chartSeries() {
 }
 
 function bindChart() {
-  const canvas = byId('trend-chart');
-  const observer = new ResizeObserver(drawChart);
-  chart = {canvas,observer,pointer:null,keyboardAt:null,points:[]};
-  observer.observe(canvas);
-  canvas.addEventListener('pointermove',event => {
-    chart.pointer = event.clientX-canvas.getBoundingClientRect().left;
-    chart.keyboardAt = null;
-    drawChart();
-  });
-  canvas.addEventListener('pointerleave',() => {chart.pointer = null;drawChart();});
-  canvas.addEventListener('keydown',event => {
-    if (!['ArrowLeft','ArrowRight','Escape'].includes(event.key)) return;
-    event.preventDefault();
-    chart.pointer = null;
-    if (event.key === 'Escape') chart.keyboardAt = null;
-    else if (chart.points.length) chart.keyboardAt = clamp((chart.keyboardAt ?? chart.points.length-1)
-      + (event.key === 'ArrowLeft' ? -1 : 1),0,chart.points.length-1);
-    drawChart();
-    const point = chart.points[chart.keyboardAt];
-    byId('chart-announcement').textContent = point
-      ? tooltipTime.format(point.time)+' · '+chartSeries().map((item,i) => item.label+' '+fmt(point.values[i],item.unit,1)).join(' · ') : '';
-  });
-  canvas.addEventListener('blur',() => {
-    // Replacing a focused canvas can emit blur while the previous chart is detached.
-    if (chart?.canvas !== canvas) return;
-    chart.keyboardAt = null;
-    drawChart();
-  });
+  for (const element of document.querySelectorAll('.chart-instance')) {
+    const canvas = element.querySelector('canvas');
+    const instance = {canvas, suffix:element.dataset.chartSuffix,
+      metric:element.dataset.chartMetric || (state.machine ? state.metric : 'overview'),
+      pointer:null,keyboardAt:null,points:[]};
+    const observer = new ResizeObserver(() => drawChart(instance));
+    instance.observer = observer;
+    charts.push(instance);
+    observer.observe(canvas);
+    byId('chart-data'+instance.suffix).addEventListener('toggle', () => drawChart(instance));
+    canvas.addEventListener('pointermove',event => {
+      instance.pointer = event.clientX-canvas.getBoundingClientRect().left;
+      instance.keyboardAt = null;
+      drawChart(instance);
+    });
+    canvas.addEventListener('pointerleave',() => {instance.pointer = null;drawChart(instance);});
+    canvas.addEventListener('keydown',event => {
+      if (!['ArrowLeft','ArrowRight','Escape'].includes(event.key)) return;
+      event.preventDefault();
+      if (event.key === 'Escape' && (instance.keyboardAt != null || instance.pointer != null)) event.stopPropagation();
+      instance.pointer = null;
+      if (event.key === 'Escape') instance.keyboardAt = null;
+      else if (instance.points.length) instance.keyboardAt = clamp((instance.keyboardAt ?? instance.points.length-1)
+        + (event.key === 'ArrowLeft' ? -1 : 1),0,instance.points.length-1);
+      drawChart(instance);
+      const point = instance.points[instance.keyboardAt];
+      byId('chart-announcement'+instance.suffix).textContent = point
+        ? tooltipTime.format(point.time)+' · '+chartSeries(instance).map((item,i) => item.label+' '+fmt(point.values[i],item.unit,1)).join(' · ') : '';
+    });
+    canvas.addEventListener('blur',() => {
+      if (!canvas.isConnected) return;
+      instance.keyboardAt = null;
+      drawChart(instance);
+    });
+  }
+  chart = charts[0] || null;
   drawChart();
 }
 
@@ -627,8 +720,9 @@ function chartCeiling(series, points) {
   return Math.max(step, Math.ceil(max/step)*step);
 }
 
-function drawChart() {
-  if (!chart) return;
+function drawChart(instance) {
+  if (!instance) { charts.forEach(item => drawChart(item)); return; }
+  const chart = instance;
   const {canvas} = chart;
   const width = canvas.clientWidth;
   const height = canvas.clientHeight;
@@ -644,13 +738,23 @@ function drawChart() {
   if (!ctx) return;
   ctx.setTransform(ratio,0,0,ratio,0,0);
   ctx.clearRect(0,0,width,height);
-  const history = state.history;
+  const history = state.histories[chart.metric];
+  const historyError = state.historyErrors[chart.metric];
   const end = history?.to ?? state.snapshot?.server_time ?? Date.now();
   const start = history?.from ?? end-state.hours*3600000;
   const points = (history?.points || []).map(point => ({...point, values:point.values.map((value,i) =>
     history.keys[i] === 'vram' ? vram(value) : history.keys[i] === 'memory_used' ? gib(value) : value)}));
   chart.points = points;
-  const series = chartSeries();
+  const series = chartSeries(chart);
+  const data = byId('chart-data'+chart.suffix);
+  // Build the accessible alternative only on demand, never on every pointer move.
+  if (data.open && (chart.tableHistory !== history || chart.tableLocale !== i18n.locale)) {
+    chart.tableHistory = history;
+    chart.tableLocale = i18n.locale;
+    data.querySelector('.scroll').innerHTML = `<table><caption>${series.map(item => item.label).join(' / ')}</caption>
+      <thead><tr><th scope="col">${t('sample_time')}</th>${series.map(item => `<th scope="col">${item.label} (${item.unit.trim()})</th>`).join('')}</tr></thead>
+      <tbody>${points.map(point => `<tr><th scope="row">${tooltipTime.format(point.time)}</th>${point.values.map((value,index) => `<td>${fmt(value,series[index].unit,1)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+  }
   const ceiling = chartCeiling(series,points);
   const left = series[0].key === 'power' ? 50 : 41;
   const right = width-12;
@@ -682,26 +786,27 @@ function drawChart() {
     ctx.fillText(tickFormat.format(timestamp),x(timestamp),bottom+13);
   }
   const valid = points.filter(point => point.values.some(Number.isFinite));
-  byId('chart-summary').textContent = state.historyError ? t('could_not_load_history_retrying_automatically')
+  byId('chart-summary'+chart.suffix).textContent = historyError ? t('could_not_load_history_retrying_automatically')
     : !history ? t('loading_historical_samples') : !valid.length ? t('no_valid_samples_in_this_window')
     : t('history_summary',{count:valid.length,latest:series.map((item,i) =>
       item.label+' '+fmt(valid.at(-1).values[i],item.unit,1)).join(' / ')});
   const bucket = history?.bucket_ms;
-  byId('chart-legend').innerHTML = series.map(item =>
+  byId('chart-legend'+chart.suffix).innerHTML = series.map(item =>
     '<span><i class="legend-line" aria-hidden="true" data-series="'+item.key+'"></i>'+item.label+
     (item.unit==='%' ? '' : ' · '+item.unit.trim())+'</span>').join('')+
     '<span class="chart-note">'+(bucket ? fmt(bucket/1000,t('second_average'))+' · ' : '')+`${t('gaps_indicate_discontinuous_samples')}</span>`;
-  byId('chart-error').hidden = !state.historyError;
+  byId('chart-error'+chart.suffix).hidden = !historyError;
   if (!points.some(point => point.values.some(Number.isFinite))) {
     ctx.font = '12px system-ui, sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText(history ? t('no_valid_samples_in_this_window_m159') : t('waiting_for_historical_samples'),(left+right)/2,(top+bottom)/2);
   }
   paintSeries(ctx,points,layout,series);
-  paintTooltip(ctx,series,layout,width);
+  paintTooltip(ctx,series,layout,width,chart);
 }
 
 function openHost(id) {
+  state.focused = false;
   state.machine = id;
   state.gpu = null;
   state.metric = 'cpu';
@@ -875,26 +980,52 @@ document.addEventListener('click',event => {
   else if (button.hasAttribute('data-add-machine')) openMachineDialog(null);
   else if (button.hasAttribute('data-configure-machine')) openMachineDialog(getHost());
   else if (button.hasAttribute('data-remove-machine')) openRemoveDialog(getHost());
+  else if (button.hasAttribute('data-focus-trends')) setTrendFocus(true);
+  else if (button.hasAttribute('data-exit-focus')) setTrendFocus(false);
+  else if (button.hasAttribute('data-gpu-trends')) {
+    const uuid = gpuDialog.dataset.gpu;
+    gpuDialog.close();
+    state.gpu = uuid;
+    state.metric = 'gpu';
+    renderPage(true);
+    paint();
+    void refreshHistory(true);
+    byId('focus-trends')?.focus();
+  }
   else if (host) openHost(host);
   else if (filter) {
     state.filter = filter;
     for (const node of document.querySelectorAll('[data-filter]')) node.setAttribute('aria-pressed',String(node.dataset.filter === filter));
     drawRows(nodes());
     paint();
-  } else if (gpu || button.hasAttribute('data-all-gpus')) {
-    const selected = gpu || state.gpu;
-    state.gpu = gpu || null;
-    state.metric = state.gpu ? 'gpu' : 'cpu';
+  } else if (gpu) openGpuDialog(gpu);
+  else if (button.hasAttribute('data-all-gpus')) {
+    state.gpu = null;
+    state.metric = 'cpu';
     renderPage(true);
     paint();
     void refreshHistory(true);
-    [...document.querySelectorAll('[data-gpu]')].find(node => node.dataset.gpu === selected)?.focus({preventScroll:true});
+    byId('focus-trends')?.focus();
   } else if (metric || range) {
-    if (metric) state.metric = metric;
+    if (metric && state.focused) {
+      const selected = state.focusMetrics.includes(metric);
+      if (selected && state.focusMetrics.length === 1) return;
+      state.focusMetrics = selected ? state.focusMetrics.filter(key => key !== metric) : [...state.focusMetrics,metric];
+      renderPage(true);
+    } else if (metric) {
+      state.metric = metric;
+      if (chart) chart.metric = metric;
+    }
     if (range) state.hours = Number(range);
-    for (const node of document.querySelectorAll('[data-metric]')) node.setAttribute('aria-pressed',String(node.dataset.metric === state.metric));
+    for (const node of document.querySelectorAll('[data-metric]')) node.setAttribute('aria-pressed',String(state.focused ? state.focusMetrics.includes(node.dataset.metric) : node.dataset.metric === state.metric));
     for (const node of document.querySelectorAll('[data-range]')) node.setAttribute('aria-pressed',String(Number(node.dataset.range) === state.hours));
     void refreshHistory(true);
+  }
+});
+document.addEventListener('keydown',event => {
+  if (event.key === 'Escape' && state.focused && !document.querySelector('dialog[open]')) {
+    event.preventDefault();
+    setTrendFocus(false);
   }
 });
 document.addEventListener('input',event => {
@@ -960,8 +1091,8 @@ function paintSeries(ctx, points, layout, series) {
   ctx.restore();
 }
 
-function paintTooltip(ctx, series, layout, width) {
-  const tip = byId('chart-tip');
+function paintTooltip(ctx, series, layout, width, chart) {
+  const tip = byId('chart-tip'+chart.suffix);
   const { points, pointer, keyboardAt } = chart;
   if (!points.length || (pointer == null && keyboardAt == null)) {
     tip.hidden = true;
@@ -1007,6 +1138,7 @@ localeSelect.addEventListener('change', () => {
   i18n.setLocale(localeSelect.value);
   i18n.apply();
   localizeLabels();
+  updateRail();
   orderMessage = '';
   renderPage(true);
   paint();

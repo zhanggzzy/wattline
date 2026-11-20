@@ -13,7 +13,7 @@
 <div class="shell">
   <aside class="rail">
     <div class="rail-inner">
-      <div class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>Wattline</div>
+      <div class="rail-brand"><div class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span class="brand-name">Wattline</span></div><button type="button" id="rail-toggle" class="rail-toggle" aria-controls="rail-nav" aria-expanded="true"></button></div>
       <p class="brand-caption"><span data-i18n="compute_monitoring_workbench">算力监控工作台</span></p>
       <nav aria-label="机器导航" data-i18n-aria-label="machine_navigation" id="rail-nav"></nav>
     </div>
@@ -76,6 +76,11 @@
       <button id="remove-confirm" type="submit" class="control danger-confirm" data-i18n="confirm_removal">确认移除</button>
     </div>
   </form>
+</dialog>
+<dialog class="machine-dialog gpu-dialog" id="gpu-dialog" aria-labelledby="gpu-dialog-title">
+  <div class="panel-head"><h2 id="gpu-dialog-title"></h2><form method="dialog"><button type="submit" class="control" autofocus data-i18n="close_details">关闭详情</button></form></div>
+  <div id="gpu-dialog-content"></div>
+  <div class="dialog-actions gpu-dialog-actions"><button type="button" class="control primary-control" data-gpu-trends data-i18n="gpu_trends">查看此 GPU 趋势</button></div>
 </dialog>
 <script src="/static/locales.js" defer></script>
 <script src="/static/i18n.js" defer></script>

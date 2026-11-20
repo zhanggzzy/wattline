@@ -63,3 +63,27 @@ the frontend work merged in PR #2, its independent review and known limitations.
 It was written after implementation; that frontend change did not use OpenSpec.
 Product maintenance delivers reviewed main commits. Instance updates remain a
 separate deployment session requested by the user.
+
+## Dashboard workspace
+
+Use the arrow beside Wattline to collapse navigation into a narrow status rail;
+select a status light to open its machine, or expand to restore names. Machine
+names and statuses are available on hover and keyboard focus. The density
+preference is saved locally when browser storage is available.
+
+Machine trends use the full content width. Choose a metric and **全页展示 / Focus
+charts** for a single large plot, then toggle additional metrics to compare them
+vertically. For example, choose **GPU 功耗 / GPU power**, **24 小时 / 24 hours**,
+enter focus mode and select **GPU 利用率 / GPU utilization**. At least one plot
+stays selected. Use **返回工作台 / Return to dashboard** or Escape to return;
+Escape first clears an active chart reading. Each chart also offers a sample
+table under **查看图表数据 / View chart data**.
+
+The hardware table below trends combines each GPU’s status and measurements
+with current process PID, account, ownership evidence and VRAM. On small
+containers it becomes labeled device cards; its named region can also be
+scrolled with the keyboard. Select a GPU to open details, close with the visible
+button or Escape, or use **查看此 GPU 趋势 / View this GPU’s trends** to inspect
+that device’s history. CPU, memory, logical CPU count/load and system facts
+remain above trends. See the active `add-dashboard-focus-layout` OpenSpec change
+for implementation verification and review status.

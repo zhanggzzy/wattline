@@ -329,3 +329,68 @@ dialog::backdrop { overflow: hidden; overscroll-behavior: contain; }
 .locale-control { display: flex; align-items: center; gap: .35rem; font-size: .75rem; }
 .locale-control select { max-width: 7rem; padding: .3rem; border: 1px solid #c7d8ce; border-radius: .35rem; background: #fff; color: #234b3e; }
 @media (max-width: 515px) { .locale-control > span { display: none; } .top-actions { flex-wrap: wrap; justify-content: flex-end; } }
+
+/* Navigation density keeps machine status and identity available in either mode. */
+.rail-brand { display: flex; justify-content: space-between; align-items: center; gap: 4px; }
+.rail-brand .brand { min-width: 0; font-size: 18px; gap: 7px; padding-inline: 0; }
+.rail-toggle { flex: 0 0 32px; min-height: 40px; border: 1px solid #355c8c; border-radius: 7px; color: #e8eef9; background: #203b60; font-size: 24px; }
+.shell.rail-collapsed { display: grid; grid-template-columns: 64px minmax(0, 1fr); }
+.rail-collapsed .rail { padding: 20px 8px; }
+.rail-collapsed .rail-brand { justify-content: center; }
+.rail-collapsed .brand, .rail-collapsed .brand-caption, .rail-collapsed .rail-label,
+.rail-collapsed .rail-nav strong, .rail-collapsed .rail-machine .machine-icon { display: none; }
+.rail-collapsed #rail-nav { display: block; overflow: visible; padding-top: 16px; }
+.rail-collapsed .rail-nav { width: 100%; justify-content: center; padding: 10px; margin-bottom: 8px; }
+.rail-collapsed .rail-nav .status-dot { margin: 0; }
+.rail-collapsed .rail-inner { position: sticky; top: 20px; max-height: calc(100dvh - 40px); overflow: auto; scrollbar-width: thin; }
+.rail-machine:focus-visible::after { content: attr(title); position: fixed; left: 64px; top: 4px; max-width: calc(100vw - 80px); padding: 4px 10px; background: #203b60; color: white; border: 1px solid #a8c4ff; border-radius: 6px; z-index: 5; overflow-wrap: anywhere; }
+.details-layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
+.chart-title { padding: 14px 18px 0; font-size: 15px; }
+.chart-title small { color: var(--muted); font-size: 12px; margin-left: 6px; }
+.focus-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+.focus-heading p { color: var(--muted); margin-top: 8px; }
+.trends-focused .shell { display: block; }
+.trends-focused .rail, .trends-focused .topbar { display: none; }
+.trends-focused .content { max-width: none; padding: 20px clamp(16px, 3vw, 38px); }
+.trends-focused .trend-controls { padding: 0; margin-bottom: 16px; }
+.trend-stack { display: grid; gap: 16px; }
+.trend-stack .plot { height: max(180px, calc((100dvh - 290px) / var(--chart-count) - 120px)); }
+.hardware-scroll { container-type: inline-size; max-height: 70dvh; overflow: auto; }
+.hardware-table { min-width: 840px; font-size: 12px; border-collapse: separate; border-spacing: 0; }
+.hardware-table th, .hardware-table td { padding: 12px 16px; vertical-align: top; border-bottom: 1px solid var(--line); }
+.hardware-table thead { position: sticky; top: 0; z-index: 2; background: #f5f7fb; }
+.hardware-table tbody th { position: sticky; left: 0; background: white; z-index: 1; width: 190px; }
+.hardware-table td small { display: block; color: var(--muted); margin-top: 5px; }
+.hardware-table td > strong { display: block; margin-top: 8px; }
+.gpu-open { background: transparent; border: 0; padding: 2px; text-align: left; color: var(--accent-deep); min-width: 44px; }
+.gpu-open:hover strong { text-decoration: underline; }
+.gpu-open span { display: block; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; font-weight: 400; }
+.gpu-processes { margin: 0; padding: 0 0 0 14px; }
+.gpu-processes li + li { margin-top: 12px; }
+.process-empty { color: var(--muted); }
+.gpu-dialog { width: min(840px, calc(100% - 32px)); }
+.gpu-dialog > .panel-head { position: sticky; top: 0; z-index: 3; background: white; }
+.gpu-dialog .panel-head form { display: block; padding: 0; }
+.gpu-dialog #gpu-dialog-content { padding: 16px; display: grid; gap: 16px; }
+.gpu-dialog-actions { padding: 0 16px 16px; }
+@container (max-width: 840px) {
+  .hardware-table { min-width: 0; }
+  .hardware-table thead { display: none; }
+  .hardware-table, .hardware-table tbody { display: block; }
+  .hardware-table tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 12px; border: 1px solid var(--line); border-radius: 12px; }
+  .hardware-table th, .hardware-table td { display: block; width: auto; min-width: 0; overflow-wrap: anywhere; }
+  .hardware-table tbody th { position: static; width: auto; grid-column: 1 / -1; border-radius: 12px 12px 0 0; background: #f5f7fb; }
+  .hardware-table td:last-child { grid-column: 1 / -1; border: 0; }
+  .hardware-table td[data-label]::before { content: attr(data-label); display: block; color: var(--muted); margin-bottom: 8px; }
+}
+@media (max-width: 730px) {
+  .rail-brand { justify-content: flex-start; gap: 16px; }
+  .rail-collapsed .content { padding-inline: 12px; }
+  .rail-collapsed .topbar { padding-inline: 12px; flex-wrap: wrap; }
+}
+@media (pointer: coarse) { .rail-toggle, .gpu-open { min-height: 44px; } }
+
+.chart-values { margin: 0 16px 12px; font-size: 12px; }
+.chart-values summary { cursor: pointer; color: var(--accent-deep); min-height: 24px; }
+.chart-values .scroll { max-height: 260px; margin-top: 8px; }
+.chart-values table { min-width: 300px; }

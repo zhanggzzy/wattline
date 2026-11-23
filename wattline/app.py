@@ -12,7 +12,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .collector import CollectionError
 from .config import AliasUpdate, MachineOrder, MachineRegistration, MachineRemoval, MachineSettings
-from .history import GPU_METRICS, HOST_METRICS, WARM_HOURS
+from .history import GPU_METRICS, HOST_METRICS, OVERVIEW_METRICS, WARM_HOURS
 from .service import Monitor
 
 
@@ -143,10 +143,14 @@ def create_app(config, *, monitor=None):
             metric = metric or ('gpu' if gpu else 'cpu')
             if metric not in available:
                 raise HTTPException(422, '此范围不支持该指标')
-        elif gpu or metric:
-            raise HTTPException(422, '请为设备或指标指定机器')
-        elif hours > 24:
-            raise HTTPException(422, '机器总览最多支持 24 小时，请在机器详情查看更长窗口')
+        else:
+            if gpu:
+                raise HTTPException(422, '请为设备指标指定机器')
+            metric = metric or 'gpu'
+            if metric not in OVERVIEW_METRICS:
+                raise HTTPException(422, '总览不支持该指标')
+            if hours > 24:
+                raise HTTPException(422, '机器总览最多支持 24 小时，请在机器详情查看更长窗口')
         try:
             return await service.series(key, gpu, metric, hours)
         except (OSError, sqlite3.Error) as error:

@@ -35,6 +35,17 @@ def node(i, status="normal"):
 machines = [node(1), node(2), node(3, "offline")]
 mode = "normal"
 mutations = []
+history_queries = []
+def curve(machine_id, index, metric):
+    base = {"demo-1":[10,15,22,30,42,55,63,71,80,88,92],
+            "demo-2":[85,90,78,None,None,None,40,52,61,73,84],
+            "demo-3":[None]*11}[machine_id][index]
+    if base is None:
+        return None
+    factor = {"gpu":1, "cpu":0.6, "memory":0.4, "power":7}[metric]
+    return round(base*factor, 1)
+
+
 def handle(route):
     global machines
     path = route.request.url.split("http://wattline.test", 1)[1].split("?")[0]
@@ -56,10 +67,21 @@ def handle(route):
         now = int(time.time()*1000)
         from urllib.parse import parse_qs, urlsplit
         q = parse_qs(urlsplit(route.request.url).query)
-        keys = [q["metric"][0]] if "metric" in q else ["gpu", "cpu"]
+        metric = q.get("metric", ["gpu"])[0]
         hours = int(q.get("hours", [24])[0])
-        return route.fulfill(json=dict(keys=keys, to=now, **{"from":now-hours*3600000},
-            points=[dict(time=now-hours*3600000+i*hours*360000, values=[30+(i*7)%50]*len(keys)) for i in range(11)]))
+        history_queries.append({"metric":metric, "hours":hours, "machine":q.get("machine",[None])[0]})
+        if "machine" in q:
+            return route.fulfill(json=dict(keys=[metric], to=now, **{"from":now-hours*3600000},
+                points=[dict(time=now-hours*3600000+i*hours*360000, values=[30+(i*7)%50]) for i in range(11)]))
+        ids = [host["id"] for host in machines if host["enabled"]] if mode != "empty" else []
+        points = []
+        if ids:
+            for i in range(11):
+                values = [curve(machine_id, i, metric) for machine_id in ids]
+                points.append(dict(time=now-hours*3600000+i*hours*360000, values=values,
+                                   breaks=[value is None for value in values]))
+        return route.fulfill(json=dict(keys=[metric], machines=ids, to=now,
+            **{"from":now-hours*3600000}, points=points))
     mutations.append((route.request.method, path, route.request.post_data))
     if path == "/api/machines/order":
         order = json.loads(route.request.post_data)["machines"]
@@ -263,10 +285,10 @@ def check_focus_layout(browser):
     page.set_viewport_size({'width':1440,'height':1100})
     page.locator('#focus-trends').press('Enter')
     expect(page.locator('#exit-trends')).to_be_focused()
-    expect(page.locator('.trend-stack canvas')).to_have_count(1)
+    expect(page.locator('.trend-stack .plot canvas')).to_have_count(1)
     page.screenshot(path=str(OUT/'an48-single-power.png'),full_page=True)
     page.locator('[data-metric="gpu"]').press('Space')
-    expect(page.locator('.trend-stack canvas')).to_have_count(2)
+    expect(page.locator('.trend-stack .plot canvas')).to_have_count(2)
     for summary in page.locator('.chart-summary').all():
         expect(summary).to_contain_text('11 个有效时段')
     expect(page.locator('[data-range="24"]')).to_have_attribute('aria-pressed','true')
@@ -277,17 +299,17 @@ def check_focus_layout(browser):
     resized = []
     for width in [1440,975,731,640,390,320]:
         page.set_viewport_size({'width':width,'height':1100})
-        page.wait_for_function("""() => [...document.querySelectorAll('.trend-stack canvas')].every(c =>
+        page.wait_for_function("""() => [...document.querySelectorAll('.trend-stack .plot canvas')].every(c =>
           Math.abs(c.width-c.clientWidth*devicePixelRatio)<=1 && Math.abs(c.height-c.clientHeight*devicePixelRatio)<=1)""")
         assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), ('focus',width)
-        bounds = [canvas.bounding_box() for canvas in page.locator('.trend-stack canvas').all()]
+        bounds = [canvas.bounding_box() for canvas in page.locator('.trend-stack .plot canvas').all()]
         assert bounds[0]['y']+bounds[0]['height'] <= bounds[1]['y']
         resized.append({'width':width,'plots':len(bounds),'overflow':False})
     page.set_viewport_size({'width':390,'height':844})
     page.screenshot(path=str(OUT/'an48-two-charts-narrow.png'),full_page=True)
     page.set_viewport_size({'width':1440,'height':1100})
     page.screenshot(path=str(OUT/'an48-power-utilization-24h.png'),full_page=True)
-    for canvas, label in zip(page.locator('.trend-stack canvas').all(),['GPU 功耗','GPU 利用率']):
+    for canvas, label in zip(page.locator('.trend-stack .plot canvas').all(),['GPU 功耗','GPU 利用率']):
         canvas.press('ArrowLeft')
         suffix = canvas.get_attribute('id').removeprefix('trend-chart')
         expect(page.locator('#chart-announcement'+suffix)).to_contain_text(label)
@@ -301,10 +323,10 @@ def check_focus_layout(browser):
     # Selection cannot become empty and can include every supported metric.
     page.locator('[data-metric="gpu"]').click()
     page.locator('[data-metric="power"]').click()
-    expect(page.locator('.trend-stack canvas')).to_have_count(1)
+    expect(page.locator('.trend-stack .plot canvas')).to_have_count(1)
     page.locator('[data-metric="vram"]').click()
     page.locator('[data-metric="temp"]').click()
-    expect(page.locator('.trend-stack canvas')).to_have_count(3)
+    expect(page.locator('.trend-stack .plot canvas')).to_have_count(3)
     page.locator('[data-range="168"]').click()
     expect(page.locator('#chart-summary')).to_contain_text('11 个有效时段')
     page.wait_for_function('Object.values(state.histories).length === 3 && Object.values(state.histories).every(h => h.to-h.from === 168*3600000)')
@@ -346,11 +368,32 @@ def check_focus_layout(browser):
     # Overview also supports a stack and localized controls.
     page.locator('#rail-nav [data-overview]').click()
     page.locator('#locale-select').select_option('en')
+    expect(page.get_by_role('group',name='Trend metric')).to_be_visible()
+    expect(page.locator('.chart-panel .panel-head')).to_contain_text('By machine · Fixed 24-hour window')
     page.locator('#focus-trends').click()
     page.locator('[data-metric="cpu"]').click()
     expect(page.locator('.chart-title').first).to_contain_text('GPU utilization')
     expect(page.locator('.chart-title').nth(1)).to_contain_text('CPU usage')
+    expect(page.locator('#chart-summary')).to_have_text('11 valid periods · Machines: 3')
+    expect(page.locator('#chart-summary-cpu')).to_have_text('11 valid periods · Machines: 3')
+    assert page.evaluate('Object.values(state.histories).every(h => h.machines.length === 3 && h.to-h.from === 24*3600000)')
+    expect(page.locator('[data-range]')).to_have_count(0)
+    page.locator('[data-metric="power"]').click()
+    expect(page.locator('.chart-title').nth(2)).to_contain_text('GPU power')
+    expect(page.locator('#chart-summary-power')).to_have_text('11 valid periods · Machines: 3')
+    page.locator('#chart-data-power summary').click()
+    expect(page.locator('#chart-data-power thead')).to_contain_text('训练节点 Alpha (W)')
+    expect(page.locator('#chart-data-power tbody tr').first).to_contain_text('70.0 W')
+    page.locator('#trend-chart-power').press('ArrowLeft')
+    expect(page.locator('#chart-announcement-power')).to_contain_text('训练节点 Alpha 616.0 W')
     page.locator('#exit-trends').click()
+    expect(page.locator('[data-overview-metric="gpu"]')).to_have_attribute('aria-pressed','true')
+    page.get_by_role('button',name='Memory usage',exact=True).click()
+    page.locator('#focus-trends').click()
+    expect(page.locator('.chart-title')).to_contain_text('Memory usage')
+    expect(page.locator('#chart-summary')).to_have_text('11 valid periods · Machines: 3')
+    page.locator('#exit-trends').click()
+    expect(page.locator('[data-overview-metric="memory"]')).to_have_attribute('aria-pressed','true')
     page.locator('#rail-nav [data-host="demo-3"]').click()
     expect(page.locator('.hardware-table')).to_contain_text('No fresh sample')
     expect(page.locator('[data-value="GPU-synthetic-01-memory"]')).to_have_text('—')
@@ -386,6 +429,113 @@ def check_focus_layout(browser):
     return {'result':'PASS','resized':resized,'held_obsolete_requests':len(held),'page_errors':errors,
             'screenshots':['an48-desktop.png','an48-narrow.png','an48-dialog-narrow.png','an48-power-utilization-24h.png','an48-single-power.png','an48-two-charts-narrow.png']}
 
+def check_overview_regressions(browser):
+    page = browser.new_page(viewport={"width":320,"height":844})
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    label = "<b>字面</b>&" + "W" * (80-len("<b>字面</b>&"))
+    active = [dict(node(1), id=f"trend-{i}", name=f"合成节点 {i}") for i in range(1,10)]
+    for host in (active[0],active[-1]):
+        host.update(name=label, address="<i>合成地址</i>.invalid")
+    slow = [0,11,22,None,33,44,55,None,66,77,None,90,91]
+    now = int(time.time()*1000)
+    start = now-86400000
+    points = [
+        dict(time=start+i*216000, values=[i+5*j for j in range(1,9)]+[value],
+             breaks=[i == 0]*8+[i in (0,10,11)])
+        for i,value in enumerate(slow)
+    ]
+    # Missing polls can also be signalled on the next observed bucket.
+    points[4]["values"][1] = None
+    points[5]["breaks"][1] = True
+    page.route("**/*", handle)
+    page.route("**/api/snapshot", lambda route: route.fulfill(json=dict(
+        server_time=now, period_ms=10000, stale_ms=30000, machines=active)))
+    page.route("**/api/history?*", lambda route: route.fulfill(json={
+        "from":start, "to":now, "bucket_ms":216000, "gap_ms":324000, "keys":["gpu"],
+        "machines":[host["id"] for host in active], "points":points,
+    }))
+    # Observe real canvas strokes and segment lengths while leaving rendering in place.
+    page.add_init_script("""(() => {
+      const edges = new WeakMap();
+      const traces = new WeakMap();
+      const context = CanvasRenderingContext2D.prototype;
+      const wrap = (method, observe) => {
+        const original = context[method];
+        context[method] = function (...args) {
+          observe(this);
+          return original.apply(this,args);
+        };
+      };
+      wrap('beginPath', ctx => edges.set(ctx,0));
+      wrap('lineTo', ctx => edges.set(ctx,(edges.get(ctx) || 0)+1));
+      wrap('clearRect', ctx => traces.set(ctx.canvas,[]));
+      wrap('stroke', ctx => {
+        const trace = traces.get(ctx.canvas) || [];
+        trace.push({color:ctx.strokeStyle,dash:ctx.getLineDash(),edges:edges.get(ctx)});
+        traces.set(ctx.canvas,trace);
+      });
+      window.strokeTrace = canvas => traces.get(canvas);
+    })()""")
+    page.goto("http://wattline.test")
+    expect(page.locator("#chart-summary")).to_contain_text("13 个有效时段")
+    legend = page.locator("#chart-legend")
+    tip = page.locator("#chart-tip")
+    canvas = page.locator("#trend-chart")
+    entries = legend.locator(".chart-legend-item")
+    expect(entries).to_have_count(9)
+    expected_labels = [f"{label} · {host['address']} · {host['id']}" for host in (active[0],active[-1])]
+    for entry,expected in zip((entries.first,entries.last),expected_labels):
+        expect(entry).to_have_text(expected)
+    expect(legend.locator("b, i")).to_have_count(0)
+
+    swatches = entries.locator("canvas").evaluate_all("canvases => canvases.map(canvas => strokeTrace(canvas)[0])")
+    assert swatches[0]["color"] == swatches[-1]["color"]
+    assert swatches[0]["dash"] != swatches[-1]["dash"]
+    assert len({(item["color"],tuple(item["dash"])) for item in swatches}) == 9
+    strokes = canvas.evaluate("canvas => strokeTrace(canvas)")
+    for index,swatch in enumerate(swatches):
+        lengths = [stroke["edges"] for stroke in strokes
+                   if (stroke["color"],stroke["dash"]) == (swatch["color"],swatch["dash"])]
+        assert lengths == {1:[3,7], 8:[7,1]}.get(index,[12]), (index, lengths)
+
+    canvas.press("ArrowLeft")
+    expect(tip).to_be_visible()
+    for expected in expected_labels:
+        expect(tip).to_contain_text(expected)
+    expect(tip.locator("b, i")).to_have_count(0)
+    assert page.evaluate("""() => {
+      const legend = document.querySelector('#chart-legend').getBoundingClientRect();
+      const plot = document.querySelector('.plot').getBoundingClientRect();
+      const tip = document.querySelector('#chart-tip').getBoundingClientRect();
+      const textFits = (parent, element) => {
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        const rects = [...range.getClientRects()];
+        return rects.length > 1 && rects.every(r => r.left >= parent.left && r.right <= parent.right);
+      };
+      return document.documentElement.scrollWidth === innerWidth
+        && tip.left >= plot.left && tip.right <= plot.right
+        && textFits(legend,document.querySelector('.chart-legend-item span'))
+        && textFits(tip,document.querySelector('#chart-tip div'));
+    }""")
+    canvas.hover(position={"x":41,"y":20})
+    expect(tip).to_contain_text(expected_labels[-1]+" · 0%")
+    page.locator('#locale-select').select_option('en')
+    expect(page.locator('#chart-summary')).to_have_text('13 valid periods · Machines: 9')
+    page.locator('#chart-data summary').click()
+    headers = page.locator('#chart-data thead th')
+    expect(headers).to_have_count(10)
+    expect(headers.first).to_have_text('Sample time')
+    expect(headers.last).to_have_text(expected_labels[-1]+' (%)')
+    expect(page.locator('#chart-data b, #chart-data i')).to_have_count(0)
+    expect(page.locator('#chart-data tbody tr').first.locator('td').last).to_have_text('0.0%')
+    assert page.evaluate('document.documentElement.scrollWidth === innerWidth')
+    assert not errors, errors
+    page.close()
+    return {"width":320,"machines":9,"slow_segment_edges":[7,1],"lapse_segment_edges":[3,7]}
+
+
 with sync_playwright() as p:
     browser = p.chromium.launch(**({"executable_path":args.browser} if args.browser else {}))
     page = browser.new_page(viewport={"width":1440,"height":1100}, device_scale_factor=1)
@@ -395,6 +545,45 @@ with sync_playwright() as p:
     page.goto("http://wattline.test")
     expect(page.locator("#host-rows tr")).to_have_count(3)
     expect(page.locator("#chart-summary")).to_contain_text("11 个有效时段")
+    def assert_card_stack():
+        cards = [page.locator(selector).bounding_box()
+                 for selector in ('.attention-panel','.chart-panel','.machine-panel')]
+        assert all(cards), cards
+        for upper, lower in zip(cards, cards[1:]):
+            assert upper["y"] + upper["height"] <= lower["y"], cards
+            assert upper["x"] == lower["x"] and upper["width"] == lower["width"], cards
+
+    assert_card_stack()
+    legend = page.locator("#chart-legend")
+    expect(legend).to_contain_text("训练节点 Alpha")
+    expect(legend).to_contain_text("推理节点 Beta")
+    expect(legend).to_contain_text("离线节点 Gamma")
+    expect(legend).not_to_contain_text("平均")
+    gpu_button = page.locator('[data-overview-metric="gpu"]')
+    expect(gpu_button).to_have_attribute("aria-pressed","true")
+    assert history_queries[-1] == {"metric":"gpu","hours":24,"machine":None}, history_queries[-1]
+    page.locator("#trend-chart").focus()
+    page.keyboard.press("ArrowLeft")
+    expect(page.locator("#chart-announcement")).to_contain_text("训练节点 Alpha")
+    page.locator('[data-overview-metric="cpu"]').click()
+    expect(page.locator('[data-overview-metric="cpu"]')).to_have_attribute("aria-pressed","true")
+    page.wait_for_function("state.history?.keys[0] === 'cpu'")
+    assert history_queries[-1] == {"metric":"cpu","hours":24,"machine":None}, history_queries[-1]
+    page.locator('[data-overview-metric="memory"]').click()
+    expect(page.locator('[data-overview-metric="memory"]')).to_have_attribute("aria-pressed","true")
+    page.wait_for_function("state.history?.keys[0] === 'memory'")
+    assert history_queries[-1] == {"metric":"memory","hours":24,"machine":None}, history_queries[-1]
+    page.locator('[data-overview-metric="power"]').click()
+    expect(page.locator('[data-overview-metric="power"]')).to_have_attribute("aria-pressed","true")
+    page.wait_for_function("state.history?.keys[0] === 'power'")
+    expect(legend).to_contain_text(" · W")
+    page.locator('[data-overview-metric="gpu"]').click()
+    page.wait_for_function("state.history?.keys[0] === 'gpu'")
+    # Same display names must stay distinguishable by address.
+    page.evaluate("state.snapshot.machines[1].name = state.snapshot.machines[0].name; renderPage(); paint()")
+    expect(legend).to_contain_text("demo-1.invalid")
+    expect(legend).to_contain_text("demo-2.invalid")
+    page.locator(".chart-panel").screenshot(path=str(OUT/"overview-trend.png"))
     alpha_memory = page.locator('#host-rows tr[data-machine-row="demo-1"] [data-label="内存"]')
     expect(alpha_memory).to_contain_text("38%")
     expect(alpha_memory.locator(".memory-used")).to_contain_text("48.0 GiB 已用")
@@ -474,7 +663,10 @@ with sync_playwright() as p:
     expect(page.get_by_role("button", name="移除节点", exact=True)).to_be_focused()
     page.screenshot(path=str(OUT/"detail.png"), full_page=True)
     page.get_by_role("button", name="机器总览", exact=True).first.click()
+    page.wait_for_function("!state.machine && state.history?.machines?.length === 3")
+    assert history_queries[-1]["machine"] is None and history_queries[-1]["hours"] == 24, history_queries[-1]
     page.set_viewport_size({"width":390,"height":844})
+    assert_card_stack()
     page.screenshot(path=str(OUT/"mobile.png"))
     page.locator(".machine-scroll").screenshot(path=str(OUT/"mobile-list.png"))
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
@@ -513,6 +705,7 @@ with sync_playwright() as p:
     mode = "empty"
     page.reload()
     expect(page.locator("#host-rows")).to_contain_text("尚未添加机器")
+    expect(page.locator("#chart-summary")).to_have_text("暂无启用机器")
     page.screenshot(path=str(OUT/"empty.png"), full_page=True)
     mode = "error"
     page.reload()
@@ -534,6 +727,7 @@ with sync_playwright() as p:
     for width in [320, 640, 1024]:
         page.set_viewport_size({"width":width,"height":900})
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), width
+        assert_card_stack()
     page.get_by_role("button", name="新增机器", exact=True).click()
     # Polling while a modal is open must preserve its invoker for native focus return.
     page.evaluate("renderPage(true)")
@@ -621,6 +815,7 @@ with sync_playwright() as p:
     mode = 'empty'
     page.reload()
     expect(page.locator('#host-rows')).to_contain_text('No machines yet.')
+    expect(page.locator('#chart-summary')).to_have_text('No enabled machines')
     mode = 'error'
     page.reload()
     expect(page.get_by_role('heading',name='Workbench unavailable')).to_be_visible()
@@ -644,8 +839,9 @@ with sync_playwright() as p:
     dialog_locales = check_dialog_locales(browser)
     unlimited_container = check_unlimited_container(browser)
     focus_layout = check_focus_layout(browser)
+    overview_regressions = check_overview_regressions(browser)
     print(json.dumps({"focus_layout":focus_layout,"result":"PASS", "browser":browser.version, "page_errors":errors,
-                      "mutations":len(mutations), "screenshots":25, "locales":["zh-CN","en"], "dialog_locales":dialog_locales,
+                      "mutations":len(mutations), "history_queries":len(history_queries), "screenshots":26, "locales":["zh-CN","en"], "dialog_locales":dialog_locales,
                       "metric_layouts":layout_results, "focus_refreshes":focus_results,
-                      "unlimited_container":unlimited_container}, ensure_ascii=False))
+                      "unlimited_container":unlimited_container,"overview_regressions":overview_regressions}, ensure_ascii=False))
     browser.close()

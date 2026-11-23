@@ -15,6 +15,7 @@ WARM_MS = 7 * DAY_MS
 MAX_POINTS = 400
 HOST_METRICS = {'cpu':'cpu_percent', 'memory':'memory_percent', 'memory_used':'memory.used_bytes',
                 'gpu':'gpu_percent', 'power':'gpu_power_w'}
+OVERVIEW_METRICS = ('gpu', 'cpu', 'memory', 'power')
 GPU_METRICS = {'gpu':'utilization_percent', 'power':'power_w', 'vram':'memory_used_mib', 'temp':'temperature_c'}
 HOST_FIELDS = ('cpu_count','cpu_percent','load_average','memory','memory_percent','root_disk',
                'uptime_seconds','gpu_percent','gpu_util_count','gpu_power_w','gpu_inventory_complete','driver_version',
@@ -266,63 +267,68 @@ class History:
         window = hours * 3600000
         start = now-window
         if machine is None:
-            keys = ['gpu', 'cpu']
             bucket = max(period, math.ceil(window/MAX_POINTS))
-            points = self.overview(machines, start, now, bucket, stale)
-        else:
-            keys = [metric]
-            bucket = math.ceil(window/MAX_POINTS) if window/period >= MAX_POINTS else 0
-            points = self.machine_series(machine, gpu, metric, start, now, bucket, stale, hours > 24)
-        return {'from':start,'to':now,'bucket_ms':bucket,'keys':keys,'points':points,
+            points = self.overview(machines, metric, start, now, bucket, stale)
+            return {'from':start,'to':now,'bucket_ms':bucket,'keys':[metric],
+                    'machines':list(machines),'points':points,'gap_ms':max(stale, bucket*1.5)}
+        bucket = math.ceil(window/MAX_POINTS) if window/period >= MAX_POINTS else 0
+        points = self.machine_series(machine, gpu, metric, start, now, bucket, stale, hours > 24)
+        return {'from':start,'to':now,'bucket_ms':bucket,'keys':[metric],'points':points,
                 'gap_ms':max(stale, bucket*1.5)}
 
-    def overview(self, machines, start, now, bucket, stale):
+    def overview(self, machines, metric, start, now, bucket, stale):
         if not machines:
             return []
-        placeholders = ','.join('?' for _ in machines)
         with self.connect(read=True) as db:
-            rows = db.execute(f"""
-                SELECT (at - ?) / ? AS bucket, MAX(at),
-                       SUM(json_extract(metrics,'$.gpu_percent') * json_extract(metrics,'$.gpu_util_count')),
-                       SUM(json_extract(metrics,'$.gpu_util_count')),
-                       AVG(json_extract(metrics,'$.cpu_percent')),
-                       COUNT(json_extract(metrics,'$.cpu_percent')), COUNT(*)
-                FROM host_ticks WHERE at BETWEEN ? AND ? AND machine IN ({placeholders})
-                GROUP BY bucket ORDER BY bucket
-                """, (start,bucket,start,now,*machines))
-            result = []
-            last = None
-            for _, at, gpu_sum, gpu_count, cpu, cpu_count, samples in rows:
-                gpu = gpu_sum/gpu_count if gpu_count else None
-                gap = last is None or at-last > max(stale, bucket*1.5)
-                result.append({'time':at,'values':[gpu,cpu],'breaks':[gap,gap],
-                               'valid':[gpu_count or 0,cpu_count],'samples':samples})
-                last = at
-            return result
+            columns = [self.machine_series_in(db, machine, None, metric, start, now, bucket, stale, False)
+                       for machine in machines]
+        indexed = []
+        for points in columns:
+            indexed.append({(point['time']-start)//bucket:point for point in points})
+        populated = [index for column in indexed for index in column]
+        if not populated:
+            return []
+        result = []
+        for index in range(min(populated), max(populated)+1):
+            values, breaks, valid = [], [], []
+            samples = 0
+            for column in indexed:
+                point = column.get(index)
+                values.append(point['values'][0] if point else None)
+                # An alignment slot has no observation. Continuity is decided by the machine series.
+                breaks.append(point['breaks'][0] if point else False)
+                valid.append(point['valid'][0] if point else 0)
+                samples += point['samples'] if point else 0
+            result.append({'time':start+index*bucket,'values':values,'breaks':breaks,
+                           'valid':valid,'samples':samples})
+        return result
 
     def machine_series(self, machine, gpu, metric, start, now, bucket, stale, include_warm):
         with self.connect(read=True) as db:
-            if gpu:
-                rows = db.execute("""
-                    SELECT h.at, h.boot, h.epoch, json_extract(g.metrics, ?),
-                           CASE WHEN ? THEN json_extract(g.metrics, '$.power_kind') END,
-                           json_extract(h.metrics, '$.stale_ms')
-                    FROM host_ticks h LEFT JOIN gpu_ticks g
-                      ON g.machine=h.machine AND g.at=h.at AND g.uuid=?
-                    WHERE h.machine=? AND h.at BETWEEN ? AND ? ORDER BY h.at
-                    """, ('$.'+GPU_METRICS[metric], metric == 'power', gpu, machine, start, now))
-            else:
-                rows = db.execute("""
-                    SELECT at, boot, epoch, json_extract(metrics, ?),
-                           CASE WHEN ? THEN json_extract(metrics, '$.gpu_generation') || ':' ||
-                                COALESCE(json_extract(metrics, '$.gpu_power_kind'), '') END,
-                           json_extract(metrics, '$.stale_ms')
-                    FROM host_ticks WHERE machine=? AND at BETWEEN ? AND ? ORDER BY at
-                    """, ('$.'+HOST_METRICS[metric], metric in ('gpu','power'), machine, start, now))
-            if include_warm:
-                warm = self.warm_series(db, machine, gpu, metric, start, now)
-                rows = merge(rows, warm, key=lambda row:row[0])
-            return downsample(rows, start, bucket, stale)
+            return self.machine_series_in(db, machine, gpu, metric, start, now, bucket, stale, include_warm)
+
+    def machine_series_in(self, db, machine, gpu, metric, start, now, bucket, stale, include_warm):
+        if gpu:
+            rows = db.execute("""
+                SELECT h.at, h.boot, h.epoch, json_extract(g.metrics, ?),
+                       CASE WHEN ? THEN json_extract(g.metrics, '$.power_kind') END,
+                       json_extract(h.metrics, '$.stale_ms')
+                FROM host_ticks h LEFT JOIN gpu_ticks g
+                  ON g.machine=h.machine AND g.at=h.at AND g.uuid=?
+                WHERE h.machine=? AND h.at BETWEEN ? AND ? ORDER BY h.at
+                """, ('$.'+GPU_METRICS[metric], metric == 'power', gpu, machine, start, now))
+        else:
+            rows = db.execute("""
+                SELECT at, boot, epoch, json_extract(metrics, ?),
+                       CASE WHEN ? THEN json_extract(metrics, '$.gpu_generation') || ':' ||
+                            COALESCE(json_extract(metrics, '$.gpu_power_kind'), '') END,
+                       json_extract(metrics, '$.stale_ms')
+                FROM host_ticks WHERE machine=? AND at BETWEEN ? AND ? ORDER BY at
+                """, ('$.'+HOST_METRICS[metric], metric in ('gpu','power'), machine, start, now))
+        if include_warm:
+            warm = self.warm_series(db, machine, gpu, metric, start, now)
+            rows = merge(rows, warm, key=lambda row:row[0])
+        return downsample(rows, start, bucket, stale)
 
     def warm_series(self, db, machine, gpu, metric, start, now):
         if gpu:

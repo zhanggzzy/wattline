@@ -43,9 +43,15 @@ byId('rail-toggle').addEventListener('click', () => {
   updateRail();
 });
 updateRail();
+const machineColors = ['#506dc3','#0b836a','#b16e23','#8b57a2','#c14953','#2f7f9e','#7d8b2f','#a35d2c'];
+const machineDashes = [
+  [], [8,4], [2,4], [12,4], [8,4,2,4], [8,4,2,4,2,4], [2,4,2,8], [12,4,4,4],
+  [12,4,2,4,2,4], [5,7], [12,8], [3,8], [12,4,6,4], [6,4,6,8], [6,8,2,4], [12,4,2,8]
+];
+const overviewMetrics = ['gpu','cpu','memory','power'];
 const machineIcon = '<span class="machine-icon" aria-hidden="true"><i></i><i></i></span>';
 const state = {snapshot:null, received:0, syncFailed:false, machine:null, gpu:null, metric:'cpu',
-  hours:24, filter:'all', query:'', history:null, historyError:false,
+  overviewMetric:'gpu', hours:24, filter:'all', query:'', history:null, historyError:false,
   focused:false, focusMetrics:[], histories:{}, historyErrors:{}};
 let layoutKey = '';
 let chart = null;
@@ -177,25 +183,27 @@ function overviewPage(hosts) {
       ${metricTile(t('visible_gpu_processes'),'processes',t('processes'),'≋',t('unique_pids_per_host'))}
       ${metricTile(t('total_gpu_power'),'watts','W','⌁',field('power-count'))}
     </section>
-    <div class="layout overview-layout"><section class="panel">
-      <div class="panel-head"><h2>${t('machines')}</h2><small id="row-count"></small></div>
-      <div class="tools"><div class="seg" role="group" aria-label="${t('filter_by_machine_status')}">
-        ${filters.map(([key,label]) => toggle(label, 'data-filter', key, state.filter === key)).join('')}
-        </div><input class="search" id="host-search" type="search" aria-label="${t('search_machines')}" placeholder="${t('search_name_or_address')}"></div>
-      <p id="order-message" class="order-message" role="status" ${orderMessage ? '' : 'hidden'}>${escape(orderMessage)}</p>
-      <div class="scroll machine-scroll" tabindex="0" role="region" aria-label="${t('machines')}"><table class="machine-table">
-        <thead><tr><th>${t('machine')}</th><th>${t('status')}</th><th><span class="wide-label">${t('gpu_utilization')}</span><span class="compact-label" title="${t('average_gpu_utilization')}">GPU</span></th>
-        <th aria-label="${t('gpu_power')}"><span class="power-label">${t('gpu_power')}</span><span class="narrow-power-label">${t('power')}</span></th><th>CPU</th><th>${t('memory')}</th></tr></thead>
-        <tbody id="host-rows"></tbody></table></div>
-    </section><div class="column">
-      <section class="panel">
+    <div class="overview-stack">
+      <section class="panel attention-panel">
         <div class="panel-head"><h2>${t('needs_attention_m051')}</h2><small>${t('machine_count',{count:issues.length})}</small></div>
         ${issues.length ? `<div class="issues">${issues.map(node => `<button type="button" class="issue" data-host="${escape(node.id)}">
           <span class="issue-mark ${escape(node.status)}" aria-hidden="true">${node.status === 'stale' ? '◷' : '!'}</span>
           <span><strong>${escape(node.name)}</strong><small>${escape(reason(node))}</small></span>${status(node.status,machineStates[node.status])}
         </button>`).join('')}</div>` : `<p class="empty">${t('no_machines_need_attention')}</p>`}
-      </section>${chartPanel(null,null)}
-    </div></div>`;
+      </section>
+      ${chartPanel(null,null)}
+      <section class="panel machine-panel">
+        <div class="panel-head"><h2>${t('machines')}</h2><small id="row-count"></small></div>
+        <div class="tools"><div class="seg" role="group" aria-label="${t('filter_by_machine_status')}">
+          ${filters.map(([key,label]) => toggle(label, 'data-filter', key, state.filter === key)).join('')}
+          </div><input class="search" id="host-search" type="search" aria-label="${t('search_machines')}" placeholder="${t('search_name_or_address')}"></div>
+        <p id="order-message" class="order-message" role="status" ${orderMessage ? '' : 'hidden'}>${escape(orderMessage)}</p>
+        <div class="scroll machine-scroll" tabindex="0" role="region" aria-label="${t('machines')}"><table class="machine-table">
+          <thead><tr><th>${t('machine')}</th><th>${t('status')}</th><th><span class="wide-label">${t('gpu_utilization')}</span><span class="compact-label" title="${t('average_gpu_utilization')}">GPU</span></th>
+          <th aria-label="${t('gpu_power')}"><span class="power-label">${t('gpu_power')}</span><span class="narrow-power-label">${t('power')}</span></th><th>CPU</th><th>${t('memory')}</th></tr></thead>
+          <tbody id="host-rows"></tbody></table></div>
+      </section>
+    </div>`;
 }
 
 function drawRows(hosts) {
@@ -312,10 +320,10 @@ document.addEventListener('keydown', event => {
 });
 
 function chartControls(host, device) {
-  const available = host ? supported(host,device) : ['gpu','cpu'];
+  const available = host ? supported(host,device) : overviewMetrics;
   return `<div class="trend-controls"><div class="seg" role="group" aria-label="${t('trend_metric')}">
-    ${available.map(key => toggle(descriptors[key][0],'data-metric',key,
-      state.focused ? state.focusMetrics.includes(key) : state.metric===key)).join('')}</div>
+    ${available.map(key => toggle(descriptors[key][0], host || state.focused ? 'data-metric' : 'data-overview-metric', key,
+      state.focused ? state.focusMetrics.includes(key) : (host ? state.metric : state.overviewMetric) === key)).join('')}</div>
     ${host ? `<div class="seg" role="group" aria-label="${t('time_range')}">${[[1,t('1_hour')],[6,t('6_hours')],[24,t('24_hours')],[72,t('3_days')],[168,t('7_days')]]
       .filter(([hours]) => hours <= (state.snapshot?.machine_history_hours ?? 24))
       .map(([hours,label]) => toggle(label,'data-range',hours,state.hours===hours)).join('')}</div>` : ''}</div>`;
@@ -333,16 +341,16 @@ function chartPlot(host, key = null, index = 0) {
 }
 
 function chartPanel(host, device) {
-  return `<section class="panel chart-panel"><div class="panel-head"><div><h2>${host ? t('resource_trends') : t('last_24_hours')}</h2><small>${host ? device ? 'GPU '+device.index : host.scope === 'container' ? t('container_scope') : t('whole_machine') : t('average_of_valid_samples_in_each_period')}</small></div>
+  return `<section class="panel chart-panel"><div class="panel-head"><div><h2>${host ? t('resource_trends') : t('last_24_hours')}</h2><small>${host ? device ? 'GPU '+device.index : host.scope === 'container' ? t('container_scope') : t('whole_machine') : t('overview_trend_scope')}</small></div>
     <div class="title-actions">${device ? `<button type="button" class="control" data-all-gpus>${t('back_to_machine')}</button>` : ''}<button type="button" id="focus-trends" class="control" data-focus-trends>${t('focus_charts')}</button></div></div>
-    ${host ? chartControls(host,device) : ''}${chartPlot(host)}
+    ${chartControls(host,device)}${chartPlot(host)}
   </section>`;
 }
 
 function setTrendFocus(enabled) {
   if (enabled) {
     focusScroll = window.scrollY;
-    state.focusMetrics = [getHost() ? state.metric : 'gpu'];
+    state.focusMetrics = [getHost() ? state.metric : state.overviewMetric];
   }
   state.focused = enabled;
   renderPage(true);
@@ -590,7 +598,8 @@ async function get(path, signal = AbortSignal.timeout(5000)) {
   return response.json();
 }
 
-const activeMetrics = () => state.focused ? state.focusMetrics : [state.machine ? state.metric : 'overview'];
+const activeMetrics = () => state.focused ? state.focusMetrics : [state.machine ? state.metric : state.overviewMetric];
+const historyHours = () => state.machine ? state.hours : 24;
 async function refreshHistory(reset = false) {
   if (reset) {
     historyRequest?.abort();
@@ -607,19 +616,12 @@ async function refreshHistory(reset = false) {
   historyRequest = controller;
   const metrics = [...activeMetrics()];
   await Promise.all(metrics.map(async metric => {
-    const params = new URLSearchParams({hours:state.hours});
-    if (host) {
-      params.set('machine',host.id);
-      params.set('metric',metric);
-      if (gpu) params.set('gpu',gpu.uuid);
-    }
+    const params = new URLSearchParams({hours:historyHours()});
+    if (host) params.set('machine',host.id);
+    params.set('metric',metric);
+    if (gpu) params.set('gpu',gpu.uuid);
     try {
-      let history = await get('/api/history?'+params, AbortSignal.any([controller.signal,AbortSignal.timeout(5000)]));
-      if (!host && metric !== 'overview') {
-        const index = history.keys.indexOf(metric);
-        history = {...history, keys:[metric], points:history.points.map(point => ({...point,
-          values:[index < 0 ? null : point.values[index]], breaks:[point.breaks?.[index]]}))};
-      }
+      const history = await get('/api/history?'+params, AbortSignal.any([controller.signal,AbortSignal.timeout(5000)]));
       if (historyRequest !== controller) return;
       state.histories[metric] = history;
       state.historyErrors[metric] = false;
@@ -657,18 +659,43 @@ async function refresh() {
   renderPage();
   paint();
   const lastQuery = state.history?.to ?? 0;
-  const liveTrendDue = state.hours <= 24 && state.snapshot?.server_time-lastQuery >= 5000;
+  const liveTrendDue = historyHours() <= 24 && state.snapshot?.server_time-lastQuery >= 5000;
   if (replaced || !state.history || liveTrendDue || Object.values(state.historyErrors).some(Boolean)) void refreshHistory(Boolean(replaced));
   window.setTimeout(refresh,2000);
 }
 
-function chartSeries(instance) {
-  const keys = state.histories[instance.metric]?.keys || (instance.metric === 'overview' ? ['gpu','cpu'] : [instance.metric]);
+function countLabels(labels) {
+  const counts = new Map();
+  for (const label of labels) counts.set(label,(counts.get(label) || 0)+1);
+  return counts;
+}
+
+function chartSeries(instance, history) {
+  if (!state.machine) {
+    const hosts = nodes();
+    const ids = history?.machines ?? hosts.filter(host => host.enabled).map(host => host.id);
+    const hostsById = new Map(hosts.map(host => [host.id,host]));
+    const names = ids.map(id => hostsById.get(id)?.name || id);
+    const nameCounts = countLabels(names);
+    const labels = names.map((name,index) => {
+      const id = ids[index];
+      return nameCounts.get(name) > 1 ? name+' · '+(hostsById.get(id)?.address || id) : name;
+    });
+    const labelCounts = countLabels(labels);
+    const [,unit] = descriptors[instance.metric];
+    return labels.map((label,index) => ({
+      key:instance.metric,
+      label:labelCounts.get(label) > 1 ? label+' · '+ids[index] : label,
+      unit, color:machineColors[index % machineColors.length],
+      dash:machineDashes[Math.floor(index / machineColors.length) % machineDashes.length]
+    }));
+  }
+  const keys = history?.keys || [instance.metric];
   return keys.map(key => {
     const [title,unit] = descriptors[key];
-    const label = !state.machine ? key === 'gpu' ? t('device_average_gpu') : t('machine_average_cpu')
-      : key === 'power' && !state.gpu ? (getHost()?.scope === 'container' ? t('visible_gpu_power') : t('total_gpu_power')) : title;
-    return {key,label,unit,color:colors[key]};
+    const label = key === 'power' && !state.gpu
+      ? (getHost()?.scope === 'container' ? t('visible_gpu_power') : t('total_gpu_power')) : title;
+    return {key,label,unit,color:colors[key],dash:[]};
   });
 }
 
@@ -676,7 +703,7 @@ function bindChart() {
   for (const element of document.querySelectorAll('.chart-instance')) {
     const canvas = element.querySelector('canvas');
     const instance = {canvas, suffix:element.dataset.chartSuffix,
-      metric:element.dataset.chartMetric || (state.machine ? state.metric : 'overview'),
+      metric:element.dataset.chartMetric || activeMetrics()[0],
       pointer:null,keyboardAt:null,points:[]};
     const observer = new ResizeObserver(() => drawChart(instance));
     instance.observer = observer;
@@ -700,7 +727,7 @@ function bindChart() {
       drawChart(instance);
       const point = instance.points[instance.keyboardAt];
       byId('chart-announcement'+instance.suffix).textContent = point
-        ? tooltipTime.format(point.time)+' · '+chartSeries(instance).map((item,i) => item.label+' '+fmt(point.values[i],item.unit,1)).join(' · ') : '';
+        ? tooltipTime.format(point.time)+' · '+chartSeries(instance,state.histories[instance.metric]).map((item,i) => item.label+' '+fmt(point.values[i],item.unit,1)).join(' · ') : '';
     });
     canvas.addEventListener('blur',() => {
       if (!canvas.isConnected) return;
@@ -718,6 +745,48 @@ function chartCeiling(series, points) {
   const max = Math.max(0,...points.flatMap(point => point.values.filter(Number.isFinite)));
   const step = metric.key === 'power' ? max > 800 ? 400 : max > 180 ? 100 : 40 : metric.key === 'temp' ? 25 : 16;
   return Math.max(step, Math.ceil(max/step)*step);
+}
+
+function setSeriesStroke(ctx, series) {
+  ctx.lineWidth = 1.8;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = series.color;
+  ctx.setLineDash(series.dash);
+}
+
+function paintLegend(chart, series, bucket) {
+  const key = JSON.stringify([series,bucket,i18n.locale]);
+  if (chart.legendKey === key) return;
+  chart.legendKey = key;
+  const legend = byId('chart-legend'+chart.suffix);
+  const entries = series.map(item => {
+    const entry = document.createElement('span');
+    entry.className = 'chart-legend-item';
+    const swatch = document.createElement('canvas');
+    swatch.className = 'legend-line';
+    swatch.width = 104;
+    swatch.height = 8;
+    swatch.setAttribute('aria-hidden','true');
+    const ctx = swatch.getContext('2d');
+    ctx.scale(2,2);
+    setSeriesStroke(ctx,item);
+    ctx.beginPath();
+    ctx.moveTo(1,2);
+    ctx.lineTo(51,2);
+    ctx.stroke();
+    const label = document.createElement('span');
+    label.textContent = item.label+(item.unit === '%' ? '' : ' · '+item.unit.trim());
+    entry.append(swatch,label);
+    return entry;
+  });
+  if (series.length) {
+    const note = document.createElement('span');
+    note.className = 'chart-note';
+    note.textContent = (bucket ? fmt(bucket/1000,t('second_average'))+' · ' : '')+t('gaps_indicate_discontinuous_samples');
+    entries.push(note);
+  }
+  legend.replaceChildren(...entries);
 }
 
 function drawChart(instance) {
@@ -741,19 +810,32 @@ function drawChart(instance) {
   const history = state.histories[chart.metric];
   const historyError = state.historyErrors[chart.metric];
   const end = history?.to ?? state.snapshot?.server_time ?? Date.now();
-  const start = history?.from ?? end-state.hours*3600000;
+  const hours = historyHours();
+  const start = history?.from ?? end-hours*3600000;
   const points = (history?.points || []).map(point => ({...point, values:point.values.map((value,i) =>
     history.keys[i] === 'vram' ? vram(value) : history.keys[i] === 'memory_used' ? gib(value) : value)}));
   chart.points = points;
-  const series = chartSeries(chart);
+  const series = chartSeries(chart,history);
+  paintLegend(chart,series,history?.bucket_ms);
   const data = byId('chart-data'+chart.suffix);
   // Build the accessible alternative only on demand, never on every pointer move.
-  if (data.open && (chart.tableHistory !== history || chart.tableLocale !== i18n.locale)) {
+  if (data.open && (chart.tableHistory !== history || chart.tableLegendKey !== chart.legendKey)) {
     chart.tableHistory = history;
-    chart.tableLocale = i18n.locale;
-    data.querySelector('.scroll').innerHTML = `<table><caption>${series.map(item => item.label).join(' / ')}</caption>
-      <thead><tr><th scope="col">${t('sample_time')}</th>${series.map(item => `<th scope="col">${item.label} (${item.unit.trim()})</th>`).join('')}</tr></thead>
-      <tbody>${points.map(point => `<tr><th scope="row">${tooltipTime.format(point.time)}</th>${point.values.map((value,index) => `<td>${fmt(value,series[index].unit,1)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
+    chart.tableLegendKey = chart.legendKey;
+    data.querySelector('.scroll').innerHTML = series.length ? `<table><caption>${series.map(item => escape(item.label)).join(' / ')}</caption>
+      <thead><tr><th scope="col">${t('sample_time')}</th>${series.map(item => `<th scope="col">${escape(item.label)} (${item.unit.trim()})</th>`).join('')}</tr></thead>
+      <tbody>${points.map(point => `<tr><th scope="row">${tooltipTime.format(point.time)}</th>${point.values.map((value,index) => `<td>${fmt(value,series[index].unit,1)}</td>`).join('')}</tr>`).join('')}</tbody></table>` : '';
+  }
+  byId('chart-error'+chart.suffix).hidden = !historyError;
+  const summary = byId('chart-summary'+chart.suffix);
+  if (!series.length) {
+    summary.textContent = historyError ? t('could_not_load_history_retrying_automatically') : t('no_enabled_machines');
+    byId('chart-tip'+chart.suffix).hidden = true;
+    ctx.font = '12px system-ui, sans-serif';
+    ctx.fillStyle = '#526862';
+    ctx.textAlign = 'center';
+    ctx.fillText(t('no_enabled_machines'),width/2,height/2);
+    return;
   }
   const ceiling = chartCeiling(series,points);
   const left = series[0].key === 'power' ? 50 : 41;
@@ -762,14 +844,15 @@ function drawChart(instance) {
   const bottom = height-25;
   const x = timestamp => left+(timestamp-start)/(end-start)*(right-left);
   const y = value => bottom-value/ceiling*(bottom-top);
-  const layout = {bottom,left,right,top,x,y,gap:state.machine ? Infinity : history?.gap_ms ?? Infinity};
+  const layout = {bottom,left,right,top,x,y};
   ctx.font = '10.5px system-ui, sans-serif';
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'right';
+  const axisUnit = series[0].unit === '%' || (!state.machine && chart.metric === 'power') ? series[0].unit : '';
   for (let i=0;i<=4;i++) {
     const value = ceiling*i/4;
     ctx.fillStyle = '#526862';
-    ctx.fillText(fmt(value, series[0].unit === '%' ? '%' : '', Number.isInteger(value) ? 0 : 1),left-6,y(value));
+    ctx.fillText(fmt(value, axisUnit, Number.isInteger(value) ? 0 : 1),left-6,y(value));
     ctx.strokeStyle = '#e9f0ec';
     ctx.lineWidth = 1;
     ctx.beginPath();
@@ -777,26 +860,21 @@ function drawChart(instance) {
     ctx.lineTo(right,y(value));
     ctx.stroke();
   }
-  const intervals = state.hours > 24 ? Math.min(state.hours/24,width >= 550 ? 6 : 3)
+  const intervals = hours > 24 ? Math.min(hours/24,width >= 550 ? 6 : 3)
     : width >= 540 ? 6 : width >= 355 ? 4 : 3;
-  const tickFormat = state.hours > 24 ? shortDate : shortTime;
+  const tickFormat = hours > 24 ? shortDate : shortTime;
   for (let i=0;i<=intervals;i++) {
     const timestamp = start+(end-start)*i/intervals;
     ctx.textAlign = i === 0 ? 'left' : i === intervals ? 'right' : 'center';
     ctx.fillText(tickFormat.format(timestamp),x(timestamp),bottom+13);
   }
   const valid = points.filter(point => point.values.some(Number.isFinite));
-  byId('chart-summary'+chart.suffix).textContent = historyError ? t('could_not_load_history_retrying_automatically')
+  summary.textContent = historyError ? t('could_not_load_history_retrying_automatically')
     : !history ? t('loading_historical_samples') : !valid.length ? t('no_valid_samples_in_this_window')
-    : t('history_summary',{count:valid.length,latest:series.map((item,i) =>
-      item.label+' '+fmt(valid.at(-1).values[i],item.unit,1)).join(' / ')});
-  const bucket = history?.bucket_ms;
-  byId('chart-legend'+chart.suffix).innerHTML = series.map(item =>
-    '<span><i class="legend-line" aria-hidden="true" data-series="'+item.key+'"></i>'+item.label+
-    (item.unit==='%' ? '' : ' · '+item.unit.trim())+'</span>').join('')+
-    '<span class="chart-note">'+(bucket ? fmt(bucket/1000,t('second_average'))+' · ' : '')+`${t('gaps_indicate_discontinuous_samples')}</span>`;
-  byId('chart-error'+chart.suffix).hidden = !historyError;
-  if (!points.some(point => point.values.some(Number.isFinite))) {
+    : state.machine ? t('history_summary',{count:i18n.number(valid.length),latest:series.map((item,i) =>
+      item.label+' '+fmt(valid.at(-1).values[i],item.unit,1)).join(' / ')})
+    : t('overview_history_summary',{count:i18n.number(valid.length),machines:i18n.number(series.length)});
+  if (!valid.length) {
     ctx.font = '12px system-ui, sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText(history ? t('no_valid_samples_in_this_window_m159') : t('waiting_for_historical_samples'),(left+right)/2,(top+bottom)/2);
@@ -975,7 +1053,7 @@ removeForm.addEventListener('submit', async event => {
 document.addEventListener('click',event => {
   const button = event.target.closest('button');
   if (!button) return;
-  const {host,gpu,filter,metric,range} = button.dataset;
+  const {host,gpu,filter,metric,range,overviewMetric} = button.dataset;
   if (button.hasAttribute('data-overview')) openHost(null);
   else if (button.hasAttribute('data-add-machine')) openMachineDialog(null);
   else if (button.hasAttribute('data-configure-machine')) openMachineDialog(getHost());
@@ -1006,6 +1084,12 @@ document.addEventListener('click',event => {
     paint();
     void refreshHistory(true);
     byId('focus-trends')?.focus();
+  } else if (overviewMetric) {
+    state.overviewMetric = overviewMetric;
+    if (chart) chart.metric = overviewMetric;
+    for (const node of document.querySelectorAll('[data-overview-metric]'))
+      node.setAttribute('aria-pressed',String(node.dataset.overviewMetric === overviewMetric));
+    void refreshHistory(true);
   } else if (metric || range) {
     if (metric && state.focused) {
       const selected = state.focusMetrics.includes(metric);
@@ -1037,6 +1121,7 @@ document.addEventListener('input',event => {
 
 function paintSeries(ctx, points, layout, series) {
   const { bottom, left, right, top, x, y } = layout;
+  const overview = !state.machine;
   ctx.save();
   ctx.beginPath();
   ctx.rect(left, top - 1, right - left, bottom - top + 2);
@@ -1045,15 +1130,16 @@ function paintSeries(ctx, points, layout, series) {
   series.forEach((metric, index) => {
     const segments = [];
     let segment = [];
-    let time = null;
     for (const point of points) {
       const value = point.values[index];
-      if (segment.length && (!Number.isFinite(value) || point.breaks?.[index] || point.time - time > layout.gap)) {
+      const valid = Number.isFinite(value);
+      const discontinuity = point.breaks?.[index];
+      if (overview && !valid && discontinuity === false) continue;
+      if (segment.length && (!valid || discontinuity)) {
         segments.push(segment);
         segment = [];
       }
-      if (Number.isFinite(value)) segment.push([x(point.time), y(value)]);
-      time = point.time;
+      if (valid) segment.push([x(point.time), y(value)]);
     }
     if (segment.length) segments.push(segment);
 
@@ -1078,10 +1164,7 @@ function paintSeries(ctx, points, layout, series) {
         ctx.closePath();
         ctx.fill();
       }
-      ctx.lineWidth = 1.8;
-      ctx.lineJoin = 'round';
-      ctx.lineCap = 'round';
-      ctx.strokeStyle = metric.color;
+      setSeriesStroke(ctx,metric);
       ctx.beginPath();
       ctx.moveTo(firstX, firstY);
       for (const [px, py] of part.slice(1)) ctx.lineTo(px, py);
@@ -1118,9 +1201,14 @@ function paintTooltip(ctx, series, layout, width, chart) {
     ctx.fill();
   }
   tip.hidden = false;
-  tip.innerHTML = '<time>' + tooltipTime.format(point.time) + '</time>' + series.map((metric, index) =>
-    '<div>' + metric.label + ' · ' + fmt(point.values[index], metric.unit, metric.key === 'vram' ? 1 : 0) + '</div>'
-  ).join('');
+  const timestamp = document.createElement('time');
+  timestamp.textContent = tooltipTime.format(point.time);
+  const readings = series.map((metric,index) => {
+    const reading = document.createElement('div');
+    reading.textContent = metric.label+' · '+fmt(point.values[index],metric.unit,metric.key === 'vram' ? 1 : 0);
+    return reading;
+  });
+  tip.replaceChildren(timestamp,...readings);
   const preferred = position + tip.offsetWidth + 10 < width ? position + 9 : position - tip.offsetWidth - 9;
   tip.style.left = clamp(preferred, 2, Math.max(2, width - tip.offsetWidth - 2)) + 'px';
   tip.style.top = '13px';

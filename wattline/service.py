@@ -540,9 +540,16 @@ class Monitor:
                 'machines':[self.machine_view(machine, now) for machine in self.ordered_machines()]}
 
     async def series(self, machine, gpu, metric, hours):
-        enabled = [item.history_key for item in self.machines.values() if item.enabled]
-        configured = next((item for item in self.machines.values() if item.history_key == machine), None)
-        period = min(self.interval(configured), self.config.interval_seconds) if configured else self.config.interval_seconds
+        enabled = [item for item in self.machines.values() if item.enabled]
+        if machine is None:
+            period = self.config.interval_seconds
+        else:
+            configured = next((item for item in self.machines.values() if item.history_key == machine), None)
+            period = min(self.interval(configured), self.config.interval_seconds) if configured else self.config.interval_seconds
         async with self.readers:
-            return await asyncio.to_thread(self.history.series, enabled, machine, gpu, metric, hours, self.clock(),
-                                           round(period*1000), round(self.config.stale_seconds*1000))
+            result = await asyncio.to_thread(self.history.series, [item.history_key for item in enabled],
+                                             machine, gpu, metric, hours, self.clock(),
+                                             round(period*1000), round(self.config.stale_seconds*1000))
+        if machine is None:
+            result['machines'] = [item.id for item in enabled]
+        return result

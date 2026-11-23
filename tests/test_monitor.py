@@ -361,6 +361,114 @@ def test_direct_http_auth_and_loopback_host_boundaries(tmp_path):
         assert all(value not in response.text for value in ('start_ticks','cmdline','expected_host_id','ssh_alias'))
 
 
+def test_overview_history_returns_aligned_machine_series_and_metrics(tmp_path):
+    now = int(time.time()*1000)
+    start = now-DAY_MS
+    first_at, second_at = start+250*300000, start+251*300000
+    first = machine('first', expected_host_id='b'*32)
+    second = machine('second', expected_host_id='c'*32)
+    config = Config(data_dir=tmp_path, machines=(first,second), interval_seconds=300, stale_seconds=400)
+    history = History(tmp_path)
+    history.prepare()
+
+    def put(host, at, gpu, cpu, memory, power):
+        history.append(host.history_key,'epoch-1',{'observed_at':at,'received_at':at,'boot':'boot-1',
+            'source':'ssh','status':'normal','metrics':{'gpu_percent':gpu,'gpu_util_count':1,
+            'cpu_percent':cpu,'memory_percent':memory,'gpu_power_w':power}})
+
+    put(first,first_at,0,10,20,100)
+    put(first,second_at,40,30,40,200)
+    put(second,second_at,80,50,60,300)
+    history.close()
+
+    async def collect(node):
+        raise CollectionError('offline','合成离线')
+
+    service = Monitor(config, collect, clock=lambda: now)
+    with TestClient(create_app(config,monitor=service),base_url='http://127.0.0.1') as client:
+        body = client.get('/api/history').json()
+        assert body['keys'] == ['gpu'] and body['machines'] == ['first','second']
+        points = {point['time']:point for point in body['points']}
+        assert points[first_at]['values'] == [0,None] and points[first_at]['breaks'][1] is False
+        assert points[second_at]['values'] == [40,80]
+        expected = {'cpu':([10,None],[30,50]),'memory':([20,None],[40,60]),'power':([100,None],[200,300])}
+        for metric,(opening,closing) in expected.items():
+            data = client.get('/api/history',params={'hours':24,'metric':metric}).json()
+            indexed = {point['time']:point['values'] for point in data['points']}
+            assert data['keys'] == [metric] and indexed[first_at] == opening and indexed[second_at] == closing
+        assert client.get('/api/history',params={'metric':'temp'}).status_code == 422
+        assert client.get('/api/history',params={'metric':'memory_used'}).status_code == 422
+        assert client.get('/api/history',params={'gpu':GPU}).status_code == 422
+        assert client.get('/api/history',params={'hours':25}).status_code == 422
+        detail = client.get('/api/history',params={'machine':'first','metric':'cpu','hours':24}).json()
+        assert detail['keys'] == ['cpu'] and 'machines' not in detail
+        assert {point['time']:point['values'] for point in detail['points']}[first_at] == [10]
+
+
+async def test_overview_history_uses_each_machines_recorded_continuity(tmp_path):
+    now = 1_800_000_000_000
+    start = now-DAY_MS
+    fast = machine('fast', expected_host_id='b'*32)
+    slow = machine('slow', expected_host_id='c'*32, interval_seconds=300)
+    config = Config(data_dir=tmp_path, machines=(fast,slow))
+
+    async def collect(node):
+        raise AssertionError('History reads must not start collection')
+
+    service = Monitor(config, collect, clock=lambda:now)
+    service.history.prepare()
+
+    def put(host, at, value, boot='boot-1'):
+        metrics = {'gpu_percent':value,'gpu_util_count':1,'gpu_generation':GPU,
+                   'gpus':[{'uuid':GPU,'utilization_percent':value}]}
+        record = {'observed_at':at,'received_at':at,'boot':boot,'source':'ssh',
+                  'status':'normal','metrics':metrics}
+        if host == slow:
+            record['stale_ms'] = round(service.stale_seconds(slow)*1000)
+        service.history.append(host.history_key,'epoch-1',record)
+
+    try:
+        put(slow,start-1,99)
+        for index in range(8):
+            put(slow,start+index*300000,index*11)
+        put(slow,start+2400000,None)
+        put(slow,start+2700000,80)
+        put(slow,start+3000000,81)
+        put(slow,start+3600000,82)
+        put(slow,start+3900000,83)
+        put(slow,start+4200000,84,boot='boot-2')
+        put(slow,now,85,boot='boot-2')
+        put(slow,now+1,99,boot='boot-2')
+        put(fast,start+648000,15)
+        put(fast,start+658000,17)
+
+        overview = await service.series(None,None,'gpu',24)
+        assert overview['machines'] == ['fast','slow']
+        assert (overview['from'],overview['to'],overview['bucket_ms']) == (start,now,216000)
+        points = overview['points']
+        assert (points[0]['time'],points[-1]['time']) == (start,now)
+        assert points[3]['values'] == [16,None] and points[3]['breaks'] == [True,False]
+        assert [(point['values'][1],point['breaks'][1]) for point in points if point['values'][1] is not None] == [
+            (0,True), (11,False), (22,False), (33,False), (44,False), (55,False), (66,False), (77,False),
+            (80,True), (81,False), (82,True), (83,False), (84,True), (85,True),
+        ]
+        missing = points[2400000//overview['bucket_ms']]
+        assert missing['values'][1] is None and missing['breaks'][1] is True
+        assert all(point['values'][0] is None for i,point in enumerate(points) if i != 3)
+
+        for gpu in (None,GPU):
+            detail = await service.series(slow.history_key,gpu,'gpu',1)
+            assert 'machines' not in detail and detail['points'][-1]['values'] == [85]
+            assert detail['points'][-1]['time'] == now
+        detail = await service.series(slow.history_key,None,'gpu',24)
+        assert [(point['values'][0],point['breaks'][0]) for point in detail['points'][:8]] == [
+            (index*11,index == 0) for index in range(8)
+        ]
+        assert detail['points'][7]['time'] == start+2100000
+    finally:
+        service.history.close()
+
+
 def test_display_alias_migrates_and_persists_under_fixed_machine_identity(tmp_path):
     host = machine(name='默认名称')
     config = Config(data_dir=tmp_path,machines=(host,))

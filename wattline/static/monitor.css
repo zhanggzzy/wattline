@@ -60,7 +60,8 @@
   .metric strong { display: inline-block; font-size: 36px; letter-spacing: -.035em; line-height: 1.2; margin-top: 5px; }
   .metric .unit { font-size: 13px; margin-left: 4px; font-weight: 500; color: var(--muted); }
   .metric small { display: block; color: var(--muted); font-size: 12px; margin-top: 3px; }
-  .layout { display: grid; grid-template-columns: minmax(0, 1.86fr) minmax(300px, 1fr); gap: 20px; align-items: start; }
+  .overview-stack { display: grid; gap: 20px; }
+  .overview-stack > * { min-width: 0; }
   .column { min-width: 0; display: grid; gap: 20px; }
   .panel-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 9px; padding: 14px 17px 12px; border-bottom: 1px solid var(--line); }
   .panel-head h2 { font-size: 15px; font-weight: 720; }
@@ -129,10 +130,10 @@
   .plot.large { height: 237px; }
   .plot canvas { display: block; width: 100%; height: 100%; border-radius: 5px; }
   .chart-legend { display: flex; gap: 11px; color: var(--muted); font-size: 12px; flex-wrap: wrap; align-items: center; padding: 7px 15px 12px; }
-  .chart-legend span { display: inline-flex; align-items: center; gap: 5px; }
-  .legend-line { width: 13px; height: 2px; border-radius: 1px; }
+  .chart-legend-item { display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+  .legend-line { flex: none; width: 52px; height: 4px; }
   .chart-note { margin-left: auto; }
-  .chart-tip { position: absolute; z-index: 2; background: #183b32; color: #f6fffa; font-size: 12px; padding: 7px 9px; border-radius: 7px; min-width: 103px; pointer-events: none; box-shadow: 0 4px 13px #11251e22; white-space: nowrap; }
+  .chart-tip { position: absolute; z-index: 2; background: #183b32; color: #f6fffa; font-size: 12px; padding: 7px 9px; border-radius: 7px; width: max-content; max-width: min(28rem, calc(100% - 4px)); pointer-events: none; box-shadow: 0 4px 13px #11251e22; overflow-wrap: anywhere; }
   .chart-tip time { display: block; color: #c5dfd5; }
   .message { border-radius: 8px; background: #fff4e1; border: 1px solid #f1dfb9; color: #78501b; padding: 10px 12px; margin-bottom: 14px; font-size: 12px; }
   .message.scope-note { background: #edf6f2; border-color: #d6e7de; color: #315f50; }
@@ -157,10 +158,6 @@
   .process-table td small { display: block; color: var(--muted); font-size: 12px; }
   .compact-label, .narrow-power-label { display: none; }
   [hidden] { display: none !important; }
-  @media (max-width: 1190px) {
-    .overview-layout { grid-template-columns: minmax(0, 1fr); }
-    .overview-layout .column { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
-  }
   @media (max-width: 975px) {
     .shell { grid-template-columns: 168px minmax(0, 1fr); }
     .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -179,7 +176,6 @@
     .metric strong { font-size: 25px; }
     .top-actions { gap: 6px 7px; }
     .top-actions .time { display: none; }
-    .overview-layout .column { grid-template-columns: minmax(0, 1fr); }
     .tools { align-items: flex-start; flex-direction: column; }
     .search { width: 100%; }
     .gpu-list { grid-template-columns: minmax(0, 1fr); }
@@ -188,12 +184,6 @@
   }
 .device-details { margin-top: 15px; }
 .chart-error { color: var(--amber); padding: 0 15px 10px; font-size: 12px; }
-.chart-legend .legend-line[data-series="gpu"] { background: #506dc3; }
-.chart-legend .legend-line[data-series="cpu"], .chart-legend .legend-line[data-series="power"] { background: #0b836a; }
-.chart-legend .legend-line[data-series="memory"], .chart-legend .legend-line[data-series="memory_used"] { background: #456ab4; }
-.chart-legend .legend-line[data-series="vram"] { background: #8b57a2; }
-.chart-legend .legend-line[data-series="temp"] { background: #b16e23; }
-
 .title-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 9px 12px; }
 .page-title h1 { overflow-wrap: anywhere; min-width: 0; }
 .machine-dialog { width: min(480px, calc(100% - 32px)); max-height: calc(100% - 32px); padding: 0; color: var(--ink); border: 1px solid var(--line); border-radius: 16px; }

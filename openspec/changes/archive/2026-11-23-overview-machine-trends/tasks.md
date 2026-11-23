@@ -30,7 +30,7 @@
 
 - [x] 5.1 Integrate the reviewed net changes with mainline, preserving localized controls and readings, focused comparisons and time ranges, memory readings, compact navigation, GPU inspection and list interactions. Combine both synthetic browser suites and verify the localized per-machine overview, including in focus mode.
 - [x] 5.2 Run pytest, JS syntax, i18n, Chromium smoke, OpenSpec strict and diff checks. Record commands and results in `integration.md` and audit candidate ancestry and the AGENTS.md index entry.
-- [ ] 5.3 Obtain AN-58 independent review of the integrated candidate and record the reviewed SHA and outcome.
+- [x] 5.3 AN-58 independently reviewed and passed candidate `2651bc7`. See `integration.md`.
 
 ## Workflow follow-up
 

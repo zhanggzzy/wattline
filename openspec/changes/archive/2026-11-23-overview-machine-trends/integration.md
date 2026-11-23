@@ -34,3 +34,17 @@ Executor-Codex（GPT-6）于 2026-11-23（Asia/Shanghai）完成整合和实施�
 - 保留紧凑导航、GPU 详情、实际内存用量、无上限容器、列表交互、中英文持久化和对话框的主干冒烟覆盖。
 
 验证使用合成 API、临时 SQLite 和 Chromium。Firefox、Safari、128 台满载与实际历史性能超出本轮覆盖。复审、规范同步、归档及 Mika 的远端交付见 [剩余任务](tasks.md)。
+
+## 独立复审与归档
+
+2026-11-23（Asia/Shanghai），AN-58 由 Reviewer-DeepSeek（`deepseek/deepseek-flash`）对候选 `2651bc70f61b14c5e5c9a75fbddbf11e04df6979` 独立复审，结论为通过。远端整合基线为 `a3156bf1bf244d1ab071c210a86f8bb5b25fff76`。独立报告 `an58-review.md` 附于 AN-58 最终评论。两项非阻塞发现为已无引用的翻译键与零启用机器时的重复提示。生产历史与真实节点、其他浏览器引擎未在本轮复审中验证。
+
+Mika 在同一候选代码上串行复验，以下命令均退出 0。
+
+- `.venv/bin/python -m pytest -q`：18 项通过，1 项现有 Starlette TestClient 弃用警告。
+- `node --check wattline/static/monitor.js`、`node --check wattline/static/locales.js` 与 `node tools/test_i18n.cjs`：通过，274 个消息键通过现有检查。
+- `.venv/bin/python tools/browser_smoke.py`：合成 Chromium PASS，108 次历史请求，26 张截图，无页面错误。
+- `OPENSPEC_TELEMETRY=0 npx --offline @fission-ai/openspec@1.14.2 validate overview-machine-trends --strict`、同版本 `validate --specs --strict`：变更有效，5 份主规范通过。
+- OpenSpec 列表显示 17/17 项完成。按官方同步技能将 overview 的 5 条要求及其场景写入主规范，逐行对照增量。随后按官方归档技能移动到 `openspec/changes/archive/2026-11-23-overview-machine-trends`，保留全部规划和验证记录。
+
+归档只变更规范与记录，实施与测试文件继承 AN-58 已审候选。交付范围须从当前远端基线快进，原本地评审提交保留在本地。

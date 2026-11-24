@@ -66,10 +66,15 @@ separate deployment session requested by the user.
 
 ## Dashboard workspace
 
-Use the arrow beside Wattline to collapse navigation into a narrow status rail;
-select a status light to open its machine, or expand to restore names. Machine
-names and statuses are available on hover and keyboard focus. The density
-preference is saved locally when browser storage is available.
+Use the arrow beside Wattline to collapse navigation into a narrow
+machine-identity rail. Each machine keeps a monochrome model silhouette: B300 as
+a heavy rack, RTX PRO 6000 as a dual-slot card, GB10 / DGX Spark as a compact
+box, RTX 5090 as a dual-fan card, and a generic host when the observed device
+model is missing, unknown or ambiguous. The status light stays independent.
+Machines that share a silhouette show a short instance suffix; hover or keyboard
+focus reveals the instance name and every available full model name. Select a
+machine to open it, or expand to restore names. The density preference is saved
+locally when browser storage is available.
 
 Machine trends use the full content width. Choose a metric and **全页展示 / Focus
 charts** for a single large plot, then toggle additional metrics to compare them

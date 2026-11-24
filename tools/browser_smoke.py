@@ -4,6 +4,7 @@ Requires: pip install playwright; python -m playwright install chromium
 """
 import argparse
 import copy
+import hashlib
 import json
 from pathlib import Path
 import time
@@ -39,7 +40,7 @@ history_queries = []
 def curve(machine_id, index, metric):
     base = {"demo-1":[10,15,22,30,42,55,63,71,80,88,92],
             "demo-2":[85,90,78,None,None,None,40,52,61,73,84],
-            "demo-3":[None]*11}[machine_id][index]
+            "demo-3":[None]*11}.get(machine_id,[10,18,27,36,44,53,62,70,79,87,95])[index]
     if base is None:
         return None
     factor = {"gpu":1, "cpu":0.6, "memory":0.4, "power":7}[metric]
@@ -229,9 +230,9 @@ def check_focus_layout(browser):
     toggle_rail.press('Enter')
     expect(toggle_rail).to_have_attribute('aria-expanded','false')
     rail = page.locator('#rail-nav [data-host="demo-1"]')
-    expect(rail).to_have_accessible_name('训练节点 Alpha · 正常')
+    expect(rail).to_have_accessible_name('训练节点 Alpha · 正常 · NVIDIA Synthetic GPU')
     assert rail.locator('strong').is_hidden()
-    assert rail.locator('.machine-icon').is_hidden()
+    assert rail.locator('.machine-icon').is_visible()
     assert rail.locator('.status-dot').is_visible()
     rail.press('Enter')
     expect(page.locator('#rail-nav [data-host="demo-1"]')).to_have_attribute('aria-current','page')
@@ -534,6 +535,202 @@ def check_overview_regressions(browser):
     assert not errors, errors
     page.close()
     return {"width":320,"machines":9,"slow_segment_edges":[7,1],"lapse_segment_edges":[3,7]}
+
+
+def check_machine_silhouettes(browser):
+    """AN-64 synthetic acceptance: model silhouettes, fallback, identity and rail semantics."""
+    global machines, mode
+    mode = 'normal'
+
+    def silhouette_host(identifier, name, models, status='normal'):
+        host = node(1)
+        host.update(id=identifier, name=name, address=f'{identifier}.invalid', status=status)
+        if models is None:
+            host.pop('devices', None)
+        else:
+            host['devices'] = [dict(gpu, uuid=f'{identifier}-gpu-{index}', index=index, name=model)
+                               for index, model in enumerate(models)]
+        if status in ('normal', 'warning'):
+            host['metrics'] = copy.deepcopy(metrics)
+            host['metrics']['gpus'] = [dict(gpu, uuid=f'{identifier}-gpu-{index}', index=index, name=model)
+                                       for index, model in enumerate(models or [])]
+        else:
+            host['metrics'] = None
+            host['reason'] = '连接超时 · 合成离线样本'
+        return host
+
+    machines = [
+        silhouette_host('b300-a', '机柜 B300 甲', ['NVIDIA B300 SXM6 AC']),
+        silhouette_host('b300-b', '机柜 B300 乙', ['NVIDIA B300 SXM6 AC']),
+        silhouette_host('pro', '工作站 PRO 6000', ['NVIDIA RTX PRO 6000 Blackwell Workstation Edition']),
+        silhouette_host('spark', 'Spark 方盒', ['NVIDIA GB10']),
+        silhouette_host('rtx', '桌面 5090', ['NVIDIA GeForce RTX 5090']),
+        silhouette_host('unknown', '未知机型', ['NVIDIA Synthetic GPU'], status='warning'),
+        silhouette_host('mixed', '混合机型', ['NVIDIA B300 SXM6 AC', 'NVIDIA GeForce RTX 5090']),
+        silhouette_host('legacy', '旧配置无型号', None, status='offline'),
+    ]
+    cases = [
+        ('b300-a', 'b300', '机柜 B300 甲 · 正常 · NVIDIA B300 SXM6 AC'),
+        ('b300-b', 'b300', '机柜 B300 乙 · 正常 · NVIDIA B300 SXM6 AC'),
+        ('pro', 'pro6000', '工作站 PRO 6000 · 正常 · NVIDIA RTX PRO 6000 Blackwell Workstation Edition'),
+        ('spark', 'spark', 'Spark 方盒 · 正常 · NVIDIA GB10'),
+        ('rtx', 'rtx5090', '桌面 5090 · 正常 · NVIDIA GeForce RTX 5090'),
+        ('unknown', 'generic', '未知机型 · 需关注 · NVIDIA Synthetic GPU'),
+        ('mixed', 'generic', '混合机型 · 正常 · NVIDIA B300 SXM6 AC · NVIDIA GeForce RTX 5090'),
+        ('legacy', 'generic', '旧配置无型号 · 连接失败'),
+    ]
+    page = browser.new_page(viewport={'width': 1440, 'height': 1100})
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.route('**/*', handle)
+    page.goto('http://wattline.test')
+    expect(page.locator('#host-rows tr')).to_have_count(8)
+
+    matrix = page.evaluate("""() => {
+      const cases = [
+        [['NVIDIA B300 SXM6 AC'],'b300'],
+        [['NVIDIA RTX PRO 6000 Blackwell Workstation Edition'],'pro6000'],
+        [['NVIDIA RTX PRO 6000 Blackwell Max-Q'],'pro6000'],
+        [['NVIDIA GB10'],'spark'],
+        [['NVIDIA DGX Spark'],'spark'],
+        [['NVIDIA GeForce RTX 5090'],'rtx5090'],
+        [['NVIDIA GeForce RTX 5090 D'],'rtx5090'],
+        [['NVIDIA RTX 6000 Ada Generation'],'generic'],
+        [['NVIDIA Synthetic GPU'],'generic'],
+        [['NVIDIA B300 SXM6 AC','NVIDIA GeForce RTX 5090'],'generic'],
+        [['NVIDIA B300 SXM6 AC','NVIDIA Graphics Device'],'generic'],
+        [['NVIDIA B300 SXM6 AC','NVIDIA B300 SXM6 AC'],'b300'],
+        [[null],'generic'],
+        [[],'generic'],
+      ];
+      return cases.map(([names,expected]) => ({names, expected,
+        actual: machineModel({devices:names.map(name => ({name}))}).kind}));
+    }""")
+    assert all(item['actual'] == item['expected'] for item in matrix), matrix
+
+    toggle = page.locator('#rail-toggle')
+    toggle.press('Enter')
+    expect(toggle).to_have_attribute('aria-expanded', 'false')
+    rail_width = page.locator('.rail').bounding_box()['width']
+    assert 63 <= rail_width <= 65, rail_width
+
+    for machine_id, kind, identity in cases:
+        item = page.locator(f'#rail-nav [data-host="{machine_id}"]')
+        expect(item.locator('.machine-icon')).to_have_attribute('data-model', kind)
+        expect(item.locator('.machine-icon')).to_be_visible()
+        expect(item.locator('.status-dot')).to_be_visible()
+        expect(item).to_have_attribute('aria-label', identity)
+        expect(item).to_have_attribute('title', identity)
+        icon_box = item.locator('.machine-icon').bounding_box()
+        assert icon_box and 23 <= icon_box['width'] <= 25 and 23 <= icon_box['height'] <= 25, icon_box
+
+    b300_suffixes = [page.locator(f'#rail-nav [data-host="{machine_id}"] .machine-suffix').inner_text()
+                     for machine_id in ('b300-a', 'b300-b')]
+    generic_suffixes = [page.locator(f'#rail-nav [data-host="{machine_id}"] .machine-suffix').inner_text()
+                        for machine_id in ('unknown', 'mixed', 'legacy')]
+    assert len(set(b300_suffixes)) == 2 and all(0 < len(value) <= 4 for value in b300_suffixes), b300_suffixes
+    assert len(set(generic_suffixes)) == 3 and all(0 < len(value) <= 4 for value in generic_suffixes), generic_suffixes
+    for machine_id in ('pro', 'spark', 'rtx'):
+        assert page.locator(f'#rail-nav [data-host="{machine_id}"] .machine-suffix').count() == 0, machine_id
+
+    dot_colors = {
+        machine_id: page.locator(f'#rail-nav [data-host="{machine_id}"] .status-dot')
+        .evaluate('dot => getComputedStyle(dot).backgroundColor')
+        for machine_id in ('b300-a', 'unknown', 'legacy')
+    }
+    assert dot_colors == {'b300-a': 'rgb(107, 212, 173)', 'unknown': 'rgb(255, 198, 111)',
+                          'legacy': 'rgb(250, 155, 139)'}, dot_colors
+
+    glyph_hashes = {}
+    for machine_id, kind in (('b300-a', 'b300'), ('pro', 'pro6000'), ('spark', 'spark'),
+                             ('rtx', 'rtx5090'), ('unknown', 'generic')):
+        path = OUT / f'an64-glyph-{kind}.png'
+        page.locator(f'#rail-nav [data-host="{machine_id}"] .machine-icon').screenshot(path=str(path))
+        glyph_hashes[kind] = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert len(set(glyph_hashes.values())) == 5, glyph_hashes
+
+    monochrome = page.evaluate("""() => {
+      const icons = [...document.querySelectorAll('#rail-nav .machine-icon')];
+      return {
+        colors: [...new Set(icons.map(icon => getComputedStyle(icon).color))],
+        attrs: icons.every(icon => [...icon.querySelectorAll('*')].every(el => {
+          const fill = el.getAttribute('fill');
+          const stroke = el.getAttribute('stroke');
+          return (fill === null || fill === 'currentColor')
+            && (stroke === null || stroke === 'currentColor' || (stroke === 'none' && fill === 'currentColor'));
+        })),
+        rail: getComputedStyle(document.querySelector('.rail')).backgroundColor,
+      };
+    }""")
+    assert monochrome == {'colors': ['rgb(195, 206, 224)'], 'attrs': True,
+                          'rail': 'rgb(16, 31, 53)'}, monochrome
+
+    # Keyboard identity, selection and navigation survive the new glyph markup.
+    selected = page.locator('#rail-nav [data-host="b300-a"]')
+    unselected_background = page.locator('#rail-nav [data-host="b300-b"]').evaluate(
+        'item => getComputedStyle(item).backgroundColor')
+    selected.press('Enter')
+    expect(selected).to_have_attribute('aria-current', 'page')
+    expect(page.locator('#page-heading')).to_be_focused()
+    expect(page.locator('#page-heading')).to_have_text('机柜 B300 甲')
+    assert selected.evaluate('item => getComputedStyle(item).backgroundColor') != unselected_background
+    page.locator('#rail-nav [data-host="spark"]').press('Enter')
+    expect(page.locator('#page-heading')).to_have_text('Spark 方盒')
+    page.locator('#rail-nav [data-overview]').press('Enter')
+    expect(page.locator('#page-heading')).to_have_text('算力，一目了然')
+    page.locator('#rail-nav [data-host="mixed"]').hover()
+    expect(page.locator('#rail-nav [data-host="mixed"]')).to_have_attribute(
+        'title', '混合机型 · 正常 · NVIDIA B300 SXM6 AC · NVIDIA GeForce RTX 5090')
+
+    page.locator('.rail').screenshot(path=str(OUT / 'an64-rail-collapsed.png'))
+    page.screenshot(path=str(OUT / 'an64-collapsed-desktop.png'))
+
+    toggle.press('Space')
+    expect(toggle).to_have_attribute('aria-expanded', 'true')
+    for machine_id, _, identity in cases:
+        item = page.locator(f'#rail-nav [data-host="{machine_id}"]')
+        expect(item.locator('strong')).to_be_visible()
+        expect(item.locator('.machine-icon')).to_be_visible()
+        expect(item).to_have_accessible_name(identity)
+    expect(page.locator('#rail-nav [data-host="b300-a"] .machine-suffix')).to_be_hidden()
+    surfaces = page.evaluate("""() => {
+      const railGlyph = document.querySelector('#rail-nav .machine-icon');
+      const rowGlyph = document.querySelector('#host-rows .machine-icon');
+      return {
+        railGlyph: getComputedStyle(railGlyph).color,
+        rowGlyph: getComputedStyle(rowGlyph).color,
+        panel: getComputedStyle(document.querySelector('.machine-panel')).backgroundColor,
+      };
+    }""")
+    assert surfaces['panel'] == 'rgb(255, 255, 255)', surfaces
+    assert surfaces['railGlyph'] != surfaces['rowGlyph'], surfaces
+    page.locator('.rail').screenshot(path=str(OUT / 'an64-rail-expanded.png'))
+    page.locator('.machine-panel').screenshot(path=str(OUT / 'an64-overview-light.png'))
+
+    toggle.press('Space')
+    expect(toggle).to_have_attribute('aria-expanded', 'false')
+    for width in (320, 390, 640, 731, 1440):
+        page.set_viewport_size({'width': width, 'height': 1100})
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), ('collapsed', width)
+        if width == 390:
+            page.screenshot(path=str(OUT / 'an64-collapsed-390.png'))
+    toggle.press('Space')
+    for width in (320, 390, 731):
+        page.set_viewport_size({'width': width, 'height': 1100})
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), ('expanded', width)
+        if width == 390:
+            page.screenshot(path=str(OUT / 'an64-expanded-390.png'))
+    page.set_viewport_size({'width': 1440, 'height': 1100})
+    assert not errors, errors
+    page.close()
+    return {'result': 'PASS', 'rail_width': rail_width, 'classification': matrix,
+            'glyph_sha256': glyph_hashes, 'suffixes': {'b300': b300_suffixes, 'generic': generic_suffixes},
+            'dot_colors': dot_colors, 'monochrome': monochrome, 'surfaces': surfaces,
+            'page_errors': errors,
+            'screenshots': ['an64-rail-collapsed.png', 'an64-collapsed-desktop.png', 'an64-rail-expanded.png',
+                            'an64-overview-light.png', 'an64-collapsed-390.png', 'an64-expanded-390.png',
+                            'an64-glyph-b300.png', 'an64-glyph-pro6000.png', 'an64-glyph-spark.png',
+                            'an64-glyph-rtx5090.png', 'an64-glyph-generic.png']}
 
 
 with sync_playwright() as p:
@@ -840,8 +1037,10 @@ with sync_playwright() as p:
     unlimited_container = check_unlimited_container(browser)
     focus_layout = check_focus_layout(browser)
     overview_regressions = check_overview_regressions(browser)
+    silhouettes = check_machine_silhouettes(browser)
     print(json.dumps({"focus_layout":focus_layout,"result":"PASS", "browser":browser.version, "page_errors":errors,
                       "mutations":len(mutations), "history_queries":len(history_queries), "screenshots":26, "locales":["zh-CN","en"], "dialog_locales":dialog_locales,
                       "metric_layouts":layout_results, "focus_refreshes":focus_results,
-                      "unlimited_container":unlimited_container,"overview_regressions":overview_regressions}, ensure_ascii=False))
+                      "unlimited_container":unlimited_container,"overview_regressions":overview_regressions,
+                      "silhouettes":silhouettes}, ensure_ascii=False))
     browser.close()

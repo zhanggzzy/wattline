@@ -49,7 +49,58 @@ const machineDashes = [
   [12,4,2,4,2,4], [5,7], [12,8], [3,8], [12,4,6,4], [6,4,6,8], [6,8,2,4], [12,4,2,8]
 ];
 const overviewMetrics = ['gpu','cpu','memory','power'];
-const machineIcon = '<span class="machine-icon" aria-hidden="true"><i></i><i></i></span>';
+const modelRules = [
+  ['b300', /\bB300\b/i],
+  ['pro6000', /RTX\s*PRO\s*6000|PRO\s*6000/i],
+  ['spark', /\bGB10\b|DGX\s*Spark/i],
+  ['rtx5090', /\bRTX\s*5090\b|\b5090\b/i],
+];
+const modelShapes = {
+  b300: '<rect x="4.5" y="2.5" width="15" height="19" rx="2.5" stroke-width="2"/><path d="M7.5 6.5h9M7.5 10.5h9M7.5 14.5h9" stroke-width="1.6"/><path d="M7.5 18h9" stroke-width="2.4"/>',
+  pro6000: '<rect x="2.5" y="7" width="19" height="10" rx="1.5" stroke-width="1.8"/><path d="M5.5 10.5h13" stroke-width="1.5"/><path d="M7.5 17v3.5h7V17" stroke-width="1.5"/>',
+  spark: '<rect x="6" y="6" width="12" height="12" rx="3.5" stroke-width="1.8"/><path d="M9 12h6" stroke-width="1.5"/><circle cx="15.5" cy="15.5" r="1.2" fill="currentColor" stroke="none"/>',
+  rtx5090: '<rect x="2.5" y="7" width="19" height="10" rx="3" stroke-width="1.6"/><circle cx="8.5" cy="12" r="2.5" stroke-width="1.4"/><circle cx="15.5" cy="12" r="2.5" stroke-width="1.4"/>',
+  generic: '<rect x="4.5" y="3.5" width="15" height="7.5" rx="1.5" stroke-width="1.6"/><rect x="4.5" y="13" width="15" height="7.5" rx="1.5" stroke-width="1.6"/><circle cx="7.5" cy="7.25" r="0.9" fill="currentColor" stroke="none"/><circle cx="7.5" cy="16.75" r="0.9" fill="currentColor" stroke="none"/>',
+};
+function classifyModel(name) {
+  return modelRules.find(([, pattern]) => pattern.test(name))?.[0] ?? null;
+}
+function machineModel(node) {
+  const names = [...new Set((Array.isArray(node?.devices) ? node.devices : [])
+    .map(device => typeof device?.name === 'string' ? device.name.trim() : '')
+    .filter(Boolean))];
+  const kinds = new Set(names.map(classifyModel));
+  const kind = names.length && kinds.size === 1 && !kinds.has(null) ? [...kinds][0] : 'generic';
+  return {kind, names};
+}
+function machineGlyph(node) {
+  const {kind} = machineModel(node);
+  return `<span class="machine-icon" data-model="${kind}" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false">${modelShapes[kind]}</svg></span>`;
+}
+function machineSuffixes(hosts) {
+  const groups = new Map();
+  for (const node of hosts) {
+    const {kind} = machineModel(node);
+    if (!groups.has(kind)) groups.set(kind, []);
+    groups.get(kind).push(node);
+  }
+  const suffixes = new Map();
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    const labels = group.map(node => String(node.name || node.id).replace(/\s+/g, ''));
+    let picked = null;
+    for (let length = 2; length <= 4 && !picked; length += 1) {
+      const candidates = labels.map(label => label.slice(-length) || label);
+      if (new Set(candidates).size === candidates.length) picked = candidates;
+    }
+    group.forEach((node, index) => suffixes.set(node.id, picked ? picked[index] : String(index + 1)));
+  }
+  return suffixes;
+}
+function machineIdentity(node) {
+  const {names} = machineModel(node);
+  return [node.name, machineStates[node.status], ...(names.length ? [names.join(' · ')] : [])].join(' · ');
+}
 const state = {snapshot:null, received:0, syncFailed:false, machine:null, gpu:null, metric:'cpu',
   overviewMetric:'gpu', hours:24, filter:'all', query:'', history:null, historyError:false,
   focused:false, focusMetrics:[], histories:{}, historyErrors:{}};
@@ -94,12 +145,17 @@ const configUnavailable = () => state.snapshot.registry_loaded === false;
 const unlimitedMemory = host => host?.scope === 'container' && host.metrics?.memory?.total_bytes === null;
 
 function navigation(hosts, host) {
+  const suffixes = machineSuffixes(hosts);
   byId('rail-nav').innerHTML = `<button class="rail-nav" type="button" data-overview aria-label="${t('overview')}" title="${t('overview')}" ${host ? '' : 'aria-current="page"'}>
       <span class="overview-icon" aria-hidden="true"></span><strong>${t('overview')}</strong></button>
-    <p class="rail-label">${t('machine')}</p>${hosts.map(node => `<button class="rail-nav rail-machine" type="button"
-      data-host="${escape(node.id)}" aria-label="${escape(node.name)} · ${escape(machineStates[node.status])}" title="${escape(node.name)} · ${escape(machineStates[node.status])}" ${node.id === host?.id ? 'aria-current="page"' : ''}>
-      ${machineIcon}<strong>${escape(node.name)}</strong><span class="status-dot ${escape(node.status)}" title="${escape(machineStates[node.status])}"></span>
-    </button>`).join('')}`;
+    <p class="rail-label">${t('machine')}</p>${hosts.map(node => {
+      const identity = machineIdentity(node);
+      const suffix = suffixes.get(node.id);
+      return `<button class="rail-nav rail-machine" type="button"
+      data-host="${escape(node.id)}" aria-label="${escape(identity)}" title="${escape(identity)}" ${node.id === host?.id ? 'aria-current="page"' : ''}>
+      ${machineGlyph(node)}<strong>${escape(node.name)}</strong>${suffix ? `<span class="machine-suffix" aria-hidden="true">${escape(suffix)}</span>` : ''}<span class="status-dot ${escape(node.status)}" title="${escape(machineStates[node.status])}"></span>
+    </button>`;
+    }).join('')}`;
   byId('breadcrumb').innerHTML = host
     ? `<button type="button" data-overview class="crumb-button">${t('overview')}</button><span aria-hidden="true">›</span><strong>${escape(host.name)}</strong>`
     : `<strong>${t('overview')}</strong>`;
@@ -219,7 +275,7 @@ function drawRows(hosts) {
         aria-label="${t('reorder')} ${escape(node.name)}" title="${t('drag_to_reorder_or_use_up_and_down_arrow_keys')}"
         aria-keyshortcuts="ArrowUp ArrowDown" ${sortable ? '' : 'disabled'}></button>
       <button type="button" class="row-open" data-host="${escape(node.id)}" aria-label="${t('view')} ${escape(node.name)}">
-      ${machineIcon}<span><strong>${escape(node.name)}</strong><small class="mono">${escape(node.address)}</small>
+      ${machineGlyph(node)}<span><strong>${escape(node.name)}</strong><small class="mono">${escape(node.address)}</small>
       ${node.scope === 'container' ? `<small>${t('container_scope')}</small>` : ''}</span></button></div></td>
     <td data-label="${t('status')}">${status(node.status, machineStates[node.status])}</td>
     ${['gpu','power','cpu','memory'].map(key => `<td class="number-cell" data-label="${{gpu:t('gpu_utilization'),power:t('gpu_power'),cpu:'CPU',memory:t('memory')}[key]}">${field(node.id+'-'+key)}

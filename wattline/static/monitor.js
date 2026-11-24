@@ -51,7 +51,7 @@ const machineDashes = [
 const overviewMetrics = ['gpu','cpu','memory','power'];
 const modelRules = [
   ['b300', /\bB300\b/i],
-  ['pro6000', /\bPRO\s*6000(?!\d)/i],
+  ['pro6000', /(?:^|[^\p{L}\p{M}\p{N}\p{Pc}])PRO\s*6000(?![\p{L}\p{M}\p{N}\p{Pc}])/iu],
   ['spark', /\bGB10\b|\bDGX\s*Spark\b/i],
   ['rtx5090', /\bRTX\s*5090\b|\b5090\b/i],
 ];
@@ -69,15 +69,15 @@ function classifyModel(name) {
 function machineModel(node) {
   const devices = Array.isArray(node?.devices) ? node.devices : [];
   const names = [];
-  let complete = devices.length > 0;
+  const inventoryComplete = node && Object.hasOwn(node, 'gpu_inventory_complete')
+    ? node.gpu_inventory_complete : node?.metrics?.gpu_inventory_complete;
+  let complete = inventoryComplete === true && devices.length > 0;
   for (const device of devices) {
     const name = typeof device?.name === 'string' ? device.name.trim() : '';
     if (!name) complete = false;
     else if (!names.includes(name)) names.push(name);
   }
   if (node?.expected_gpu_count != null && devices.length !== node.expected_gpu_count) complete = false;
-  // A live sample that could not enumerate the expected inventory is not trustworthy.
-  if (node?.metrics && node.metrics.gpu_inventory_complete === false) complete = false;
   const kinds = new Set(names.map(classifyModel));
   const kind = complete && kinds.size === 1 && !kinds.has(null) ? [...kinds][0] : 'generic';
   return {kind, names};
@@ -90,44 +90,37 @@ function machineGlyph(node) {
   const {kind} = machineModel(node);
   return `<span class="machine-icon" data-model="${kind}" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false">${modelShapes[kind]}</svg></span>`;
 }
-function machineSuffixes(hosts) {
+const instanceNameKey = node => String(node.name || node.id).normalize('NFC');
+function machineSuffixes(hosts, nameCounts) {
   const groups = new Map();
+  const suffixes = new Map();
+  const ordinals = new Map(hosts.map((node, index) => [node.id, String(index + 1)]));
   for (const node of hosts) {
     const {kind} = machineModel(node);
     if (!groups.has(kind)) groups.set(kind, []);
     groups.get(kind).push(node);
+    if (nameCounts.get(instanceNameKey(node)) > 1) suffixes.set(node.id, ordinals.get(node.id));
   }
-  const suffixes = new Map();
   for (const group of groups.values()) {
     if (group.length < 2) continue;
     // Split by grapheme so surrogates, combining marks and emoji sequences stay whole.
     const labels = group.map(node => {
-      const characters = splitGraphemes(String(node.name || node.id).replace(/\s+/g, ''));
-      return characters.length ? characters : splitGraphemes(String(node.id));
+      return splitGraphemes(instanceNameKey(node).replace(/\s+/g, '') || String(node.id).normalize('NFC'));
     });
     let picked = null;
     for (let length = 2; length <= 4 && !picked; length += 1) {
-      const candidates = labels.map(label => label.slice(-length).join('') || label.join(''));
+      const candidates = group.map((node, index) => suffixes.get(node.id) || labels[index].slice(-length).join(''));
       if (new Set(candidates).size === candidates.length) picked = candidates;
     }
-    group.forEach((node, index) => suffixes.set(node.id, picked ? picked[index] : String(index + 1)));
+    group.forEach((node, index) => suffixes.set(node.id, picked ? picked[index] : ordinals.get(node.id)));
   }
   return suffixes;
 }
-function machineIdentity(node) {
+function machineIdentity(node, instanceSuffix) {
   const {names} = machineModel(node);
-  return [node.name, machineStates[node.status], ...(names.length ? [names.join(' · ')] : [])].join(' · ');
-}
-function machineIdentities(hosts, suffixes) {
-  const bases = new Map(hosts.map(node => [node.id, machineIdentity(node)]));
-  const counts = new Map();
-  for (const base of bases.values()) counts.set(base, (counts.get(base) || 0) + 1);
-  return new Map(hosts.map(node => {
-    const base = bases.get(node.id);
-    const suffix = suffixes.get(node.id);
-    // Same-name instances need the visible suffix in their accessible identity too.
-    return [node.id, suffix && counts.get(base) > 1 ? `${base} · ${t('instance_suffix', {suffix})}` : base];
-  }));
+  const identity = [node.name, machineStates[node.status], ...names];
+  if (instanceSuffix) identity.push(t('instance_suffix', {suffix:instanceSuffix}));
+  return identity.join(' · ');
 }
 const state = {snapshot:null, received:0, syncFailed:false, machine:null, gpu:null, metric:'cpu',
   overviewMetric:'gpu', hours:24, filter:'all', query:'', history:null, historyError:false,
@@ -173,13 +166,13 @@ const configUnavailable = () => state.snapshot.registry_loaded === false;
 const unlimitedMemory = host => host?.scope === 'container' && host.metrics?.memory?.total_bytes === null;
 
 function navigation(hosts, host) {
-  const suffixes = machineSuffixes(hosts);
-  const identities = machineIdentities(hosts, suffixes);
+  const nameCounts = countLabels(hosts.map(instanceNameKey));
+  const suffixes = machineSuffixes(hosts, nameCounts);
   byId('rail-nav').innerHTML = `<button class="rail-nav" type="button" data-overview aria-label="${t('overview')}" title="${t('overview')}" ${host ? '' : 'aria-current="page"'}>
       <span class="overview-icon" aria-hidden="true"></span><strong>${t('overview')}</strong></button>
     <p class="rail-label">${t('machine')}</p>${hosts.map(node => {
-      const identity = identities.get(node.id);
       const suffix = suffixes.get(node.id);
+      const identity = machineIdentity(node, nameCounts.get(instanceNameKey(node)) > 1 ? suffix : null);
       return `<button class="rail-nav rail-machine" type="button"
       data-host="${escape(node.id)}" aria-label="${escape(identity)}" title="${escape(identity)}" ${node.id === host?.id ? 'aria-current="page"' : ''}>
       ${machineGlyph(node)}<strong>${escape(node.name)}</strong>${suffix ? `<span class="machine-suffix" aria-hidden="true">${escape(suffix)}</span>` : ''}<span class="status-dot ${escape(node.status)}" aria-hidden="true"></span>

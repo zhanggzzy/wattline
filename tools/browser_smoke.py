@@ -623,16 +623,20 @@ def check_machine_silhouettes(browser):
         [['NVIDIA B300 SXM6 AC', null],'generic'],
         [['NVIDIA B300 / GeForce RTX 5090'],'generic'],
         [['NVIDIA PRO 60000'],'generic'],
+        [['NVIDIA PRO 6000X'],'generic'],
+        [['NVIDIA PRO 6000_Engineering'],'generic'],
+        [['NVIDIA PRO 6000版'],'generic'],
+        [['NVIDIA XRTPRO 6000'],'generic'],
         [[null],'generic'],
         [[],'generic'],
       ];
       const incomplete = [
         {devices:[{name:'NVIDIA B300 SXM6 AC'}], expected_gpu_count:2, metrics:{gpu_inventory_complete:false}},
-        {devices:[{name:'NVIDIA B300 SXM6 AC'}], expected_gpu_count:2},
+        {devices:[{name:'NVIDIA B300 SXM6 AC'}], expected_gpu_count:2, gpu_inventory_complete:true},
         {devices:[{name:'NVIDIA B300 SXM6 AC'}], metrics:{gpu_inventory_complete:true}},
       ];
       return cases.map(([names,expected]) => ({names, expected,
-        actual: machineModel({devices:names.map(name => ({name}))}).kind}))
+        actual: machineModel({devices:names.map(name => ({name})), gpu_inventory_complete:true}).kind}))
         .concat(incomplete.map((node, index) => ({expected:index === 2 ? 'b300' : 'generic',
           actual:machineModel(node).kind})));
     }""")
@@ -809,6 +813,8 @@ def check_machine_silhouettes(browser):
     assert poll['title'] == '更新节点 · 正常 · NVIDIA B300 SXM6 AC', poll
 
     # Same repaint while another machine is selected, including regrouped suffixes.
+    pro_suffix = page.locator('#rail-nav [data-host="pro"] .machine-suffix')
+    expect(pro_suffix).to_have_count(0)
     page.locator('#rail-nav [data-host="spark"]').click()
     expect(page.locator('#page-heading')).to_have_text('Spark 方盒')
     machines = build_machines(['NVIDIA RTX PRO 6000 Blackwell Workstation Edition'])
@@ -819,9 +825,11 @@ def check_machine_silhouettes(browser):
     poll['selected_model'] = page.locator('#rail-nav [data-host="live"] .machine-icon').get_attribute('data-model')
     poll['selected_title'] = page.locator('#rail-nav [data-host="live"]').get_attribute('title')
     poll['selected_suffix'] = page.locator('#rail-nav [data-host="live"] .machine-suffix').inner_text()
+    expect(pro_suffix).to_be_visible()
+    poll['selected_peer_suffix'] = pro_suffix.inner_text()
     assert poll['selected_model'] == 'pro6000', poll
     assert 'NVIDIA RTX PRO 6000 Blackwell Workstation Edition' in poll['selected_title'], poll
-    assert poll['selected_suffix'] != poll['suffix'], poll
+    assert poll['selected_suffix'] != poll['selected_peer_suffix'], poll
 
     assert not errors, errors
     page.close()
@@ -835,6 +843,98 @@ def check_machine_silhouettes(browser):
                             'an64-overview-light.png', 'an64-collapsed-390.png', 'an64-expanded-390.png',
                             'an64-glyph-b300.png', 'an64-glyph-pro6000.png', 'an64-glyph-spark.png',
                             'an64-glyph-rtx5090.png', 'an64-glyph-generic.png']}
+
+
+def check_rail_identity_edges(browser):
+    """AN-70 inventory-confidence polling, legacy snapshots, and alias/model edges."""
+    global machines
+    b300 = 'NVIDIA B300 SXM6 AC'
+    spark = 'NVIDIA GB10'
+    unknown_pro = 'NVIDIA RTX PRO 6000X'
+
+    def host(identifier, name, model, status='normal', *, complete=None):
+        result = node(1, status)
+        device = dict(gpu, uuid=f'GPU-{identifier}', name=model)
+        result.update(id=identifier, name=name, devices=[device], expected_gpu_count=None,
+                      gpu_inventory_complete=complete)
+        if result['metrics'] is not None:
+            result['metrics'].update(gpus=[device], gpu_inventory_complete=complete)
+        return result
+
+    legacy_online = host('legacy-online', '旧在线', b300, complete=True)
+    legacy_offline = host('legacy-offline', '旧离线', b300, 'offline')
+    for legacy in (legacy_online, legacy_offline):
+        del legacy['gpu_inventory_complete']
+    machines = [
+        host('partial', '部分清单', b300, complete=False),
+        host('trusted', '完整清单', b300, complete=True),
+        legacy_online, legacy_offline,
+        host('accent-a', 'Café', spark, complete=True),
+        host('accent-b', 'Cafe\u0301', spark, complete=True),
+        host('accent-c', 'Café', unknown_pro, complete=True),
+    ]
+    errors = []
+    page = browser.new_page(viewport={'width':1440, 'height':900})
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.route('**/*', handle)
+    page.goto('http://wattline.test')
+    toggle = page.locator('#rail-toggle')
+    toggle.press('Enter')
+    expect(toggle).to_have_attribute('aria-expanded', 'false')
+
+    def button(identifier):
+        return page.locator(f'#rail-nav [data-host="{identifier}"]')
+
+    def check_model(identifier, kind, model, status):
+        item = button(identifier)
+        expect(item.locator(f'.status-dot.{status}')).to_be_visible()
+        expect(item.locator('.machine-icon')).to_have_attribute('data-model', kind)
+        assert model in item.get_attribute('title')
+        return kind
+
+    transitions = {
+        'partial_online':check_model('partial', 'generic', b300, 'normal'),
+        'trusted_online':check_model('trusted', 'b300', b300, 'normal'),
+        'legacy_online':check_model('legacy-online', 'b300', b300, 'normal'),
+        'legacy_offline':check_model('legacy-offline', 'generic', b300, 'offline'),
+        'unknown_pro':check_model('accent-c', 'generic', unknown_pro, 'normal'),
+    }
+    aliases = {}
+    for identifier, alias in [('accent-a', 'Café'), ('accent-b', 'Cafe\u0301'), ('accent-c', 'Café')]:
+        item = button(identifier)
+        suffix = item.locator('.machine-suffix')
+        expect(suffix).to_be_visible()
+        ordinal = suffix.inner_text()
+        identity = item.get_attribute('title')
+        assert identity.startswith(alias + ' · ') and identity.endswith(f' · 实例 {ordinal}')
+        expect(item).to_have_accessible_name(identity)
+        item.focus()
+        expect(item).to_be_focused()
+        focus_hint = item.evaluate("""el => el.matches(':focus-visible')
+          && JSON.parse(getComputedStyle(el, '::after').content)""")
+        assert focus_hint == identity
+        aliases[identifier] = {'suffix':ordinal, 'identity':identity, 'focus_hint':focus_hint}
+    assert len({entry['suffix'] for entry in aliases.values()}) == len(aliases), aliases
+
+    machines[:2] = [
+        host('partial', '部分清单', b300, 'offline', complete=False),
+        host('trusted', '完整清单', b300, 'offline', complete=True),
+    ]
+    transitions['partial_offline'] = check_model('partial', 'generic', b300, 'offline')
+    transitions['trusted_offline'] = check_model('trusted', 'b300', b300, 'offline')
+
+    machines[:2] = [
+        host('partial', '部分清单', b300, complete=True),
+        dict(host('trusted', '完整清单', b300, complete=True), observed_at=1),
+    ]
+    transitions['partial_recovered'] = check_model('partial', 'b300', b300, 'normal')
+    transitions['trusted_stale'] = check_model('trusted', 'b300', b300, 'stale')
+
+    machines[0] = host('partial', '部分清单', b300, complete=False)
+    transitions['complete_to_partial'] = check_model('partial', 'generic', b300, 'normal')
+    assert not errors, errors
+    page.close()
+    return {'transitions':transitions, 'aliases':aliases, 'page_errors':errors}
 
 
 with sync_playwright() as p:
@@ -1142,9 +1242,10 @@ with sync_playwright() as p:
     focus_layout = check_focus_layout(browser)
     overview_regressions = check_overview_regressions(browser)
     silhouettes = check_machine_silhouettes(browser)
+    rail_identity_edges = check_rail_identity_edges(browser)
     print(json.dumps({"focus_layout":focus_layout,"result":"PASS", "browser":browser.version, "page_errors":errors,
                       "mutations":len(mutations), "history_queries":len(history_queries), "screenshots":26, "locales":["zh-CN","en"], "dialog_locales":dialog_locales,
                       "metric_layouts":layout_results, "focus_refreshes":focus_results,
                       "unlimited_container":unlimited_container,"overview_regressions":overview_regressions,
-                      "silhouettes":silhouettes}, ensure_ascii=False))
+                      "silhouettes":silhouettes, "rail_identity_edges":rail_identity_edges}, ensure_ascii=False))
     browser.close()

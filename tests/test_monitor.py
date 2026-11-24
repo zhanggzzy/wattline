@@ -207,6 +207,102 @@ async def test_container_cpu_uses_remote_elapsed_time_and_resets_on_group_change
     assert (await monitor.observe(host))['metrics']['cpu_percent'] is None
 
 
+async def test_inventory_confidence_survives_failed_samples_and_recovers(tmp_path, monkeypatch):
+    host = machine()
+    config = Config(data_dir=tmp_path, machines=(host,))
+    now = 100_000
+    xml = b''
+    mode = 'sample'
+
+    def card(uuid):
+        return f'<gpu><uuid>{uuid}</uuid><product_name>NVIDIA B300 SXM6 AC</product_name></gpu>'.encode()
+
+    async def collect(_):
+        if mode == 'offline':
+            raise asyncio.TimeoutError
+        warnings = []
+        probed = host_probe.monitor_gpus({'monitor_processes':False}, tmp_path, warnings)
+        return dict(data(), **probed) | {'warnings':warnings}
+
+    monkeypatch.setattr(host_probe.subprocess, 'run',
+                        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=xml))
+    monitor = Monitor(config, collect, clock=lambda: now)
+
+    async def sample(devices, *, offline=False):
+        nonlocal now, xml, mode
+        now += 1_000
+        xml = b'<nvidia_smi_log>' + devices + b'</nvidia_smi_log>'
+        mode = 'offline' if offline else 'sample'
+        monitor.latest[host.id] = await monitor.observe(host)
+        return monitor.snapshot()['machines'][0]
+
+    assert monitor.snapshot()['machines'][0]['gpu_inventory_complete'] is None
+    partial = await sample(card(GPU) + card('N/A'))
+    assert partial['gpu_inventory_complete'] is partial['metrics']['gpu_inventory_complete'] is False
+    first_failure = await sample(b'', offline=True)
+    assert first_failure['status'] == 'offline' and first_failure['metrics'] is None
+    assert first_failure['gpu_inventory_complete'] is False
+    assert first_failure['devices'] == partial['devices']
+
+    full = await sample(card(GPU) + card(OTHER_GPU))
+    assert full['gpu_inventory_complete'] is full['metrics']['gpu_inventory_complete'] is True
+    now += full['stale_ms']
+    stale = monitor.snapshot()['machines'][0]
+    assert stale['status'] == 'stale' and stale['metrics'] is None
+    assert stale['gpu_inventory_complete'] is True
+    assert (await sample(b'', offline=True))['gpu_inventory_complete'] is True
+
+    merged = await sample(card(GPU) + card('N/A'))
+    assert {gpu['uuid'] for gpu in merged['devices']} == {GPU, OTHER_GPU}
+    assert merged['gpu_inventory_complete'] is False
+    assert (await sample(b'', offline=True))['gpu_inventory_complete'] is False
+    recovered = await sample(card(GPU))
+    assert recovered['gpu_inventory_complete'] is True
+    assert [gpu['uuid'] for gpu in recovered['devices']] == [GPU]
+    no_devices = await sample(b'')
+    assert no_devices['gpu_inventory_complete'] is False
+    assert no_devices['devices'] == recovered['devices']
+    assert (await sample(b'', offline=True))['gpu_inventory_complete'] is False
+
+
+@pytest.mark.parametrize('packed', [False, True], ids=['hot', 'warm'])
+async def test_inventory_confidence_restores_with_device_history(tmp_path, packed):
+    evidence = {'full':True, 'partial':False, 'legacy':None, 'later-empty':False}
+    hosts = tuple(machine(name, index * 32, enabled=False)
+                  for name, index in zip(evidence, 'abcd'))
+    config = Config(data_dir=tmp_path, machines=hosts)
+    now = 10 * DAY_MS
+    recorded_at = now - 2 * DAY_MS
+    history = History(tmp_path)
+    history.prepare()
+    for host in hosts:
+        metrics = {'gpus':data()['gpus']}
+        complete = evidence[host.id]
+        if complete is not None:
+            metrics['gpu_inventory_complete'] = complete if host.id != 'later-empty' else True
+        sample = dict(observed_at=recorded_at, received_at=recorded_at, source='ssh', boot='boot',
+                      status='normal', metrics=metrics)
+        history.append(host.history_key, 'fixture', sample)
+        if host.id == 'later-empty':
+            history.append(host.history_key, 'fixture', dict(
+                sample, observed_at=recorded_at+1, metrics={'cpu_percent':20, 'gpu_inventory_complete':False}))
+        history.append(host.history_key, 'fixture', dict(
+            sample, observed_at=recorded_at+2, boot=None, status='offline', metrics=None))
+    if packed:
+        assert history.pack(now-DAY_MS) == 9
+    history.close()
+
+    restored = Monitor(config, clock=lambda: now)
+    try:
+        await restored.load_registry()
+        for view in restored.snapshot()['machines']:
+            assert view['status'] == 'disabled' and view['metrics'] is None
+            assert view['gpu_inventory_complete'] is evidence[view['id']]
+            assert [gpu['name'] for gpu in view['devices']] == ['Fixture GPU']
+    finally:
+        restored.history.close()
+
+
 async def test_background_scheduling_timeout_disk_fault_boot_and_shutdown(tmp_path, monkeypatch):
     slow = machine('slow', 'b'*32)
     enabled = machine()

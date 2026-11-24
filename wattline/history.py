@@ -234,34 +234,44 @@ class History:
     def inventory(self, machine, now):
         with self.connect(read=True) as db:
             since = now-WARM_MS
-            last, scope = self.latest_host(db, 'host_ticks', machine, since, now)
+            last, scope, complete = self.latest_host(db, 'host_ticks', machine, since, now)
             newest = db.execute('SELECT MAX(at) FROM gpu_ticks WHERE machine=? AND at BETWEEN ? AND ?',
                                 (machine, since, now)).fetchone()[0]
             catalog = db.execute('SELECT id FROM history_machines WHERE identity=?', (machine,)).fetchone()
             if catalog:
-                warm_last, warm_scope = self.latest_host(db, 'warm_host_ticks', *catalog, since, now)
+                warm_last, warm_scope, warm_complete = self.latest_host(db, 'warm_host_ticks', *catalog, since, now)
                 if warm_last is not None and (last is None or warm_last > last):
-                    last, scope = warm_last, warm_scope
+                    last, scope, complete = warm_last, warm_scope, warm_complete
                 warm_newest = db.execute('SELECT MAX(at) FROM warm_gpu_ticks WHERE machine=? AND at BETWEEN ? AND ?',
                                          (*catalog,since,now)).fetchone()[0]
                 if warm_newest is not None and (newest is None or warm_newest > newest):
-                    devices = db.execute("""
+                    rows = db.execute("""
                         SELECT d.uuid,k.details FROM warm_gpu_ticks g JOIN history_devices d ON d.id=g.device
                         JOIN gpu_descriptors k ON k.id=g.descriptor WHERE g.machine=? AND g.at=?
                         ORDER BY json_extract(k.details,'$.index')
                         """, (*catalog,warm_newest))
-                    return last, [{'uuid':uuid,**json.loads(details)} for uuid,details in devices], scope
-            devices = db.execute(
+                    devices = [{'uuid':uuid,**json.loads(details)} for uuid,details in rows]
+                    return last, devices, scope, self.inventory_complete(complete, last, warm_newest)
+            rows = db.execute(
                 """SELECT metrics FROM gpu_ticks WHERE machine=? AND at=?
                    ORDER BY json_extract(metrics, '$.index')""", (machine, newest))
-            return last, [json.loads(row[0]) for row in devices], scope
+            return last, [json.loads(row[0]) for row in rows], scope, self.inventory_complete(complete, last, newest)
+
+    @staticmethod
+    def inventory_complete(complete, sample_at, devices_at):
+        # A positive result only certifies the device list from the same sample.
+        if complete == 'false':
+            return False
+        if complete == 'true' and sample_at == devices_at:
+            return True
+        return None
 
     @staticmethod
     def latest_host(db, table, machine, since, now):
         return db.execute(f"""
-            SELECT at,json_extract(metrics,'$.scope') FROM {table}
+            SELECT at,json_extract(metrics,'$.scope'),json_type(metrics,'$.gpu_inventory_complete') FROM {table}
             WHERE machine=? AND at BETWEEN ? AND ? AND boot IS NOT NULL ORDER BY at DESC LIMIT 1
-            """, (machine,since,now)).fetchone() or (None, None)
+            """, (machine,since,now)).fetchone() or (None, None, None)
 
     def series(self, machines, machine, gpu, metric, hours, now, period, stale):
         window = hours * 3600000

@@ -18,7 +18,7 @@ The dashboard SHALL provide an expanded rail and a narrow machine-identity rail.
 
 ### Requirement: Machine silhouette follows reliable model information
 
-收起侧栏的机器轮廓 SHALL 依据该机器已采集到的 GPU 产品名映射：B300 使用厚重机柜轮廓，RTX PRO 6000 使用双槽卡轮廓，GB10 或 DGX Spark 使用紧凑方盒轮廓，RTX 5090 使用双风扇卡轮廓。机型信息缺失、未知、有歧义或不完整时，SHALL 使用通用主机轮廓，不得按机器名、地址或外形猜测型号。设备名称为空、设备数量与配置的期望数量不一致，或当前采样的 GPU 清单被标记为不完整时，均视为不完整；离线节点若保留的清单完整且可信，仍可使用最后已知机型。
+收起侧栏的机器轮廓 SHALL 依据已采集到的 GPU 产品名映射。B300 使用厚重机柜轮廓，RTX PRO 6000 使用双槽卡轮廓，GB10 或 DGX Spark 使用紧凑方盒轮廓，RTX 5090 使用双风扇卡轮廓。清单须有完整性证据、设备名齐全且符合配置的期望数量。机型信息缺失、未知、有歧义或不完整时，SHALL 使用通用主机轮廓，并在提示中保留可用的完整设备名。
 
 #### Scenario: Known models map to distinct silhouettes
 - **WHEN** 一台机器的所有已采集 GPU 产品名都识别为 B300、RTX PRO 6000、GB10/DGX Spark 或 RTX 5090 中的同一类
@@ -36,21 +36,33 @@ The dashboard SHALL provide an expanded rail and a narrow machine-identity rail.
 - **WHEN** 旧配置的机器尚未采集设备型号或不含型号字段
 - **THEN** 页面正常加载并使用通用主机轮廓，无需迁移配置
 
+#### Scenario: Inventory confidence across polling and restart
+- **WHEN** 机器从一次完整或不完整的采样转为离线或过期，或服务从历史加载设备清单
+- **THEN** 机器快照 SHALL 以 `gpu_inventory_complete` 表示清单证据，即 `true` 为已确认完整、`false` 为已知不完整、`null` 为无法确认。完整可信且机型一致的清单保留轮廓，不完整或不可核实的清单显示通用轮廓，后续完整采样可恢复对应轮廓
+
+#### Scenario: Legacy snapshot without inventory confidence
+- **WHEN** 旧机器快照缺少顶层 `gpu_inventory_complete`
+- **THEN** 页面 SHALL 使用当前 `metrics.gpu_inventory_complete` 中的明确证据。没有完整性证据时使用通用轮廓，提示仍显示可用设备名
+
+#### Scenario: PRO 6000 model boundary
+- **WHEN** 设备名包含合法独立型号词 `PRO 6000` 或含紧邻尾缀的未知型号 `PRO 6000X`
+- **THEN** 合法型号映射到双槽卡轮廓，未知变体显示通用轮廓并保留完整型号提示
+
 #### Scenario: Model changes during polling
 - **WHEN** 一次常规轮询只更新了一台机器（包括未选中的机器）的设备型号，而状态和用于渲染签名的其他字段保持不变
 - **THEN** 侧栏和总览中的轮廓、完整型号提示及同轮廓实例后缀在无需导航的情况下随之更新，选中其他机器时同样生效
 
 ### Requirement: Compact rail exposes instance and full model identity
 
-收起侧栏的机器按钮 SHALL 在鼠标悬停和键盘聚焦时提供实例名、当前状态和所有可用的完整 GPU 型号。同一轮廓下存在多台机器时，SHALL 在收起侧栏显示由实例名派生的简短后缀，使这些实例可直接区分；后缀在不同机器间不得重复。
+收起侧栏的机器按钮 SHALL 在鼠标悬停和键盘聚焦时提供原始实例名、当前状态和所有可用的完整 GPU 型号。同一轮廓或同一名称的多个实例 SHALL 在收起侧栏显示可区分的简短后缀。名称相同或 Unicode 规范等价的实例 SHALL 在可访问名称及提示中包含各自的后缀。
 
 #### Scenario: Hover and keyboard focus
 - **WHEN** 操作者悬停机器按钮的任意区域（包括内部状态标记）或键盘聚焦该按钮
 - **THEN** 提示一致地包含实例名、状态和可用的完整型号，且键盘用户可继续用 Enter 或 Space 打开该机器
 
 #### Scenario: Identical instance names
-- **WHEN** 两台机器的实例名、状态和机型都相同
-- **THEN** 它们的可见后缀、可访问名称和悬停提示仍能区分彼此，不以重复文本冒充不同实例
+- **WHEN** 两台机器的实例名相同或 Unicode 规范等价
+- **THEN** 它们的可见后缀、可访问名称、悬停和键盘焦点提示仍能区分彼此，保留各自原始别名
 
 #### Scenario: Multiple instances of one model
 - **WHEN** 多台机器具有相同机型轮廓

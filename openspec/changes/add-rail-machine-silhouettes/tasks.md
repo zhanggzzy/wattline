@@ -9,7 +9,7 @@
 ## 2. Compact and expanded rail
 
 - [x] 2.1 Lay out the 24px silhouette, independent status dot and optional suffix in the 64px collapsed rail while preserving the existing expanded name/status row; verify at 64px, 320px, 390px and 1440px with no horizontal overflow.
-- [x] 2.2 Generate unique short suffixes only for machines sharing one silhouette class; verify duplicate B300 instances show distinct visible suffixes, single instances show none, and model-less duplicates still differ.
+- [x] 2.2 Generate unique short suffixes for machines sharing one silhouette class; verify duplicate B300 instances show distinct visible suffixes, uniquely named single instances show none, and model-less duplicates still differ.
 
 ## 3. Verification and handoff
 
@@ -28,6 +28,14 @@
 - [x] 4.5 Remove the status marker's own tooltip so hovering any part of the machine button shows the same complete identity.
 - [x] 4.6 Extend `tools/browser_smoke.py` with all five regressions, rerun AN-63's `review_browser.py`, pytest, i18n, JavaScript, Chromium and OpenSpec strict checks.
 - [ ] 4.7 Independent re-review of the remediation (AN-67).
+
+## 5. AN-67 review remediation
+
+- [x] 5.1 Carry inventory completeness from collection and hot or warm history into the machine snapshot. Verify full, partial, offline, stale and recovery transitions and conservative legacy compatibility.
+- [x] 5.2 Distinguish identical and Unicode-equivalent names in visible suffixes, keyboard focus hints and accessible names. Preserve original instance names.
+- [x] 5.3 Match PRO 6000 at model token boundaries. Verify supported editions and unknown attached suffixes in the synthetic UI.
+- [x] 5.4 Run the XML/API regressions, AN-63 and AN-67 browser cases, repository checks and OpenSpec strict. Record commands, results and limits in [verification.md](verification.md#an-70-第二轮整改验证2026-11-24).
+- [ ] 5.5 Independent re-review of the second remediation (AN-69).
 
 ## Workflow follow-up
 

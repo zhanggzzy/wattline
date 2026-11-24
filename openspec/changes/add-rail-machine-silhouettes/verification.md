@@ -196,3 +196,40 @@ git diff --cached --check
 - 浅色折叠侧栏证据使用测试临时注入的浅色背景与继承色；应用根节点仍固定 `color-scheme: light`，侧栏实际使用深色背景。
 - 仅在 macOS Chromium 158 合成 API 环境验证；未运行 Safari/Firefox、屏幕阅读器人工听读、真实触屏或真实 GPU 型号抽样。
 - 未推送远端、未部署、未连接真实节点、未读取私有节点配置。整改交付 SHA 记录在本子任务评论；以该 SHA 的实际 `git show` 为准。
+
+## AN-70 第二轮整改验证（2026-11-24）
+
+本节记录执行者自测。OpenSpec `add-rail-machine-silhouettes` 保持活动，由 AN-69 独立复审。
+
+- 本地审查基线为 `6a1b5c878a2fc2608a780cdb80122ded31e4e691`，核对时远端 `main` 为 `f31ed8ddc0a92bd94469546970433e8a8f4b5c56`。整改通过本地提交交付，完整 SHA 与实际 diff 见 AN-70 交接。
+- 机器快照新增 `gpu_inventory_complete`。`true` 表示采样已确认清单完整，`false` 表示不完整，`null` 表示无证据。热层和温层使用已有采样指标恢复可信度。旧前端可忽略新增字段。新前端读取旧快照时从当前指标取明确证据，旧离线清单无证据时显示通用轮廓并保留完整名称。配置和持久化格式无需迁移。
+- 相同或 NFC 等价的别名显示独立后缀，焦点提示和可访问名称保留原始别名并包含该后缀。合成 Chromium 返回 `Café` 和 `Café` 的后缀 5、6，跨轮廓的第三个相同别名使用 7。
+- 完整 B300 在正常、离线和过期时均保持机型。部分 B300 在在线和离线时均为 `generic`，恢复完整后回到 `b300`，再变部分清单时回退。两种状态均可读取完整的 `NVIDIA B300 SXM6 AC`。旧在线快照显式完整时仍为 `b300`，旧离线快照无证据时为 `generic`。
+- 标准工作站版和 Max-Q 版均识别为 `pro6000`。检测到紧邻字母、数字、连接符号或汉字的未知型号时回退。`NVIDIA PRO 6000X` 在合成 XML 到实际侧栏的复跑中显示完整原名和通用轮廓。
+
+### 命令与结果
+
+| 命令 | 退出码 | 结果 |
+| --- | --- | --- |
+| `.venv/bin/python -m pytest -q` | 0 | 21 passed，1 条既有 Starlette/httpx 弃用告警。新增合成 XML 的完整、部分、合并保留、空清单、离线、过期、恢复，以及热层和温层历史恢复测试。 |
+| `node --check wattline/static/monitor.js` 和 `node --check wattline/static/locales.js` | 0 | 两项语法检查通过。 |
+| `node tools/test_i18n.cjs` | 0 | PASS，275 个文案键，检查占位符、引用、插值、Intl、持久化及回退。 |
+| `OPENSPEC_TELEMETRY=0 npx --offline @fission-ai/openspec@1.14.2 validate add-rail-machine-silhouettes --strict` | 0 | `Change 'add-rail-machine-silhouettes' is valid`。CLI `--version` 返回 `1.14.2`。 |
+| `git diff --check` 和 `git diff --cached --check` | 0 | 工作树及待提交 diff 均通过。索引中的 `AGENTS.md` 仅含仓库约定。 |
+| 下方合成 Chromium 命令 | 0 | Chromium 158.0.8127.18，仓库 smoke 为 `PASS`，两份审查复跑均为 `failures: []`，三份结果均为 `page_errors: []`。 |
+
+```sh
+rail_chromium="$HOME/Library/Caches/ms-playwright/chromium_headless_shell-1254/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+.venv/bin/python tools/browser_smoke.py --browser "$rail_chromium" > artifacts/an70/repo-smoke.json
+.venv/bin/python artifacts/an70/an63/review_browser.py "$rail_chromium" > artifacts/an70/an63/results.json
+.venv/bin/python artifacts/an70/an67/review_edges.py "$rail_chromium" > artifacts/an70/an67/results.json
+```
+
+- AN-63 的 `review_browser.py` 原附件 SHA-256 为 `647bc7db52993451e4206f69d23f89808ea27f65930d2f891cf87ce6393c319d`。原脚本在由基线 `git archive` 提取的静态资源上运行，退出码 0，`failures: []`。在整改代码上复跑时，除输出目录外，仅在原脚本预期为可信离线 B300 的 `rack-a` 夹具新增 `gpu_inventory_complete: true`。原夹具缺少此证据的情形已由仓库 smoke 单独断言通用轮廓和完整提示。
+- AN-67 的 `review_edges.py` 原附件 SHA-256 为 `dfe3ccce8a2b0566bae9330354954e866257521cbba91e332c2dae3e30d268d5`，复跑脚本与附件内容一致。其 JSON 的离线快照字段取自旧的 `metrics`，因此该打印值为 `null`。新增顶层字段由后端用例直接断言。
+- 首次运行仓库 smoke 发现原断言要求轮询后更新节点的后缀文本必须变化。修正后断言 PRO 6000 从单实例变为同轮廓双实例，检查两个后缀都出现且彼此不同，更新节点可保留仍然唯一的名称后缀。再次运行通过，合计 24 项型号分类检查。
+
+### 覆盖限制
+
+- 使用 macOS Chromium 158、合成 API、合成 NVIDIA XML 和临时历史库。浅色折叠侧栏证据来自审查脚本注入的测试配色。覆盖实际 64px 折叠尺寸、键盘焦点和单色轮廓，Safari、Firefox、人工屏幕阅读器和真实 GPU 抽样仍待验证。
+- 独立复审、同步规范、归档和远端 main 整合待 Mika 按项目流程推进。本轮只涉及本地开发，没有实例更新。

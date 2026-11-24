@@ -107,6 +107,7 @@ class Monitor:
         self.machine_order = {}
         self.scopes = {}
         self.inventory = {}
+        self.inventory_complete = {}
         self.last_seen = {}
         self.cpu_baseline = {}
 
@@ -134,10 +135,10 @@ class Monitor:
         host_keys = defaultdict(list)
         for machine in machines.values():
             host_keys[machine.expected_host_id].append(pins.get(machine.history_key))
-            last, cards, scope = await self.write(self.history.inventory, machine.history_key, self.clock())
+            last, cards, scope, complete = await self.write(self.history.inventory, machine.history_key, self.clock())
             self.last_seen[machine.id] = last
             self.scopes[machine.id] = scope
-            self.set_inventory(machine, cards)
+            self.set_inventory(machine, cards, complete=complete)
         if any(len(keys) > 1 and (None in keys or len(set(keys)) != len(keys)) for keys in host_keys.values()):
             raise ValueError('重复的 machine-id 缺少可区分的 SSH 主机密钥')
         self.aliases = aliases
@@ -222,7 +223,7 @@ class Monitor:
         self.machines.pop(machine.id)
         for index in (self.ssh_pins,self.machine_order,self.aliases):
             index.pop(identity, None)
-        for index in (self.latest,self.scopes,self.inventory,self.last_seen,self.cpu_baseline):
+        for index in (self.latest,self.scopes,self.inventory,self.inventory_complete,self.last_seen,self.cpu_baseline):
             index.pop(machine.id, None)
         await self.clean_removed_archives(identity)
         self.schedule_removal_retry()
@@ -445,13 +446,14 @@ class Monitor:
             elapsed = self.monotonic()-next_due
             next_due += interval*(1+math.floor(max(0, elapsed)/interval))
 
-    def set_inventory(self, machine, devices, partial=False):
+    def set_inventory(self, machine, devices, *, complete):
         if devices:
             cards = {gpu['uuid']:{key:gpu.get(key) for key in DEVICE_FIELDS} for gpu in devices}
-            if partial:
+            if complete is False:
                 for old in self.inventory.get(machine.id, []):
                     cards.setdefault(old['uuid'], old)
             self.inventory[machine.id] = list(cards.values())
+        self.inventory_complete[machine.id] = complete
 
     async def observe(self, machine):
         started = self.clock()
@@ -494,7 +496,7 @@ class Monitor:
                             source_at=round(source_at*1000) if source_at is not None else None, metrics=metrics)
             self.cpu_baseline[machine.id] = boot, started, cpu_identity, counters
             self.last_seen[machine.id] = started
-            self.set_inventory(machine, metrics['gpus'], partial=not metrics['gpu_inventory_complete'])
+            self.set_inventory(machine, metrics['gpus'], complete=metrics['gpu_inventory_complete'])
         except asyncio.TimeoutError:
             snapshot.update(status='offline', reason='采集超过单机时限')
         except CollectionError as error:
@@ -516,7 +518,7 @@ class Monitor:
         view.update(id=machine.id, name=alias or default_name, alias=alias, default_name=default_name,
                     scope=self.scopes.get(machine.id), address=machine.display_address, mode=machine.mode,
                     require_gpu=machine.require_gpu or 'gpu' in machine.active_checks or bool(self.inventory.get(machine.id)),
-                    expected_gpu_count=machine.expected_gpu_count,
+                    expected_gpu_count=machine.expected_gpu_count, gpu_inventory_complete=self.inventory_complete.get(machine.id),
                     last_success_at=self.last_seen.get(machine.id), devices=self.inventory.get(machine.id, []),
                     enabled=machine.enabled, checks=machine.active_checks, interval_seconds=self.interval(machine),
                     ssh_connect_timeout_seconds=machine.connect_timeout,

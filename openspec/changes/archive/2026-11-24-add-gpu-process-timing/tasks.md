@@ -11,7 +11,7 @@
 ## 3. Verify and review
 
 - [x] 3.1 Run the repository test suite, JavaScript and locale checks, the synthetic API browser check, OpenSpec strict validation and Git diff checks. Record outputs and limitations in [verification.md](verification.md).
-- [ ] 3.2 Obtain independent review against the actual implementation commit and record the outcome.
+- [x] 3.2 Obtain independent review against the actual implementation commit and record the outcome in [verification.md](verification.md#an-74-独立审查).
 
 ## Workflow follow-up
 

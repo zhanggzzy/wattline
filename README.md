@@ -2,7 +2,7 @@
 
 A standalone workbench for monitoring Linux machines and NVIDIA GPUs over SSH. The web interface supports Simplified Chinese (default) and English, with a persistent language selector in the top bar. See [localization](docs/localization.md) for preferences, fallback rules and adding languages.
 
-- The background sampler collects machine health, CPU and memory, GPU utilization, VRAM, temperature and power. The GPU process view shows Linux user and workload evidence when available.
+- The background sampler collects machine health, CPU and memory, GPU utilization, VRAM, temperature and power. The GPU process view shows Linux user, workload evidence, start time and elapsed runtime at sampling when available.
 - Enroll machines from the overview, set per-machine checks and polling intervals, drag to reorder, and remove nodes with their monitoring data.
 - The dashboard reads 24 hours of raw history. Machine and GPU details show up to 7 days. Older samples are kept in local gzip archives.
 - Container SSH endpoints can report their own cgroup v2 CPU and memory usage alongside visible GPU metrics.
@@ -89,8 +89,11 @@ Escape first clears an active chart reading. Each chart also offers a sample
 table under **查看图表数据 / View chart data**.
 
 The hardware table below trends combines each GPU’s status and measurements
-with current process PID, account, ownership evidence and VRAM. On small
-containers it becomes labeled device cards; its named region can also be
+with current process PID, account, ownership evidence, VRAM, start time and
+elapsed runtime at sampling. Start times use the browser's time zone. Both
+timing values show **Unknown** when they cannot be verified or are absent
+from an older snapshot. On small containers the table becomes labeled device
+cards. Its named region can also be
 scrolled with the keyboard. Select a GPU to open details, close with the visible
 button or Escape, or use **查看此 GPU 趋势 / View this GPU’s trends** to inspect
 that device’s history. CPU, memory, logical CPU count/load and system facts

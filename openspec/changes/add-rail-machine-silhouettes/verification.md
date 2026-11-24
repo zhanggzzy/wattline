@@ -120,3 +120,79 @@ git diff --check && git diff --cached --check
 - 仅在 Chromium 159 合成 API 环境验证；未做 Safari/Firefox、屏幕阅读器人工听读、真实触屏或生产 GPU 型号抽样。
 - 型号映射基于 `nvidia-smi` 产品名 token；新的命名变体会安全回退为通用轮廓并在提示中保留真实设备名。
 - 本记录为执行者自测，不代表独立审查或用户验收。
+
+## AN-68 整改验证（2026-11-24）
+
+以下为 Executor-OMP 针对 AN-63 五项审查发现的整改自测，仍不是独立复审；复审由 AN-67 执行。
+
+### 基线与范围
+
+- 审查基线：`bdfb908c901851eac1868e77dbabad8f45376365`。
+- 沿用活动 change `add-rail-machine-silhouettes`（`spec-driven`，CLI 1.14.2），只修改前端、合成浏览器检查、多语言文案和本 change 记录。
+- 工作树原有 `AGENTS.md` Multica runtime 注入块保持未暂存，未纳入整改提交。
+- 未改采集、快照、历史、配置或 HTTP 契约。
+
+### 整改对应
+
+| AN-63 发现 | 整改 |
+| --- | --- |
+| P1 未选中机器轮询只更新型号后仍显示旧图标和提示 | 渲染签名对每台机器加入机型识别结果与完整设备名；合成检查在总览和选中其他机器时各轮询一次并断言侧栏、总览、提示和后缀分组更新 |
+| P1 已知机型加空名称、部分清单仍标 B300 | 任一空设备名、期望数量不一致或在线样本 `gpu_inventory_complete=false` 均回退 `generic`；仍保留已知非空名称；离线且完整可信的历史清单继续显示 B300 |
+| P2 单条多机型词与 `PRO 60000` 误判 | 每个设备名必须恰好命中一个机型；`PRO 6000` 增加数字边界 |
+| P2 Unicode 后缀截断、同名实例身份重复 | 后缀按 grapheme 截取；身份文本完全相同时追加 `实例 {后缀}`，可见后缀、`aria-label` 和 `title` 均可区分 |
+| P3 状态点自己的提示只含状态 | 状态点去掉独立 `title`，悬停按钮任意位置命中按钮的完整身份提示 |
+
+### 命令与结果
+
+```sh
+.venv/bin/python -m pytest -q
+# 18 passed, 1 warning in 0.67s
+
+node --check wattline/static/monitor.js
+node --check wattline/static/locales.js
+node tools/test_i18n.cjs
+# PASS: 275 message keys, placeholder parity, references, interpolation, Intl, persistence, fallback, blocked storage
+
+.venv/bin/python tools/browser_smoke.py --browser "$HOME/Library/Caches/ms-playwright/chromium_headless_shell-1254/chrome-headless-shell-mac-arm64/chrome-headless-shell"
+# exit 0; result PASS; Chromium 158.0.8127.18; page_errors []
+```
+
+合成 Chromium 整改结果：
+
+- 轮询总览：`更新节点` 从空清单变为 B300 后，侧栏与总览 `data-model` 均为 `b300`，提示为 `更新节点 · 正常 · NVIDIA B300 SXM6 AC`，后缀进入 B300 分组。
+- 选中 `Spark 方盒` 时再次轮询：`更新节点` 变为 `pro6000`，提示含完整 PRO 6000 名称，同型后缀由 `1` 变为 `节点`；页面仍停留在 Spark，`aria-current` 未变。
+- 分类矩阵：`[B300, null]`、期望 2 张但保留 1 张、在线 `gpu_inventory_complete=false`、`NVIDIA B300 / GeForce RTX 5090`、`NVIDIA PRO 60000` 均为 `generic`；完整可信的离线 B300 与在线 B300 仍为 `b300`。
+- 同名实例：可见后缀 `3` / `4`，可访问名称与提示分别为 `相同别名 · 正常 · NVIDIA B300 SXM6 AC · 实例 3` 和 `… 实例 4`。
+- Unicode：可见后缀为 `🚀🚀` 与 `🛸🚀`，无替换字符，实际渲染截图 SHA-256 分别为 `baa0aa87…38dc6` 和 `c490fb4b…dc8c3d8`，互不相同。
+- 悬停：`.machine-icon` 与 `.status-dot` 命中的最近 `title` 都是 `混合机型 · 正常 · NVIDIA B300 SXM6 AC · NVIDIA GeForce RTX 5090`。
+- 原有浅色/深色、单色、24px/18px、状态点、选中、Tab、Space、折叠/展开和 320/390/640/731/1440px 无横向溢出检查继续通过。
+
+AN-63 复现脚本（附件 `review_browser.py`，原 SHA-256 `647bc7db52993451e4206f69d23f89808ea27f65930d2f891cf87ce6393c319d`；仅将输出目录改为 `artifacts/an68-an63-rerun`）复跑：
+
+```sh
+.venv/bin/python artifacts/an68-an63-rerun/review_browser.py "$chromium" > artifacts/an68-an63-rerun/results.json
+# exit 0; failures []
+```
+
+关键复跑值：`model_after_poll=b300`、`overview_model_after_poll=b300`、`tooltip_after_poll=更新节点 · 正常 · NVIDIA B300 SXM6 AC`；`missing/partial/ambiguous/near` 均为 `generic` 且提示保留已知完整名称；同名实例身份分别带 `实例 2` / `实例 3`；Unicode 后缀渲染哈希不同；状态点悬停返回按钮完整提示。
+
+### OpenSpec 与 diff
+
+```sh
+OPENSPEC_TELEMETRY=0 npx --offline @fission-ai/openspec@1.14.2 status --change add-rail-machine-silhouettes
+# Schema: spec-driven; progress 4/4 artifacts complete
+
+OPENSPEC_TELEMETRY=0 npx --offline @fission-ai/openspec@1.14.2 validate add-rail-machine-silhouettes --strict
+# Change 'add-rail-machine-silhouettes' is valid
+
+git diff --check
+git diff --cached --check
+# exit 0
+```
+
+### 证据与限制
+
+- 整改截图仍写入被忽略的 `artifacts/`：`an64-*` 系列，以及整改新增的 `an64-suffix-unicode-a.png`、`an64-suffix-unicode-b.png`。
+- 浅色折叠侧栏证据使用测试临时注入的浅色背景与继承色；应用根节点仍固定 `color-scheme: light`，侧栏实际使用深色背景。
+- 仅在 macOS Chromium 158 合成 API 环境验证；未运行 Safari/Firefox、屏幕阅读器人工听读、真实触屏或真实 GPU 型号抽样。
+- 未推送远端、未部署、未连接真实节点、未读取私有节点配置。整改交付 SHA 记录在本子任务评论；以该 SHA 的实际 `git show` 为准。

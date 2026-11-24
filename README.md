@@ -70,9 +70,13 @@ Use the arrow beside Wattline to collapse navigation into a narrow
 machine-identity rail. Each machine keeps a monochrome model silhouette: B300 as
 a heavy rack, RTX PRO 6000 as a dual-slot card, GB10 / DGX Spark as a compact
 box, RTX 5090 as a dual-fan card, and a generic host when the observed device
-model is missing, unknown or ambiguous. The status light stays independent.
-Machines that share a silhouette show a short instance suffix; hover or keyboard
-focus reveals the instance name and every available full model name. Select a
+model is missing, blank, unknown, ambiguous or the inventory is incomplete.
+Offline machines keep the last known silhouette when their retained inventory is
+complete and trusted. The status light stays independent. Machines that share a
+silhouette show a short instance suffix, and identical instance names also differ
+in their accessible names and tooltips; hover or keyboard focus reveals the
+instance name and every available full model name. Model changes seen by a normal
+poll refresh the rail and overview without navigating. Select a
 machine to open it, or expand to restore names. The density preference is saved
 locally when browser storage is available.
 

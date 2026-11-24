@@ -51,8 +51,8 @@ const machineDashes = [
 const overviewMetrics = ['gpu','cpu','memory','power'];
 const modelRules = [
   ['b300', /\bB300\b/i],
-  ['pro6000', /RTX\s*PRO\s*6000|PRO\s*6000/i],
-  ['spark', /\bGB10\b|DGX\s*Spark/i],
+  ['pro6000', /\bPRO\s*6000(?!\d)/i],
+  ['spark', /\bGB10\b|\bDGX\s*Spark\b/i],
   ['rtx5090', /\bRTX\s*5090\b|\b5090\b/i],
 ];
 const modelShapes = {
@@ -63,16 +63,29 @@ const modelShapes = {
   generic: '<rect x="4.5" y="3.5" width="15" height="7.5" rx="1.5" stroke-width="1.6"/><rect x="4.5" y="13" width="15" height="7.5" rx="1.5" stroke-width="1.6"/><circle cx="7.5" cy="7.25" r="0.9" fill="currentColor" stroke="none"/><circle cx="7.5" cy="16.75" r="0.9" fill="currentColor" stroke="none"/>',
 };
 function classifyModel(name) {
-  return modelRules.find(([, pattern]) => pattern.test(name))?.[0] ?? null;
+  const kinds = new Set(modelRules.filter(([, pattern]) => pattern.test(name)).map(([kind]) => kind));
+  return kinds.size === 1 ? [...kinds][0] : null;
 }
 function machineModel(node) {
-  const names = [...new Set((Array.isArray(node?.devices) ? node.devices : [])
-    .map(device => typeof device?.name === 'string' ? device.name.trim() : '')
-    .filter(Boolean))];
+  const devices = Array.isArray(node?.devices) ? node.devices : [];
+  const names = [];
+  let complete = devices.length > 0;
+  for (const device of devices) {
+    const name = typeof device?.name === 'string' ? device.name.trim() : '';
+    if (!name) complete = false;
+    else if (!names.includes(name)) names.push(name);
+  }
+  if (node?.expected_gpu_count != null && devices.length !== node.expected_gpu_count) complete = false;
+  // A live sample that could not enumerate the expected inventory is not trustworthy.
+  if (node?.metrics && node.metrics.gpu_inventory_complete === false) complete = false;
   const kinds = new Set(names.map(classifyModel));
-  const kind = names.length && kinds.size === 1 && !kinds.has(null) ? [...kinds][0] : 'generic';
+  const kind = complete && kinds.size === 1 && !kinds.has(null) ? [...kinds][0] : 'generic';
   return {kind, names};
 }
+const graphemeSegmenter = typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function'
+  ? new Intl.Segmenter(undefined, {granularity:'grapheme'}) : null;
+const splitGraphemes = label => graphemeSegmenter
+  ? [...graphemeSegmenter.segment(label)].map(part => part.segment) : Array.from(label);
 function machineGlyph(node) {
   const {kind} = machineModel(node);
   return `<span class="machine-icon" data-model="${kind}" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false">${modelShapes[kind]}</svg></span>`;
@@ -87,10 +100,14 @@ function machineSuffixes(hosts) {
   const suffixes = new Map();
   for (const group of groups.values()) {
     if (group.length < 2) continue;
-    const labels = group.map(node => String(node.name || node.id).replace(/\s+/g, ''));
+    // Split by grapheme so surrogates, combining marks and emoji sequences stay whole.
+    const labels = group.map(node => {
+      const characters = splitGraphemes(String(node.name || node.id).replace(/\s+/g, ''));
+      return characters.length ? characters : splitGraphemes(String(node.id));
+    });
     let picked = null;
     for (let length = 2; length <= 4 && !picked; length += 1) {
-      const candidates = labels.map(label => label.slice(-length) || label);
+      const candidates = labels.map(label => label.slice(-length).join('') || label.join(''));
       if (new Set(candidates).size === candidates.length) picked = candidates;
     }
     group.forEach((node, index) => suffixes.set(node.id, picked ? picked[index] : String(index + 1)));
@@ -100,6 +117,17 @@ function machineSuffixes(hosts) {
 function machineIdentity(node) {
   const {names} = machineModel(node);
   return [node.name, machineStates[node.status], ...(names.length ? [names.join(' · ')] : [])].join(' · ');
+}
+function machineIdentities(hosts, suffixes) {
+  const bases = new Map(hosts.map(node => [node.id, machineIdentity(node)]));
+  const counts = new Map();
+  for (const base of bases.values()) counts.set(base, (counts.get(base) || 0) + 1);
+  return new Map(hosts.map(node => {
+    const base = bases.get(node.id);
+    const suffix = suffixes.get(node.id);
+    // Same-name instances need the visible suffix in their accessible identity too.
+    return [node.id, suffix && counts.get(base) > 1 ? `${base} · ${t('instance_suffix', {suffix})}` : base];
+  }));
 }
 const state = {snapshot:null, received:0, syncFailed:false, machine:null, gpu:null, metric:'cpu',
   overviewMetric:'gpu', hours:24, filter:'all', query:'', history:null, historyError:false,
@@ -146,14 +174,15 @@ const unlimitedMemory = host => host?.scope === 'container' && host.metrics?.mem
 
 function navigation(hosts, host) {
   const suffixes = machineSuffixes(hosts);
+  const identities = machineIdentities(hosts, suffixes);
   byId('rail-nav').innerHTML = `<button class="rail-nav" type="button" data-overview aria-label="${t('overview')}" title="${t('overview')}" ${host ? '' : 'aria-current="page"'}>
       <span class="overview-icon" aria-hidden="true"></span><strong>${t('overview')}</strong></button>
     <p class="rail-label">${t('machine')}</p>${hosts.map(node => {
-      const identity = machineIdentity(node);
+      const identity = identities.get(node.id);
       const suffix = suffixes.get(node.id);
       return `<button class="rail-nav rail-machine" type="button"
       data-host="${escape(node.id)}" aria-label="${escape(identity)}" title="${escape(identity)}" ${node.id === host?.id ? 'aria-current="page"' : ''}>
-      ${machineGlyph(node)}<strong>${escape(node.name)}</strong>${suffix ? `<span class="machine-suffix" aria-hidden="true">${escape(suffix)}</span>` : ''}<span class="status-dot ${escape(node.status)}" title="${escape(machineStates[node.status])}"></span>
+      ${machineGlyph(node)}<strong>${escape(node.name)}</strong>${suffix ? `<span class="machine-suffix" aria-hidden="true">${escape(suffix)}</span>` : ''}<span class="status-dot ${escape(node.status)}" aria-hidden="true"></span>
     </button>`;
     }).join('')}`;
   byId('breadcrumb').innerHTML = host
@@ -167,7 +196,11 @@ function renderPage(force = false) {
   const host = hosts.find(node => node.id === state.machine);
   const device = getDevice(host);
   const shape = JSON.stringify([host?.id, device?.uuid, state.filter, state.syncFailed, state.snapshot?.registry_loaded,
-    hosts.map(node => [node.id, node.name, node.address, node.status, node.require_gpu, node.scope, checks(node), reason(node)]),
+    hosts.map(node => {
+      const model = machineModel(node);
+      return [node.id, node.name, node.address, node.status, node.require_gpu, node.scope,
+        checks(node), reason(node), model.kind, model.names];
+    }),
     host?.devices, host?.metrics?.gpus.map(gpu => [gpu.uuid, gpu.state, gpu.process_visibility,
       gpu.processes.map(proc => [proc.pid, proc.name, proc.uid, proc.user, proc.workload, proc.used_memory_mib])]),
     host?.metrics?.driver_version, unlimitedMemory(host)]);

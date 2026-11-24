@@ -542,7 +542,7 @@ def check_machine_silhouettes(browser):
     global machines, mode
     mode = 'normal'
 
-    def silhouette_host(identifier, name, models, status='normal'):
+    def silhouette_host(identifier, name, models, status='normal', *, complete=True, expected=None):
         host = node(1)
         host.update(id=identifier, name=name, address=f'{identifier}.invalid', status=status)
         if models is None:
@@ -550,26 +550,42 @@ def check_machine_silhouettes(browser):
         else:
             host['devices'] = [dict(gpu, uuid=f'{identifier}-gpu-{index}', index=index, name=model)
                                for index, model in enumerate(models)]
+            host['expected_gpu_count'] = expected if expected is not None else (len(models) or None)
         if status in ('normal', 'warning'):
             host['metrics'] = copy.deepcopy(metrics)
             host['metrics']['gpus'] = [dict(gpu, uuid=f'{identifier}-gpu-{index}', index=index, name=model)
                                        for index, model in enumerate(models or [])]
+            host['metrics']['gpu_inventory_complete'] = complete
         else:
             host['metrics'] = None
             host['reason'] = '连接超时 · 合成离线样本'
         return host
 
-    machines = [
-        silhouette_host('b300-a', '机柜 B300 甲', ['NVIDIA B300 SXM6 AC']),
-        silhouette_host('b300-b', '机柜 B300 乙', ['NVIDIA B300 SXM6 AC']),
-        silhouette_host('pro', '工作站 PRO 6000', ['NVIDIA RTX PRO 6000 Blackwell Workstation Edition']),
-        silhouette_host('spark', 'Spark 方盒', ['NVIDIA GB10']),
-        silhouette_host('rtx', '桌面 5090', ['NVIDIA GeForce RTX 5090']),
-        silhouette_host('unknown', '未知机型', ['NVIDIA Synthetic GPU'], status='warning'),
-        silhouette_host('mixed', '混合机型', ['NVIDIA B300 SXM6 AC', 'NVIDIA GeForce RTX 5090']),
-        silhouette_host('legacy', '旧配置无型号', None, status='offline'),
-    ]
+    def build_machines(live_models):
+        return [
+            silhouette_host('live', '更新节点', live_models),
+            silhouette_host('b300-a', '机柜 B300 甲', ['NVIDIA B300 SXM6 AC']),
+            silhouette_host('b300-b', '机柜 B300 乙', ['NVIDIA B300 SXM6 AC']),
+            silhouette_host('pro', '工作站 PRO 6000', ['NVIDIA RTX PRO 6000 Blackwell Workstation Edition']),
+            silhouette_host('spark', 'Spark 方盒', ['NVIDIA GB10']),
+            silhouette_host('rtx', '桌面 5090', ['NVIDIA GeForce RTX 5090']),
+            silhouette_host('unknown', '未知机型', ['NVIDIA Synthetic GPU'], status='warning'),
+            silhouette_host('mixed', '混合机型', ['NVIDIA B300 SXM6 AC', 'NVIDIA GeForce RTX 5090']),
+            silhouette_host('legacy', '旧配置无型号', None, status='offline'),
+            silhouette_host('missing', '部分名称为空', ['NVIDIA B300 SXM6 AC', None]),
+            silhouette_host('partial', '数量不全', ['NVIDIA B300 SXM6 AC'], status='warning',
+                            complete=False, expected=2),
+            silhouette_host('ambiguous', '复合名称', ['NVIDIA B300 / GeForce RTX 5090']),
+            silhouette_host('near', '非 6000', ['NVIDIA PRO 60000']),
+            silhouette_host('duplicate-a', '相同别名', ['NVIDIA B300 SXM6 AC']),
+            silhouette_host('duplicate-b', '相同别名', ['NVIDIA B300 SXM6 AC']),
+            silhouette_host('unicode-a', 'Alpha 🚀🚀', ['NVIDIA GeForce RTX 5090']),
+            silhouette_host('unicode-b', 'Beta 🛸🚀', ['NVIDIA GeForce RTX 5090']),
+        ]
+
+    machines = build_machines([])
     cases = [
+        ('live', 'generic', '更新节点 · 正常'),
         ('b300-a', 'b300', '机柜 B300 甲 · 正常 · NVIDIA B300 SXM6 AC'),
         ('b300-b', 'b300', '机柜 B300 乙 · 正常 · NVIDIA B300 SXM6 AC'),
         ('pro', 'pro6000', '工作站 PRO 6000 · 正常 · NVIDIA RTX PRO 6000 Blackwell Workstation Edition'),
@@ -578,13 +594,17 @@ def check_machine_silhouettes(browser):
         ('unknown', 'generic', '未知机型 · 需关注 · NVIDIA Synthetic GPU'),
         ('mixed', 'generic', '混合机型 · 正常 · NVIDIA B300 SXM6 AC · NVIDIA GeForce RTX 5090'),
         ('legacy', 'generic', '旧配置无型号 · 连接失败'),
+        ('missing', 'generic', '部分名称为空 · 正常 · NVIDIA B300 SXM6 AC'),
+        ('partial', 'generic', '数量不全 · 需关注 · NVIDIA B300 SXM6 AC'),
+        ('ambiguous', 'generic', '复合名称 · 正常 · NVIDIA B300 / GeForce RTX 5090'),
+        ('near', 'generic', '非 6000 · 正常 · NVIDIA PRO 60000'),
     ]
     page = browser.new_page(viewport={'width': 1440, 'height': 1100})
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.route('**/*', handle)
     page.goto('http://wattline.test')
-    expect(page.locator('#host-rows tr')).to_have_count(8)
+    expect(page.locator('#host-rows tr')).to_have_count(17)
 
     matrix = page.evaluate("""() => {
       const cases = [
@@ -600,11 +620,21 @@ def check_machine_silhouettes(browser):
         [['NVIDIA B300 SXM6 AC','NVIDIA GeForce RTX 5090'],'generic'],
         [['NVIDIA B300 SXM6 AC','NVIDIA Graphics Device'],'generic'],
         [['NVIDIA B300 SXM6 AC','NVIDIA B300 SXM6 AC'],'b300'],
+        [['NVIDIA B300 SXM6 AC', null],'generic'],
+        [['NVIDIA B300 / GeForce RTX 5090'],'generic'],
+        [['NVIDIA PRO 60000'],'generic'],
         [[null],'generic'],
         [[],'generic'],
       ];
+      const incomplete = [
+        {devices:[{name:'NVIDIA B300 SXM6 AC'}], expected_gpu_count:2, metrics:{gpu_inventory_complete:false}},
+        {devices:[{name:'NVIDIA B300 SXM6 AC'}], expected_gpu_count:2},
+        {devices:[{name:'NVIDIA B300 SXM6 AC'}], metrics:{gpu_inventory_complete:true}},
+      ];
       return cases.map(([names,expected]) => ({names, expected,
-        actual: machineModel({devices:names.map(name => ({name}))}).kind}));
+        actual: machineModel({devices:names.map(name => ({name}))}).kind}))
+        .concat(incomplete.map((node, index) => ({expected:index === 2 ? 'b300' : 'generic',
+          actual:machineModel(node).kind})));
     }""")
     assert all(item['actual'] == item['expected'] for item in matrix), matrix
 
@@ -626,12 +656,52 @@ def check_machine_silhouettes(browser):
 
     b300_suffixes = [page.locator(f'#rail-nav [data-host="{machine_id}"] .machine-suffix').inner_text()
                      for machine_id in ('b300-a', 'b300-b')]
+    generic_ids = ('live', 'unknown', 'mixed', 'legacy', 'missing', 'partial', 'ambiguous', 'near')
     generic_suffixes = [page.locator(f'#rail-nav [data-host="{machine_id}"] .machine-suffix').inner_text()
-                        for machine_id in ('unknown', 'mixed', 'legacy')]
+                        for machine_id in generic_ids]
     assert len(set(b300_suffixes)) == 2 and all(0 < len(value) <= 4 for value in b300_suffixes), b300_suffixes
-    assert len(set(generic_suffixes)) == 3 and all(0 < len(value) <= 4 for value in generic_suffixes), generic_suffixes
-    for machine_id in ('pro', 'spark', 'rtx'):
+    assert len(set(generic_suffixes)) == 8 and all(0 < len(value) <= 4 for value in generic_suffixes), generic_suffixes
+    for machine_id in ('pro', 'spark'):
         assert page.locator(f'#rail-nav [data-host="{machine_id}"] .machine-suffix').count() == 0, machine_id
+
+    duplicate_labels = {
+        machine_id: page.locator(f'#rail-nav [data-host="{machine_id}"]').get_attribute('aria-label')
+        for machine_id in ('duplicate-a', 'duplicate-b')
+    }
+    duplicate_titles = {
+        machine_id: page.locator(f'#rail-nav [data-host="{machine_id}"]').get_attribute('title')
+        for machine_id in ('duplicate-a', 'duplicate-b')
+    }
+    assert duplicate_labels['duplicate-a'] != duplicate_labels['duplicate-b'], duplicate_labels
+    assert duplicate_labels == duplicate_titles, duplicate_titles
+    for label in duplicate_labels.values():
+        assert label.startswith('相同别名 · 正常 · NVIDIA B300 SXM6 AC · 实例 '), label
+
+    unicode_suffixes = {}
+    for machine_id in ('unicode-a', 'unicode-b'):
+        suffix = page.locator(f'#rail-nav [data-host="{machine_id}"] .machine-suffix')
+        text = suffix.inner_text()
+        assert '\ufffd' not in text, text
+        screenshot = OUT / f'an64-suffix-{machine_id}.png'
+        suffix.screenshot(path=str(screenshot))
+        unicode_suffixes[machine_id] = {'suffix': text,
+                                        'rendered_sha256': hashlib.sha256(screenshot.read_bytes()).hexdigest()}
+    assert unicode_suffixes['unicode-a']['rendered_sha256'] != unicode_suffixes['unicode-b']['rendered_sha256'], \
+        unicode_suffixes
+
+    # The status dot must not replace the button's complete identity tooltip.
+    hover_titles = {}
+    mixed_button = page.locator('#rail-nav [data-host="mixed"]')
+    for selector in ('.machine-icon', '.status-dot'):
+        target = mixed_button.locator(selector)
+        target.hover()
+        hover_titles[selector] = target.evaluate("""el => {
+          const box = el.getBoundingClientRect();
+          return document.elementFromPoint(box.x + box.width/2, box.y + box.height/2)
+            .closest('[title]').getAttribute('title');
+        }""")
+    assert hover_titles['.machine-icon'] == hover_titles['.status-dot'] == \
+        '混合机型 · 正常 · NVIDIA B300 SXM6 AC · NVIDIA GeForce RTX 5090', hover_titles
 
     dot_colors = {
         machine_id: page.locator(f'#rail-nav [data-host="{machine_id}"] .status-dot')
@@ -721,10 +791,44 @@ def check_machine_silhouettes(browser):
         if width == 390:
             page.screenshot(path=str(OUT / 'an64-expanded-390.png'))
     page.set_viewport_size({'width': 1440, 'height': 1100})
+    toggle.press('Space')
+    expect(toggle).to_have_attribute('aria-expanded', 'false')
+    expect(page.locator('#rail-nav [data-overview]')).to_have_attribute('aria-current', 'page')
+
+    # An ordinary poll that only changes the device model must repaint overview and rail.
+    machines = build_machines(['NVIDIA B300 SXM6 AC'])
+    page.wait_for_function(
+        "document.querySelector('#rail-nav [data-host=\"live\"] .machine-icon')?.dataset.model === 'b300'")
+    poll = {
+        'overview_model': page.locator('#host-rows [data-host="live"] .machine-icon').get_attribute('data-model'),
+        'rail_model': page.locator('#rail-nav [data-host="live"] .machine-icon').get_attribute('data-model'),
+        'title': page.locator('#rail-nav [data-host="live"]').get_attribute('title'),
+        'suffix': page.locator('#rail-nav [data-host="live"] .machine-suffix').inner_text(),
+    }
+    assert poll['overview_model'] == poll['rail_model'] == 'b300', poll
+    assert poll['title'] == '更新节点 · 正常 · NVIDIA B300 SXM6 AC', poll
+
+    # Same repaint while another machine is selected, including regrouped suffixes.
+    page.locator('#rail-nav [data-host="spark"]').click()
+    expect(page.locator('#page-heading')).to_have_text('Spark 方盒')
+    machines = build_machines(['NVIDIA RTX PRO 6000 Blackwell Workstation Edition'])
+    page.wait_for_function(
+        "document.querySelector('#rail-nav [data-host=\"live\"] .machine-icon')?.dataset.model === 'pro6000'")
+    assert page.locator('#page-heading').inner_text() == 'Spark 方盒'
+    assert page.locator('#rail-nav [data-host="spark"]').get_attribute('aria-current') == 'page'
+    poll['selected_model'] = page.locator('#rail-nav [data-host="live"] .machine-icon').get_attribute('data-model')
+    poll['selected_title'] = page.locator('#rail-nav [data-host="live"]').get_attribute('title')
+    poll['selected_suffix'] = page.locator('#rail-nav [data-host="live"] .machine-suffix').inner_text()
+    assert poll['selected_model'] == 'pro6000', poll
+    assert 'NVIDIA RTX PRO 6000 Blackwell Workstation Edition' in poll['selected_title'], poll
+    assert poll['selected_suffix'] != poll['suffix'], poll
+
     assert not errors, errors
     page.close()
     return {'result': 'PASS', 'rail_width': rail_width, 'classification': matrix,
             'glyph_sha256': glyph_hashes, 'suffixes': {'b300': b300_suffixes, 'generic': generic_suffixes},
+            'duplicate_labels': duplicate_labels, 'unicode_suffixes': unicode_suffixes,
+            'hover_titles': hover_titles, 'poll': poll,
             'dot_colors': dot_colors, 'monochrome': monochrome, 'surfaces': surfaces,
             'page_errors': errors,
             'screenshots': ['an64-rail-collapsed.png', 'an64-collapsed-desktop.png', 'an64-rail-expanded.png',

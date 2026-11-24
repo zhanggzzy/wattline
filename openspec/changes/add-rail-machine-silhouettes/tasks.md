@@ -19,6 +19,16 @@
 - [ ] 3.4 Independent reviewer verifies the change, implementation diff, tests and strict result against the accepted scheme A.
 - [ ] 3.5 After review passes, sync the modified capability spec and archive the change; Mika integrates and verifies remote main.
 
+## 4. AN-63 review remediation
+
+- [x] 4.1 Include every machine's derived model kind and complete device names in the render signature so an ordinary poll refreshes rail, overview, hints and same-model suffixes without navigation, including while another machine is selected.
+- [x] 4.2 Treat blank device names, configured expected-count mismatch and a live sample marked incomplete as unreliable: fall back to `generic` while keeping known complete names, and keep last known silhouettes for offline machines with a complete trusted inventory.
+- [x] 4.3 Reject per-name ambiguity and digit overruns (`B300 / RTX 5090`, `PRO 60000`) instead of taking the first matching model.
+- [x] 4.4 Derive suffixes by grapheme so Unicode is never truncated, and append the visible suffix to accessible names/titles when two instances share identical identity text.
+- [x] 4.5 Remove the status marker's own tooltip so hovering any part of the machine button shows the same complete identity.
+- [x] 4.6 Extend `tools/browser_smoke.py` with all five regressions, rerun AN-63's `review_browser.py`, pytest, i18n, JavaScript, Chromium and OpenSpec strict checks.
+- [ ] 4.7 Independent re-review of the remediation (AN-67).
+
 ## Workflow follow-up
 
 - Parent AN-62 remains `in_review` for user acceptance after independent review and main delivery.

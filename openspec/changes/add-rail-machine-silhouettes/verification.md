@@ -109,7 +109,8 @@ git diff --check && git diff --cached --check
 
 ## Commit
 
-- 实现提交：由本记录所在分支的本地提交承载，基线见上。
+- 实现提交：`a156289bc66c1c65423875b68c6367f19cd48e6f`（parent `f31ed8ddc0a92bd94469546970433e8a8f4b5c56`），包含源码、测试、README 与本 change 的 proposal/spec/design/tasks/verification。
+- 提交未包含工作树中的 `AGENTS.md` Multica runtime 注入块；`git show a156289:AGENTS.md` 仍为 39 行通用仓库约定。
 - 未推送远端；Mika 在 AN-63 独立审查通过后负责整合、推送并核验远端 `main`。
 - 未部署、未更新用户实例、未连接真实节点、未触发真实采集，未读取私有节点配置。
 

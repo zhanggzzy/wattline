@@ -15,7 +15,7 @@
 
 - [x] 3.1 Extend the synthetic Chromium check with B300, PRO 6000, GB10, RTX 5090, unknown, mixed, legacy and duplicate instances; assert glyph distinctness at actual size, status/selection/navigation, hover and keyboard labels, expand/collapse, both actual surface colors and monochrome stroke, and capture screenshots.
 - [x] 3.2 Run pytest, `node --check`, the synthetic browser check, OpenSpec strict and diff checks; record real commands, results, screenshots and limits in `verification.md`.
-- [ ] 3.3 Commit the implementation and evidence in the fixed repository with baseline and delivery SHA recorded; keep the change active for independent review.
+- [x] 3.3 Commit the implementation and evidence in the fixed repository with baseline and delivery SHA recorded; keep the change active for independent review.
 - [ ] 3.4 Independent reviewer verifies the change, implementation diff, tests and strict result against the accepted scheme A.
 - [ ] 3.5 After review passes, sync the modified capability spec and archive the change; Mika integrates and verifies remote main.
 

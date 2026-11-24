@@ -17,7 +17,7 @@ from .history import DAY_MS, GPU_FIELDS, History, HistoryInUse, WARM_HOURS, WARM
 
 log = logging.getLogger(__name__)
 DEVICE_FIELDS = ('uuid', 'index', 'name', 'bus_id')
-PROCESS_FIELDS = ('pid', 'type', 'name', 'uid', 'user', 'workload', 'used_memory_mib')
+PROCESS_FIELDS = ('pid', 'type', 'name', 'uid', 'user', 'workload', 'used_memory_mib', 'started_at', 'elapsed_seconds')
 ARCHIVE_ZONE = ZoneInfo('UTC')
 PURGE_ERRORS = (OSError, sqlite3.Error, ValueError, KeyError, TypeError, EOFError, CompressionError)
 

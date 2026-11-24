@@ -156,6 +156,7 @@
   .process-table { min-width: 510px; font-size: 12px; }
   .process-table td, .process-table th { padding: 9px 16px; }
   .process-table td small { display: block; color: var(--muted); font-size: 12px; }
+  .process-table .process-timing { white-space: nowrap; }
   .compact-label, .narrow-power-label { display: none; }
   [hidden] { display: none !important; }
   @media (max-width: 975px) {
@@ -365,7 +366,7 @@ dialog::backdrop { overflow: hidden; overscroll-behavior: contain; }
 .gpu-dialog { width: min(840px, calc(100% - 32px)); }
 .gpu-dialog > .panel-head { position: sticky; top: 0; z-index: 3; background: white; }
 .gpu-dialog .panel-head form { display: block; padding: 0; }
-.gpu-dialog #gpu-dialog-content { padding: 16px; display: grid; gap: 16px; }
+.gpu-dialog #gpu-dialog-content { padding: 16px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
 .gpu-dialog-actions { padding: 0 16px 16px; }
 @container (max-width: 840px) {
   .hardware-table { min-width: 0; }

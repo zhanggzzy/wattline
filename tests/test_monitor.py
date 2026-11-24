@@ -14,7 +14,7 @@ from wattline.collector import CollectionError, Collector, HostIdentity, cpu_per
 from wattline.config import Config, Machine, MachineRegistration, MachineSettings
 from wattline.history import DAY_MS, WARM_HOURS, WARM_MS, History, HistoryInUse
 from wattline.history_schema import HOT_SCHEMA
-from wattline.service import ARCHIVE_ZONE, Monitor, archive_slots
+from wattline.service import ARCHIVE_ZONE, Monitor, archive_slots, metrics_from
 from wattline import host_probe
 
 
@@ -113,7 +113,7 @@ def test_monitor_probe_nvidia_power_and_host_fields(tmp_path, monkeypatch):
     assert unlimited['warnings'] == []
     assert unlimited['memory'] == {'used_bytes':970,'total_bytes':None,'available_bytes':None}
     assert limited['gpus'][0]['power_w'] == 42.3 and limited['gpus'][0]['process_visibility'] == 'partial'
-    assert limited['gpus'][0]['processes'][0]['pid'] == 93 and 'uid' not in limited['gpus'][0]['processes'][0]
+    assert limited['gpus'][0]['processes'][0] == {'pid':93, 'type':None, 'used_memory_mib':2048}
     (proc/'93/status').unlink()
     assert host_probe.monitor(config)['gpus'][0]['processes'][0].get('uid') is None
     assert host_probe.monitor(dict(config, require_gpu=False))['gpus'] == []
@@ -126,6 +126,94 @@ def test_monitor_probe_nvidia_power_and_host_fields(tmp_path, monkeypatch):
     waiting = host_probe.monitor(config)
     assert waiting['gpus'] == [] and waiting['memory'] == sample['memory']
     assert any('nvidia-smi' in warning for warning in waiting['warnings'])
+
+
+@pytest.mark.parametrize(('case', 'verified'), [
+    ('valid', True),
+    ('subsecond', True),
+    ('boundary_tick', True),
+    ('after_boundary', False),
+    ('reused_during_reads', False),
+    ('exited_during_reads', False),
+    ('unreadable_cgroup', True),
+    ('unavailable_uptime', False),
+    ('invalid_uptime', False),
+    ('unavailable_tick_rate', False),
+    ('unavailable_wall_clock', True),
+    ('invalid_wall_clock', True),
+])
+def test_gpu_process_timing_from_verified_source_sample(tmp_path, monkeypatch, case, verified):
+    proc = tmp_path/'proc'
+    target = proc/'93'
+    target.mkdir(parents=True)
+    uptime = proc/'uptime'
+    if case != 'unavailable_uptime':
+        uptime.write_text('NaN 0' if case == 'invalid_uptime' else '4500.00 0')
+    start = {'subsecond':449999, 'boundary_tick':450000, 'after_boundary':450001}.get(case, 350)
+    (target/'stat').write_text('93 (worker) name) '+' '.join(['0']*19+[str(start)]))
+    (target/'status').write_text('Uid: 1050 1050 1050 1050')
+    (target/'comm').write_text('worker')
+    # No cgroup record also exercises the final identity check after an OSError.
+    if case not in ('unreadable_cgroup', 'exited_during_reads'):
+        (target/'cgroup').write_text('0::/system.slice/test.scope')
+    sampled_at = 1_790_000_000.25
+    wall = sampled_at - 4
+
+    def wall_clock():
+        nonlocal wall
+        if case == 'unavailable_wall_clock':
+            raise OSError()
+        if case == 'invalid_wall_clock':
+            return float('nan')
+        observed_at = wall
+        wall += 4
+        return observed_at
+
+    def nvidia(*args, **kwargs):
+        nonlocal wall
+        wall += 6
+        uptime.write_text('4506.00 0')
+        return SimpleNamespace(returncode=0, stdout=f'''<nvidia_smi_log><gpu><uuid>{GPU}</uuid>
+            <processes><process_info><pid>93</pid><used_memory>2048 MiB</used_memory></process_info></processes>
+            </gpu></nvidia_smi_log>'''.encode())
+
+    monkeypatch.setattr(host_probe, 'time', SimpleNamespace(time=wall_clock))
+    monkeypatch.setattr(host_probe, 'host_identity', lambda _: (proc, ID, 'boot-fixture'))
+    monkeypatch.setattr(host_probe.os, 'sysconf', lambda name: -1 if case == 'unavailable_tick_rate' else 100)
+    monkeypatch.setattr(host_probe.subprocess, 'run', nvidia)
+    if case == 'exited_during_reads':
+        read_text = host_probe.Path.read_text
+
+        def exit_before_cgroup_read(path, *args, **kwargs):
+            if path == target/'cgroup':
+                (target/'stat').unlink()
+            return read_text(path, *args, **kwargs)
+
+        monkeypatch.setattr(host_probe.Path, 'read_text', exit_before_cgroup_read)
+    if case == 'reused_during_reads':
+        readings = iter([start, start, 450001])
+        monkeypatch.setattr(host_probe, 'pid_start_ticks', lambda _: next(readings))
+
+    result = host_probe.monitor({'mode':'ssh', 'checks':['gpu','processes'], 'host_machine_id':'fixture-machine-id'})
+    assert result['source_observed_at'] == (
+        None if case in ('unavailable_wall_clock', 'invalid_wall_clock') else sampled_at - 4)
+    json.dumps(result, allow_nan=False)
+    process = result['gpus'][0]['processes'][0]
+    assert (process['pid'], process['used_memory_mib']) == (93, 2048)
+    assert ('uid' in process) == verified
+    if case in ('valid', 'subsecond', 'unreadable_cgroup'):
+        assert (process['started_at'], process['elapsed_seconds']) == (
+            (1_790_000_000_240, 0) if case == 'subsecond' else (1_789_995_503_750, 4496))
+    else:
+        assert 'started_at' not in process and 'elapsed_seconds' not in process
+    if case == 'unreadable_cgroup':
+        assert process['workload'] is None
+
+
+def test_legacy_gpu_process_snapshot_keeps_visible_fields():
+    process = metrics_from(data(), None)['gpus'][0]['processes'][0]
+    assert process == {'pid':93, 'uid':1050, 'user':'fixture-owner', 'name':'fixture-worker',
+                       'workload':{'kind':'docker','container_id':'abc'}, 'used_memory_mib':2048}
 
 
 def test_cpu_delta_rejects_first_reset_and_empty_interval():
@@ -430,7 +518,9 @@ def test_direct_http_auth_and_loopback_host_boundaries(tmp_path):
     config = Config(data_dir=tmp_path/'data', machines=(machine(),), viewer_password_file=password)
 
     async def collect(node):
-        return data()
+        sample = data()
+        sample['gpus'][0]['processes'][0].update(started_at=1_789_995_503_750, elapsed_seconds=4496)
+        return sample
 
     service = Monitor(config, collect)
     app = create_app(config, monitor=service)
@@ -453,7 +543,9 @@ def test_direct_http_auth_and_loopback_host_boundaries(tmp_path):
             time.sleep(.01)
         assert response.headers['Cache-Control'] == 'no-store'
         assert host['metrics']['memory_percent'] == 25
-        assert host['metrics']['gpus'][0]['processes'][0]['user'] == 'fixture-owner'
+        process = host['metrics']['gpus'][0]['processes'][0]
+        assert process['user'] == 'fixture-owner'
+        assert (process['started_at'], process['elapsed_seconds']) == (1_789_995_503_750, 4496)
         assert all(value not in response.text for value in ('start_ticks','cmdline','expected_host_id','ssh_alias'))
 
 

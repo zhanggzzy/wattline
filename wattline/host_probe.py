@@ -1,4 +1,5 @@
 """Read-only Linux resource probe, also sent verbatim over SSH."""
+from decimal import Decimal, DecimalException
 import json
 import math
 import os
@@ -61,6 +62,26 @@ def pid_start_ticks(process):
     return int((process/'stat').read_text().rsplit(')', 1)[1].split()[19])
 
 
+def source_wall_time():
+    try:
+        observed_at = time.time()
+    except OSError:
+        return None
+    return observed_at if 0 < observed_at <= 8.64e12 else None
+
+
+def process_timing(start, start_limit, ticks_per_second, sampled_at):
+    # A start in the sampling tick can belong to a PID reused after the cutoff.
+    if sampled_at is None or start + 1 > start_limit:
+        return {}
+    elapsed = (start_limit - start) / ticks_per_second
+    if elapsed >= sampled_at:
+        return {}
+    started_at_ms = round((sampled_at - float(elapsed)) * 1000)
+    if started_at_ms <= 0:
+        return {}
+    return {'started_at':started_at_ms, 'elapsed_seconds':int(elapsed)}
+
 
 def process_workload(cgroup):
     paths = [line.split(':', 2)[2] for line in cgroup.splitlines() if line.count(':') >= 2]
@@ -83,22 +104,20 @@ def process_identity(proc, pid, start_limit, users):
     target = proc/str(pid)
     try:
         start = pid_start_ticks(target)
-        if start > start_limit:
+        if not 0 <= start <= start_limit:
             return {}
         uid_line = next(line for line in (target/'status').read_text().splitlines() if line.startswith('Uid:'))
         uid = int(uid_line.split()[2])
         name = (target/'comm').read_text(errors='replace').strip()[:64]
         if pid_start_ticks(target) != start:
             return {}
-    except (OSError, ValueError, IndexError, StopIteration):
-        return {}
-    try:
-        workload = process_workload((target/'cgroup').read_text())
+        try:
+            workload = process_workload((target/'cgroup').read_text())
+        except OSError:
+            workload = None
         if pid_start_ticks(target) != start:
             return {}
-    except OSError:
-        workload = None
-    except (ValueError, IndexError):
+    except (OSError, ValueError, IndexError, StopIteration):
         return {}
     if uid not in users:
         try:
@@ -131,13 +150,16 @@ def monitor_gpus(config, proc, warnings, *, host_processes=True, warn_on_unknown
         return inventory
     processes_enabled = config.get('monitor_processes', True)
     host_processes = host_processes and processes_enabled
-    start_limit = None
     if host_processes:
         try:
-            start_limit = float((proc/'uptime').read_text().split()[0]) * os.sysconf('SC_CLK_TCK')
-        except (OSError, IndexError, ValueError):
+            ticks_per_second = os.sysconf('SC_CLK_TCK')
+            start_limit = Decimal((proc/'uptime').read_text().split()[0]) * ticks_per_second
+            if ticks_per_second <= 0 or not start_limit.is_finite() or start_limit < 0:
+                raise ValueError()
+        except (OSError, IndexError, ValueError, DecimalException):
             host_processes = False
             warnings.append('无法核实宿主进程启动时间')
+    sampled_at = source_wall_time() if host_processes else None
     try:
         nvidia = subprocess.run(['nvidia-smi', '-q', '-x'], capture_output=True, timeout=config.get('gpu_timeout', 6))
         if nvidia.returncode:
@@ -177,7 +199,10 @@ def monitor_gpus(config, proc, warnings, *, host_processes=True, warn_on_unknown
                 visible = False
                 continue
             if pid not in identities:
-                identities[pid] = process_identity(proc, pid, start_limit, users) if host_processes else {}
+                identity = process_identity(proc, pid, start_limit, users) if host_processes else {}
+                if identity:
+                    identity.update(process_timing(identity['start_ticks'], start_limit, ticks_per_second, sampled_at))
+                identities[pid] = identity
             processes.append({'pid':pid, 'type':item.findtext('type'), **identities[pid],
                               'used_memory_mib':gpu_number(item, 'used_memory')})
         used = gpu_number(gpu, 'fb_memory_usage/used')
@@ -358,7 +383,7 @@ def container_metrics(proc, warnings, checks):
 
 def monitor(config):
     proc, host_id, boot_id = host_identity(config)
-    source_observed_at = time.time()
+    source_observed_at = source_wall_time()
     warnings = []
     container_endpoint = config['mode'] == 'ssh' and (
         Path('/.dockerenv').exists() or Path('/run/.containerenv').exists()

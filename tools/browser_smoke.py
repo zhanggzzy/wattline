@@ -4,6 +4,7 @@ Requires: pip install playwright; python -m playwright install chromium
 """
 import argparse
 import copy
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -209,6 +210,93 @@ def check_unlimited_container(browser):
     assert not page_errors, page_errors
     test_page.close()
     return {'used_text':used_text, 'duplicate_hidden':True, 'page_errors':page_errors}
+
+def check_gpu_process_timing(browser):
+    page = browser.new_page(viewport={'width':1440,'height':900}, timezone_id='America/Los_Angeles')
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    machine = node(1)
+    device = machine['metrics']['gpus'][0]
+    valid = device['processes'][0]
+    started_at = int(datetime(2026, 11, 24, 0, 30, 12, tzinfo=timezone.utc).timestamp()*1000)
+    valid.update(started_at=started_at, elapsed_seconds=62)
+    device['processes'].extend([
+        dict(pid=121, name='legacy', used_memory_mib=512),
+        dict(pid=122, name='partial', used_memory_mib=512, started_at=started_at),
+        dict(pid=123, name='invalid', used_memory_mib=512, started_at=9_000_000_000_000_000, elapsed_seconds=3),
+        dict(pid=124, name='just started', used_memory_mib=512, started_at=started_at, elapsed_seconds=0),
+    ])
+
+    def snapshot(route):
+        route.fulfill(json=dict(server_time=int(time.time()*1000), stale_ms=600000, period_ms=5000,
+            default_ssh_connect_timeout_seconds=5, machine_history_hours=168, registry_loaded=True,
+            history_writable=True, archive_ok=True, machines=[machine]))
+
+    def timing(pane, pid, key):
+        return pane.locator(f'[data-value="process-{device["uuid"]}-{pid}-{key}"]')
+
+    def unknown_timings(pane, pids, label):
+        for pid in pids:
+            expect(timing(pane, pid, 'start')).to_have_text(label)
+            expect(timing(pane, pid, 'elapsed')).to_have_text(label)
+
+    page.route('**/*', handle)
+    page.route('**/api/snapshot', snapshot)
+    page.goto('http://wattline.test')
+    page.locator('.rail-machine[data-host="demo-1"]').click()
+    hardware = page.locator('.hardware-table')
+    expect(hardware).to_contain_text('启动时间')
+    expect(hardware).to_contain_text('截至采样已运行')
+    expect(timing(hardware, 120, 'start')).to_have_text('2026/11/23 16:30:12')
+    expect(timing(hardware, 120, 'elapsed')).to_have_text('1 分钟 2 秒')
+    expect(timing(hardware, 124, 'elapsed')).to_have_text('0 秒')
+    unknown_timings(hardware, [121, 122, 123], '未知')
+    page.locator('.gpu-open').click()
+    dialog = page.locator('#gpu-dialog')
+    expect(dialog.get_by_role('columnheader',name='启动时间')).to_be_visible()
+    expect(timing(dialog, 120, 'start')).to_have_text('2026/11/23 16:30:12')
+    expect(timing(dialog, 120, 'elapsed')).to_have_text('1 分钟 2 秒')
+    unknown_timings(dialog, [121, 122, 123], '未知')
+    page.keyboard.press('Escape')
+    expect(page.locator('.gpu-open')).to_be_focused()
+
+    page.locator('#locale-select').select_option('en')
+    page.set_viewport_size({'width':320,'height':844})
+    expect(timing(hardware, 120, 'start')).to_have_text('11/23/2026, 16:30:12')
+    expect(hardware).to_contain_text('Runtime at sample')
+    unknown_timings(hardware, [121, 122, 123], 'Unknown')
+    page.locator('.gpu-open').click()
+    expect(dialog.get_by_role('columnheader',name='Start time')).to_be_visible()
+    expect(dialog.get_by_role('columnheader',name='Runtime at sample')).to_be_visible()
+    expect(timing(dialog, 120, 'start')).to_have_text('11/23/2026, 16:30:12')
+    expect(timing(dialog, 124, 'elapsed')).to_have_text('0 s')
+    unknown_timings(dialog, [121, 122, 123], 'Unknown')
+    region = dialog.get_by_role('region',name='GPU process list')
+    region.focus()
+    assert region.evaluate('(el) => el.scrollWidth > el.clientWidth')
+    assert region.evaluate('(el) => (el.scrollLeft = el.scrollWidth)') > 0
+    assert dialog.evaluate('(el) => el.scrollWidth <= el.clientWidth')
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    original_region = region.element_handle()
+    valid['elapsed_seconds'] = 3660
+    expect(timing(dialog, 120, 'elapsed')).to_have_text('1 h 1 min')
+    expect(timing(hardware, 120, 'elapsed')).to_have_text('1 h 1 min')
+    assert original_region.evaluate('(el) => el === document.activeElement && el.scrollLeft > 0')
+    valid.pop('elapsed_seconds')
+    unknown_timings(dialog, [120], 'Unknown')
+    unknown_timings(hardware, [120], 'Unknown')
+    assert original_region.evaluate('(el) => el === document.activeElement')
+    device['processes'].clear()
+    expect(dialog).to_contain_text('No GPU processes found.')
+    expect(dialog.get_by_role('button',name='Close details')).to_be_focused()
+    page.keyboard.press('Escape')
+    expect(page.locator('.gpu-open')).to_be_focused()
+    expect(hardware).to_contain_text('No GPU processes found.', timeout=1000)
+    assert not errors, errors
+    page.close()
+    return {'locales':['zh-CN','en'], 'timezone':'America/Los_Angeles', 'narrow_width':320,
+            'timing_only_poll':True, 'missing_pair_poll':True, 'departed_processes_poll':True, 'page_errors':errors}
+
 
 def check_focus_layout(browser):
     """AN-48 synthetic acceptance: navigation, metric comparisons, hardware and modal focus."""
@@ -1239,6 +1327,7 @@ with sync_playwright() as p:
     page.close()
     dialog_locales = check_dialog_locales(browser)
     unlimited_container = check_unlimited_container(browser)
+    gpu_process_timing = check_gpu_process_timing(browser)
     focus_layout = check_focus_layout(browser)
     overview_regressions = check_overview_regressions(browser)
     silhouettes = check_machine_silhouettes(browser)
@@ -1246,6 +1335,7 @@ with sync_playwright() as p:
     print(json.dumps({"focus_layout":focus_layout,"result":"PASS", "browser":browser.version, "page_errors":errors,
                       "mutations":len(mutations), "history_queries":len(history_queries), "screenshots":26, "locales":["zh-CN","en"], "dialog_locales":dialog_locales,
                       "metric_layouts":layout_results, "focus_refreshes":focus_results,
-                      "unlimited_container":unlimited_container,"overview_regressions":overview_regressions,
+                      "unlimited_container":unlimited_container,"gpu_process_timing":gpu_process_timing,
+                      "overview_regressions":overview_regressions,
                       "silhouettes":silhouettes, "rail_identity_edges":rail_identity_edges}, ensure_ascii=False))
     browser.close()

@@ -164,6 +164,8 @@ const reason = host => i18n.diagnostic(host.reason) || host.warnings?.map(i18n.d
 const checks = host => host.checks ?? ['gpu','processes','cpu','memory','system'];
 const configUnavailable = () => state.snapshot.registry_loaded === false;
 const unlimitedMemory = host => host?.scope === 'container' && host.metrics?.memory?.total_bytes === null;
+const processShape = gpu => [gpu?.uuid, gpu?.state, gpu?.process_visibility,
+  gpu?.processes.map(proc => [proc.pid, proc.name, proc.uid, proc.user, proc.workload, proc.used_memory_mib])];
 
 function navigation(hosts, host) {
   const nameCounts = countLabels(hosts.map(instanceNameKey));
@@ -194,8 +196,7 @@ function renderPage(force = false) {
       return [node.id, node.name, node.address, node.status, node.require_gpu, node.scope,
         checks(node), reason(node), model.kind, model.names];
     }),
-    host?.devices, host?.metrics?.gpus.map(gpu => [gpu.uuid, gpu.state, gpu.process_visibility,
-      gpu.processes.map(proc => [proc.pid, proc.name, proc.uid, proc.user, proc.workload, proc.used_memory_mib])]),
+    host?.devices, host?.metrics?.gpus.map(processShape),
     host?.metrics?.driver_version, unlimitedMemory(host)]);
   if (!force && shape === layoutKey) return;
   layoutKey = shape;
@@ -494,20 +495,27 @@ function hardwareTable(host) {
           <td data-label="${t('status')} / ${t('gpu_utilization')}">${status(gpu?.state || 'stale',gpuStates[gpu?.state] || t('no_fresh_sample'))}<strong>${field(device.uuid)}</strong></td>
           <td data-label="${t('vram_used_total')}">${field(device.uuid+'-memory')}</td>
           <td data-label="${t('gpu_power')} / ${t('gpu_temperature')}">${field(device.uuid+'-power')}<small>${field(device.uuid+'-temperature')}</small></td>
-          <td data-label="${t('current_gpu_processes')}">${processes.length ? `<ul class="gpu-processes">${processes.map(process => `<li><strong>${escape(process.name || t('unverified'))}</strong> <span class="mono">PID ${escape(process.pid)}</span><small>${t('host_account')}: ${escape(process.user || (process.uid == null ? t('unverified') : 'UID '+process.uid))}${process.user && process.uid != null ? ' · UID '+escape(process.uid) : ''}</small><small>${t('ownership_evidence')}: ${escape(workloadEvidence(process))} · ${t('process_vram')}: ${fmt(vram(process.used_memory_mib),' GiB',1)}</small></li>`).join('')}</ul>` : `<span class="process-empty">${empty}</span>`}
+          <td data-label="${t('current_gpu_processes')}">${processes.length ? `<ul class="gpu-processes">${processes.map(process => `<li><strong>${escape(process.name || t('unverified'))}</strong> <span class="mono">PID ${escape(process.pid)}</span><small>${t('host_account')}: ${escape(process.user || (process.uid == null ? t('unverified') : 'UID '+process.uid))}${process.user && process.uid != null ? ' · UID '+escape(process.uid) : ''}</small><small>${t('ownership_evidence')}: ${escape(workloadEvidence(process))} · ${t('process_vram')}: ${fmt(vram(process.used_memory_mib),' GiB',1)}</small>
+          <small>${t('process_started_at')}: ${field(processTimingKey(gpu,process,'start'))}</small>
+          <small>${t('process_elapsed')}: ${field(processTimingKey(gpu,process,'elapsed'))}</small></li>`).join('')}</ul>` : `<span class="process-empty">${empty}</span>`}
           ${gpu?.process_visibility === 'partial' ? `<small>${t('process_enumeration_is_only_partially_visible_for_this_device')}</small>` : ''}</td></tr>`;
       }).join('')}</tbody></table></div>` : `<p class="empty">${active.includes('gpu') ? t('no_verified_devices_yet') : host.require_gpu ? t('gpu_checks_are_disabled') : t('monitored_as_a_cpu_only_machine')}</p>`}
   </section>`;
 }
 
 const gpuDialog = byId('gpu-dialog');
+gpuDialog.addEventListener('close', () => {
+  renderPage();
+  paint();
+});
+
 function openGpuDialog(uuid) {
   const host = getHost();
   const device = host?.devices.find(item => item.uuid === uuid);
   if (!device) return;
   gpuDialog.dataset.gpu = uuid;
   byId('gpu-dialog-title').textContent = t('gpu_device_info',{index:device.index});
-  byId('gpu-dialog-content').innerHTML = gpuInfo(host,device,currentDevice(host,device)) + (checks(host).includes('processes') ? processTable(host,device) : '');
+  byId('gpu-dialog-content').innerHTML = gpuInfo(host,device,currentDevice(host,device)) + '<div id="gpu-dialog-processes" hidden></div>';
   gpuDialog.showModal();
   paint();
 }
@@ -536,23 +544,59 @@ function workloadEvidence(process) {
   return (workloads[workload.kind] || t('workload')) + (id ? ' · ' + id.slice(0,12) : '');
 }
 
-function processTable(host, device) {
-  const devices = (host.metrics?.gpus ?? []).filter(gpu => !device || device.uuid === gpu.uuid);
-  const rows = devices.flatMap(gpu => gpu.processes.map(process => ({gpu,process})));
-  let empty = t('no_gpu_processes_found');
-  if (!devices.length || devices.some(gpu => gpu.process_visibility !== 'complete' || gpu.state === 'unknown')) {
-    empty = t('no_verifiable_gpu_process_records_available');
+const processTimingKey = (gpu, process, fieldName) => `process-${gpu.uuid}-${process.pid}-${fieldName}`;
+
+function processRuntime(seconds) {
+  const minutes = Math.floor(seconds/60);
+  const hours = Math.floor(minutes/60);
+  const number = value => i18n.number(value);
+  if (hours >= 24) return t('uptime_days',{days:number(Math.floor(hours/24)),hours:number(hours%24)});
+  if (hours) return t('process_runtime_hours',{hours:number(hours),minutes:number(minutes%60)});
+  if (minutes) return t('process_runtime_minutes',{minutes:number(minutes),seconds:number(seconds%60)});
+  return t('process_runtime_seconds',{seconds:number(seconds)});
+}
+
+function processTiming(process) {
+  const {started_at: startedAt, elapsed_seconds: elapsed} = process;
+  if (!Number.isSafeInteger(startedAt) || startedAt <= 0 || startedAt > 8.64e15 ||
+      !Number.isSafeInteger(elapsed) || elapsed < 0) {
+    const unknown = t('unknown_value');
+    return [unknown,unknown];
   }
+  return [i18n.date(startedAt,{year:'numeric',month:'2-digit',day:'2-digit',
+    hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}), processRuntime(elapsed)];
+}
+
+function processTable(device, gpu) {
+  const rows = gpu?.processes ?? [];
+  const empty = gpu?.process_visibility === 'complete' && gpu.state !== 'unknown'
+    ? t('no_gpu_processes_found') : t('no_verifiable_gpu_process_records_available');
   return `<section class="panel">
-    <div class="panel-head"><h2>${t('current_gpu_processes')}</h2><small>${device ? 'GPU '+device.index : t('whole_machine')} · ${t('visible_record_count',{count:rows.length})}</small></div>
+    <div class="panel-head"><h2>${t('current_gpu_processes')}</h2><small>GPU ${device.index} · ${t('visible_record_count',{count:rows.length})}</small></div>
     ${rows.length ? `<div class="scroll" tabindex="0" role="region" aria-label="${t('gpu_process_list')}"><table class="process-table">
-      <thead><tr><th>${t('process_pid')}</th><th>${t('host_account')}</th><th>${t('ownership_evidence')}</th><th>${t('device')}</th><th>${t('process_vram')}</th></tr></thead>
-      <tbody>${rows.map(({gpu,process}) => `<tr><td><strong>${escape(process.name || t('unverified'))}</strong><small class="mono">PID ${escape(process.pid)}</small></td>
+      <thead><tr>${['process_pid','host_account','ownership_evidence','device','process_vram','process_started_at','process_elapsed'].map(key => `<th scope="col">${t(key)}</th>`).join('')}</tr></thead>
+      <tbody>${rows.map(process => `<tr><td><strong>${escape(process.name || t('unverified'))}</strong><small class="mono">PID ${escape(process.pid)}</small></td>
       <td>${escape(process.user || (process.uid == null ? t('unverified') : 'UID '+process.uid))}
       ${process.user ? '<small>UID '+escape(process.uid)+'</small>' : ''}</td><td>${escape(workloadEvidence(process))}</td>
-      <td>GPU ${gpu.index}</td><td class="value">${fmt(vram(process.used_memory_mib),' GiB',1)}</td></tr>`).join('')}</tbody>
+      <td>GPU ${device.index}</td><td class="value">${fmt(vram(process.used_memory_mib),' GiB',1)}</td>
+      <td class="process-timing">${field(processTimingKey(gpu,process,'start'))}</td>
+      <td class="process-timing">${field(processTimingKey(gpu,process,'elapsed'))}</td></tr>`).join('')}</tbody>
     </table></div>` : '<p class="empty">'+empty+'</p>'}
   </section>`;
+}
+
+function paintGpuDialogProcesses(host, device, gpu) {
+  const panel = byId('gpu-dialog-processes');
+  const shape = device && checks(host).includes('processes') ? JSON.stringify([i18n.locale,device.index,processShape(gpu)]) : '';
+  if (panel.dataset.shape === shape) return;
+  const focused = panel.contains(document.activeElement);
+  const scrollLeft = panel.querySelector('.scroll')?.scrollLeft ?? 0;
+  panel.dataset.shape = shape;
+  panel.hidden = !shape;
+  panel.innerHTML = shape ? processTable(device,gpu) : '';
+  const region = panel.querySelector('.scroll');
+  if (region) region.scrollLeft = scrollLeft;
+  if (focused) (region || gpuDialog.querySelector('[autofocus]')).focus({preventScroll:true});
 }
 
 function uptime(seconds) {
@@ -612,6 +656,14 @@ function paint() {
     }
     const detailDevice = gpuDialog.open ? host.devices.find(item => item.uuid === gpuDialog.dataset.gpu) : selected;
     const detailGpu = detailDevice && currentDevice(host,detailDevice);
+    if (gpuDialog.open) paintGpuDialogProcesses(host,detailDevice,detailGpu);
+    for (const gpu of metrics?.gpus ?? []) {
+      for (const process of gpu.processes) {
+        const [startedAt, elapsed] = processTiming(process);
+        values[processTimingKey(gpu,process,'start')] = startedAt;
+        values[processTimingKey(gpu,process,'elapsed')] = elapsed;
+      }
+    }
     if (detailDevice) {
       const selected = detailDevice, gpu = detailGpu;
       values['gpu-memory'] = gpu ? fmt(vram(gpu.memory_used_mib),'',1)+' / '+fmt(vram(gpu.memory_total_mib),' GiB',1) : t('no_current_reading');

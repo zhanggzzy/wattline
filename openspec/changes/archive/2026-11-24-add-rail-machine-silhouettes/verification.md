@@ -233,3 +233,27 @@ rail_chromium="$HOME/Library/Caches/ms-playwright/chromium_headless_shell-1254/c
 
 - 使用 macOS Chromium 158、合成 API、合成 NVIDIA XML 和临时历史库。浅色折叠侧栏证据来自审查脚本注入的测试配色。覆盖实际 64px 折叠尺寸、键盘焦点和单色轮廓，Safari、Firefox、人工屏幕阅读器和真实 GPU 抽样仍待验证。
 - 独立复审、同步规范、归档和远端 main 整合待 Mika 按项目流程推进。本轮只涉及本地开发，没有实例更新。
+
+## AN-69 独立复审与 AN-62 整合核验（2026-11-24）
+
+Reviewer-DeepSeek（DeepSeek 4.1 Flash）独立复审产品提交
+`362f94fb1034c4c2ebdeba5fd18a93a90c6032fa`，结论通过。核验覆盖采样、
+热层和温层历史、快照与侧栏的清单可信度传递，及 Unicode 等价别名和
+PRO 6000 型号边界。原 AN-67 脚本通过。AN-63 的离线 B300 夹具沿用旧快照格式，
+补上可信完整性证据后原断言通过。缺证旧快照回退由仓库 smoke 和独立用例继续验证。
+完整命令、限制和结果见 Multica AN-69 附件。
+
+Mika 在固定开发目录复核审查 SHA 与实际改动，并在整合前复跑以下检查：
+
+- `.venv/bin/python -m pytest -q`：21 项通过，1 条现有 Starlette/httpx 弃用告警。
+- `node --check wattline/static/monitor.js`、`node --check wattline/static/locales.js`、
+  `node tools/test_i18n.cjs`：通过，275 个文案键。
+- `.venv/bin/python tools/browser_smoke.py --browser <chromium-headless-shell>`：
+  Chromium 158.0.8127.18，PASS，页面异常 0。浅色折叠侧栏证据使用合成测试配色，
+  深色侧栏与浅色总览使用实装配色。
+- OpenSpec 1.14.2 strict 校验活动 change 和已同步的 `dashboard-focus-layout` 规范。
+  工作树和索引的 diff 检查通过，提交历史排查未发现本机路径或 runtime 注入标记。
+
+产品基线为 `f31ed8ddc0a92bd94469546970433e8a8f4b5c56`。归档后的最终
+远端 main SHA 在 AN-62 验收记录中核对。未部署，也未验证真实节点、Safari、
+Firefox 或屏幕阅读器人工听读。

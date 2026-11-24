@@ -16,8 +16,8 @@
 - [x] 3.1 Extend the synthetic Chromium check with B300, PRO 6000, GB10, RTX 5090, unknown, mixed, legacy and duplicate instances; assert glyph distinctness at actual size, status/selection/navigation, hover and keyboard labels, expand/collapse, both actual surface colors and monochrome stroke, and capture screenshots.
 - [x] 3.2 Run pytest, `node --check`, the synthetic browser check, OpenSpec strict and diff checks; record real commands, results, screenshots and limits in `verification.md`.
 - [x] 3.3 Commit the implementation and evidence in the fixed repository with baseline and delivery SHA recorded; keep the change active for independent review.
-- [ ] 3.4 Independent reviewer verifies the change, implementation diff, tests and strict result against the accepted scheme A.
-- [ ] 3.5 After review passes, sync the modified capability spec and archive the change; Mika integrates and verifies remote main.
+- [x] 3.4 Independent review of scheme A completed. AN-63 identified issues, and AN-69 passed the final candidate after remediation.
+- [x] 3.5 Sync the reviewed capability delta to the main specification and archive the change.
 
 ## 4. AN-63 review remediation
 
@@ -27,7 +27,7 @@
 - [x] 4.4 Derive suffixes by grapheme so Unicode is never truncated, and append the visible suffix to accessible names/titles when two instances share identical identity text.
 - [x] 4.5 Remove the status marker's own tooltip so hovering any part of the machine button shows the same complete identity.
 - [x] 4.6 Extend `tools/browser_smoke.py` with all five regressions, rerun AN-63's `review_browser.py`, pytest, i18n, JavaScript, Chromium and OpenSpec strict checks.
-- [ ] 4.7 Independent re-review of the remediation (AN-67).
+- [x] 4.7 AN-67 independently re-reviewed the first remediation and recorded three findings for section 5.
 
 ## 5. AN-67 review remediation
 
@@ -35,8 +35,8 @@
 - [x] 5.2 Distinguish identical and Unicode-equivalent names in visible suffixes, keyboard focus hints and accessible names. Preserve original instance names.
 - [x] 5.3 Match PRO 6000 at model token boundaries. Verify supported editions and unknown attached suffixes in the synthetic UI.
 - [x] 5.4 Run the XML/API regressions, AN-63 and AN-67 browser cases, repository checks and OpenSpec strict. Record commands, results and limits in [verification.md](verification.md#an-70-第二轮整改验证2026-11-24).
-- [ ] 5.5 Independent re-review of the second remediation (AN-69).
+- [x] 5.5 AN-69 independently re-reviewed and passed the second remediation.
 
 ## Workflow follow-up
 
-- Parent AN-62 remains `in_review` for user acceptance after independent review and main delivery.
+- Mika integrates and verifies the remote `main` SHA, then records delivery and user acceptance status on AN-62.

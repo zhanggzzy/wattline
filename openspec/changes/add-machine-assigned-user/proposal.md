@@ -7,6 +7,7 @@ AN-102 asks the operator to record who is currently using each monitored environ
 ## What Changes
 
 - Add an optional per-machine assigned-user text value that the operator can fill, edit, or clear in the existing machine settings dialog.
+- Preserve invalid characters pasted or entered in the settings dialog until validation, so a rejected edit leaves the operator's draft and the stored assignment intact (AN-105).
 - Persist the value with the existing per-machine settings record, keyed by the stable machine identity. Machines without a recorded value, including machines registered before this change, remain unassigned.
 - Expose the recorded value in the machine snapshot and show it on the machine detail page and machine list, localized in Chinese and English and escaped as user text.
 - Keep the field advisory only: GPU process ownership and SSH login configuration continue to come from their existing sources.

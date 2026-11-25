@@ -7,9 +7,9 @@
   }
   * { box-sizing: border-box; }
   body { margin: 0; color: var(--ink); background: var(--page); }
-  button, input { font: inherit; }
+  button, input, textarea { font: inherit; }
   button { cursor: pointer; }
-  button:focus-visible, input:focus-visible, canvas:focus-visible {
+  button:focus-visible, input:focus-visible, textarea:focus-visible, canvas:focus-visible {
     outline: 2px solid #245de0; outline-offset: 3px;
   }
   h1, h2, h3, p { margin: 0; }
@@ -197,7 +197,8 @@
 #machine-fields { display: grid; gap: 20px; }
 .machine-dialog label, .machine-dialog legend { font-size: 13px; font-weight: 650; }
 .machine-dialog label small { color: var(--muted); font-weight: 400; margin-left: 3px; }
-.machine-dialog input:not([type=checkbox]) { display: block; width: 100%; margin-top: 5px; padding: 8px 10px; border: 1px solid #ced9e8; border-radius: 7px; color: var(--ink); }
+.machine-dialog :is(input:not([type=checkbox]), textarea) { display: block; width: 100%; margin-top: 5px; padding: 8px 10px; border: 1px solid #ced9e8; border-radius: 7px; color: var(--ink); }
+.machine-dialog textarea { resize: none; white-space: pre; }
 .machine-dialog input[type=checkbox] { accent-color: var(--accent-deep); }
 .machine-dialog p { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .machine-dialog .form-error { color: var(--red); }
@@ -271,7 +272,7 @@ button, .control, .seg button, .row-open, .sort-handle { min-height: 40px; }
 dialog:modal { overscroll-behavior: contain; }
 dialog::backdrop { overflow: hidden; overscroll-behavior: contain; }
 .machine-dialog { max-height: calc(100dvh - 32px); box-shadow: 0 24px 90px #101f3533; }
-.machine-dialog input:not([type=checkbox]) { min-height: 44px; }
+.machine-dialog :is(input:not([type=checkbox]), textarea) { min-height: 44px; }
 .check-label { min-height: 40px; }
 @container (max-width: 620px) {
   .machine-table { min-width: 0; }

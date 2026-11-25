@@ -726,16 +726,18 @@ def test_assigned_user_persists_isolates_clears_and_reads_legacy_settings(tmp_pa
                           headers={'Content-Type':'text/plain'}).status_code == 415
         assert client.put(first_url,json={'assigned_user':'a'*81,'enabled':False}).status_code == 422
         assert client.put(first_url,json={'assigned_user':'张三','enabled':False}).json()['assigned_user'] == '张三'
-        rejected = ('first\nsecond','\nnext','next\t','\x00next','next\x7f',
+        rejected = ('first\nsecond','\nnext','next\r','next\t','\x00next','next\x7f',
                     'first\u0085second','first\u009bsecond','first\u2028second',
-                    'first\u2029second','\n','\u0085','\u2028','\u2029')
+                    'first\u2029second','\u2028next','next\u2028','\u2029next','next\u2029',
+                    '\n','\u0085','\u2028','\u2029')
         for value in rejected:
             assert client.put(first_url,json={'assigned_user':value,'enabled':False}).status_code == 422, repr(value)
             node = {item['id']:item for item in client.get('/api/snapshot').json()['machines']}['lab-01']
             assert node['assigned_user'] == '张三', repr(value)
-        with History(tmp_path).connect(read=True) as db:
-            persisted = json.loads(dict(db.execute('SELECT machine,settings FROM machine_settings'))[ID])
-        assert persisted['assigned_user'] == '张三'
+            with History(tmp_path).connect(read=True) as db:
+                persisted = json.loads(db.execute('SELECT settings FROM machine_settings WHERE machine=?',
+                                                 (first.history_key,)).fetchone()[0])
+            assert persisted['assigned_user'] == '张三', repr(value)
         assert client.put(second_url,json={'assigned_user':'  李四  ','enabled':False}).json()['assigned_user'] == '李四'
         machines = {node['id']:node for node in client.get('/api/snapshot').json()['machines']}
         assert (machines['lab-01']['assigned_user'],machines['lab-02']['assigned_user']) == ('张三','李四')

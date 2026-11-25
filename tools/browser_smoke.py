@@ -1,6 +1,6 @@
-"""Synthetic browser checks. No server, collector, SSH, or real node is used.
+"""Browser checks with synthetic fixtures. No listening server, collection, or SSH is used.
 Run: .venv/bin/python tools/browser_smoke.py [--browser /path/to/chromium]
-Requires: pip install playwright; python -m playwright install chromium
+Requires: pip install -e '.[test,browser-test]'; python -m playwright install chromium
 """
 import argparse
 import copy
@@ -8,8 +8,14 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import time
+from fastapi.testclient import TestClient
 from playwright.sync_api import sync_playwright, expect
+
+from wattline.app import create_app
+from wattline.config import Config, Machine
+from wattline.history import History
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "artifacts"
@@ -1026,8 +1032,128 @@ def check_rail_identity_edges(browser):
     return {'transitions':transitions, 'aliases':aliases, 'page_errors':errors}
 
 
+def check_assigned_user_settings(browser):
+    """Send dialog saves to the real API with a disabled fixture and temporary SQLite."""
+    host = Machine(id="assignment-test", name="Assignment fixture", mode="ssh",
+                   ssh_alias="assignment.invalid", expected_host_id="a" * 32, enabled=False)
+    origin = "http://localhost"
+    settings_url = f"/api/machines/{host.id}/settings"
+    initial_user = "原登记"
+    rejected_statuses = []
+    with TemporaryDirectory() as directory:
+        data_dir = Path(directory)
+        app = create_app(Config(data_dir=data_dir, machines=(host,)))
+        with TestClient(app, base_url=origin) as client:
+            seeded = client.put(settings_url, json={"assigned_user": initial_user, "enabled": False})
+            assert seeded.status_code == 200, seeded.text
+
+            def persisted_settings():
+                with History(data_dir).connect(read=True) as db:
+                    return db.execute("SELECT settings FROM machine_settings WHERE machine = ?",
+                                      (host.history_key,)).fetchone()[0]
+
+            def snapshot_user():
+                return client.get("/api/snapshot").json()["machines"][0]["assigned_user"]
+
+            def forward(route):
+                request = route.request
+                path = request.url.removeprefix(origin)
+                if not path.startswith("/"):
+                    return route.abort()
+                headers = {name: value for name, value in request.headers.items()
+                           if name in ("content-type", "sec-fetch-site")}
+                response = client.request(request.method, path, headers=headers,
+                                          content=request.post_data_buffer)
+                route.fulfill(status=response.status_code, body=response.content,
+                              content_type=response.headers.get("content-type"))
+
+            original_settings = persisted_settings()
+            context = browser.new_context(permissions=["clipboard-read", "clipboard-write"])
+            page = context.new_page()
+            errors = []
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.route("**/*", forward)
+            page.goto(origin)
+            page.get_by_role("button", name="查看 Assignment fixture", exact=True).click()
+            page.get_by_role("button", name="配置", exact=True).click()
+            dialog = page.locator("#machine-dialog")
+            error = page.locator("#machine-error")
+            field = dialog.locator('[name="assigned_user"]')
+            expect(field).to_have_value(initial_user)
+
+            def paste(value):
+                page.evaluate("(text) => navigator.clipboard.writeText(text)", value)
+                field.press("ControlOrMeta+v")
+
+            def save(expected_value, expected_status, *, enter=False):
+                with page.expect_response(lambda response: response.url == origin + settings_url
+                                          and response.request.method == "PUT") as pending:
+                    if enter:
+                        field.press("Enter")
+                    else:
+                        page.get_by_role("button", name="保存", exact=True).click()
+                response = pending.value
+                sent = response.request.post_data_json["assigned_user"]
+                assert (sent, response.status) == (expected_value, expected_status), (
+                    repr(sent), response.status, repr(expected_value), expected_status
+                )
+
+            cases = [
+                ("\u2028", "\u2028", False), ("\u2029", "\u2029", False),
+                ("\u2028next", "\u2028next", True), ("next\u2029", "next\u2029", True),
+                ("first\u2028second\u2029third", "first\u2028second\u2029third", True),
+                ("\n", "\n", True), ("\r", "\n", True), ("first\r\nsecond", "first\nsecond", True),
+                ("next\t", "next\t", True), ("next\u0085", "next\u0085", True),
+                ("a" * 80 + "\u2028", "a" * 80 + "\u2028", True),
+                ("a" * 81, "a" * 81, True),
+            ]
+            for raw, draft, via_clipboard in cases:
+                field.fill("")
+                if via_clipboard:
+                    paste(raw)
+                else:
+                    page.keyboard.insert_text(raw)
+                expect(field).to_have_value(draft)
+                save(draft, 422)
+                expect(error).to_be_visible()
+                expect(error).to_have_text("请填写不超过 80 个字符的单行使用者名称。")
+                expect(dialog).to_be_visible()
+                expect(field).to_have_value(draft)
+                assert snapshot_user() == initial_user, repr(raw)
+                assert persisted_settings() == original_settings, repr(raw)
+                rejected_statuses.append(422)
+
+            updated_user = "临时值班 " + "a" * 75
+            for empty_draft in ("   ", ""):
+                field.fill("")
+                padded_user = "  " + updated_user + "  "
+                paste(padded_user)
+                save(padded_user, 200, enter=True)
+                expect(dialog).not_to_be_visible()
+                expect(page.locator(".page-title")).to_contain_text("使用者：" + updated_user)
+                assert page.evaluate("state.snapshot.machines[0].assigned_user") == updated_user
+                assert snapshot_user() == json.loads(persisted_settings())["assigned_user"] == updated_user
+
+                page.get_by_role("button", name="配置", exact=True).click()
+                expect(field).to_have_value(updated_user)
+                expect(error).not_to_be_visible()
+                field.fill(empty_draft)
+                save(empty_draft, 200)
+                expect(dialog).not_to_be_visible()
+                expect(page.locator(".page-title")).not_to_contain_text("使用者：")
+                assert snapshot_user() is None
+                assert "assigned_user" not in json.loads(persisted_settings())
+                page.get_by_role("button", name="配置", exact=True).click()
+                expect(field).to_have_value("")
+            assert not errors, errors
+            context.close()
+    return {"rejected_statuses": rejected_statuses, "drafts_and_sqlite_preserved": True,
+            "trimmed_enter_save": True, "whitespace_and_explicit_clear": True}
+
+
 with sync_playwright() as p:
     browser = p.chromium.launch(**({"executable_path":args.browser} if args.browser else {}))
+    assigned_user_settings = check_assigned_user_settings(browser)
     page = browser.new_page(viewport={"width":1440,"height":1100}, device_scale_factor=1)
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
@@ -1388,7 +1514,7 @@ with sync_playwright() as p:
     print(json.dumps({"focus_layout":focus_layout,"result":"PASS", "browser":browser.version, "page_errors":errors,
                       "mutations":len(mutations), "history_queries":len(history_queries), "screenshots":26, "locales":["zh-CN","en"], "dialog_locales":dialog_locales,
                       "metric_layouts":layout_results, "focus_refreshes":focus_results,
-                      "assigned_user_long":long_user_results,
+                      "assigned_user_long":long_user_results, "assigned_user_settings":assigned_user_settings,
                       "unlimited_container":unlimited_container,"gpu_process_timing":gpu_process_timing,
                       "overview_regressions":overview_regressions,
                       "silhouettes":silhouettes, "rail_identity_edges":rail_identity_edges}, ensure_ascii=False))

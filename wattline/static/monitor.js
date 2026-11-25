@@ -1044,6 +1044,7 @@ const machineFields = byId('machine-fields');
 const machineError = byId('machine-error');
 const machineCancel = byId('machine-cancel');
 const machineSave = byId('machine-save');
+const assignedUserField = machineForm.elements.assigned_user;
 const checkboxes = [...machineForm.querySelectorAll('input[name="checks"]')];
 const gpuCheck = checkboxes.find(input => input.value === 'gpu');
 const processCheck = checkboxes.find(input => input.value === 'processes');
@@ -1064,7 +1065,7 @@ function openMachineDialog(host) {
   fields.host.disabled = fields.ssh_user.disabled = !!host;
   fields.alias.value = host?.alias ?? '';
   fields.alias.placeholder = host?.default_name ?? t('leave_blank_for_default_name');
-  fields.assigned_user.value = host?.assigned_user ?? '';
+  assignedUserField.value = host?.assigned_user ?? '';
   fields.interval_seconds.value = host?.interval_seconds ?? state.snapshot.period_ms / 1000;
   const local = host?.mode === 'local';
   byId('ssh-timeout-field').hidden = local;
@@ -1079,6 +1080,12 @@ function openMachineDialog(host) {
 }
 
 gpuCheck.addEventListener('change', updateProcessCheck);
+assignedUserField.addEventListener('keydown', event => {
+  if (event.key === 'Enter' && !event.isComposing) {
+    event.preventDefault();
+    machineForm.requestSubmit(machineSave);
+  }
+});
 machineCancel.addEventListener('click', () => machineDialog.close());
 machineDialog.addEventListener('cancel', event => {
   if (machineSave.disabled) event.preventDefault();
@@ -1090,7 +1097,7 @@ machineForm.addEventListener('submit', async event => {
   const fields = new FormData(machineForm);
   const settings = {
     alias:fields.get('alias').trim() || null,
-    assigned_user:fields.get('assigned_user').trim() || null,
+    assigned_user:assignedUserField.value,
     enabled:fields.has('enabled'),
     interval_seconds:Number(fields.get('interval_seconds')),
     checks:fields.getAll('checks'),
@@ -1117,6 +1124,10 @@ machineForm.addEventListener('submit', async event => {
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) {
+      if (response.status === 422 && Array.isArray(result.detail)
+          && result.detail.some(issue => issue.loc?.[1] === 'assigned_user')) {
+        throw new Error(t('assigned_user_invalid'));
+      }
       const detail = typeof result.detail === 'string' ? t('could_not_save_please_retry_later')+' '+i18n.diagnostic(result.detail)
         : response.status === 422 ? t('check_the_address_username_and_monitoring_settings') : t('could_not_save_please_retry_later');
       throw new Error(detail);

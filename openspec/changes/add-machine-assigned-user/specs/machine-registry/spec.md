@@ -30,6 +30,10 @@ The assigned-user value SHALL be trimmed single-line text within the existing ma
 - **WHEN** a settings request supplies an over-length value or a value containing a control character or line/paragraph separator at any position, including a value made only of such characters
 - **THEN** the request is rejected and the previously stored assignment remains unchanged
 
+#### Scenario: Invalid assignment entered or pasted into machine settings
+- **WHEN** the operator attempts to save a draft containing a control character or line/paragraph separator entered or pasted into the assigned-user field
+- **THEN** the dialog shows the failure and keeps the draft available for correction, and the machine snapshot and stored assignment retain the previous value
+
 #### Scenario: Ordinary whitespace still trims
 - **WHEN** a settings request supplies a value padded with ordinary spaces around legal text
 - **THEN** the stored assignment is the trimmed legal text

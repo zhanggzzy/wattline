@@ -37,8 +37,9 @@ The frontend uses native HTML controls, CSS Grid and container queries. Current
 Chrome, Edge, Firefox and Safari are the intended browser targets; without
 container query support, the machine table remains horizontally scrollable.
 
-Run the isolated browser checks with synthetic API responses (no monitoring
-service or SSH connection is started):
+Run the isolated browser checks with synthetic fixtures. The assigned-user
+settings check also uses the in-process API and temporary SQLite. No HTTP
+server, collection, or SSH connection is started:
 
 ~~~sh
 python -m pip install -e '.[test,browser-test]'

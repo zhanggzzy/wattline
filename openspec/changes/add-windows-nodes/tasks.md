@@ -11,8 +11,8 @@
 
 ## 3. Verification and handoff
 
-- [ ] 3.1 Run and document local regression, browser, syntax, OpenSpec strict and Git checks, and the authorized read-only target attempt. Link the measured evidence in [verification.md](verification.md).
-- [ ] 3.2 Verify the probe and processor group behavior on the authorized Windows target.
+- [x] 3.1 Run and document local regression, browser, syntax, OpenSpec strict and Git checks, and the authorized read-only target attempt. Link the measured evidence in [verification.md](verification.md).
+- [x] 3.2 Verify the probe and processor group behavior on the authorized Windows target.
 - [ ] 3.3 Complete independent review of the implementation and evidence.
 
 ## Workflow follow-up

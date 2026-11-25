@@ -4,11 +4,11 @@
 
 ### Requirement: Optional assigned user per machine
 
-A registered machine SHALL support zero or more distinct people from the shared directory. Its detail view SHALL expose an assignee editor beside Configure. The editor SHALL present every directory person as a multi-select chip that keeps a native checkbox and label, shows selected and unselected states, reports the current selected count, and supports selecting, deselecting and clearing people, saving the selection, cancelling edits, and reaching directory maintenance. The selected count SHALL reflect the initial selection, mouse or Space-key changes, clearing, and directory additions, renames or removals. Decorative marks SHALL NOT change a checkbox's accessible name. Each chip SHALL expose a visible keyboard focus indicator and at least a 44×44 CSS px hit target. The editor SHALL work regardless of collection status. Each chip SHALL display its name literally and preserve consecutive internal spaces, so distinct directory names that differ only in spacing remain visually distinguishable when selected.
+A registered machine SHALL support zero or more distinct people from the shared directory. Its detail view SHALL expose a multi-select assignee editor beside Configure regardless of collection status. The editor SHALL use native checkbox chips, report the current selection count, and support editing, saving, cancelling, clearing and directory maintenance.
 
 #### Scenario: Record and clear a value
 - **WHEN** an operator selects several directory entries, saves, removes one and later saves an empty selection
-- **THEN** each save reports the current set of distinct people for that machine
+- **THEN** each save reports the current set of distinct people for that machine, and the editor also provides access to directory maintenance
 
 #### Scenario: Existing machine after upgrade
 - **WHEN** a machine has no assignment and the operator opens its assignee editor
@@ -16,7 +16,7 @@ A registered machine SHALL support zero or more distinct people from the shared 
 
 #### Scenario: Selection count and controls
 - **WHEN** the operator opens the editor, toggles a chip with a pointer or Space, clears the selection, or changes the directory while the editor stays open
-- **THEN** the selected count matches the checked people and each chip keeps its native checkbox semantics, accessible name, focus ring and hit target
+- **THEN** the count matches checked people, each native checkbox has its literal person name as its label, decorative marks do not affect its accessible name, selected states are visibly distinct, keyboard focus is visible, and the hit target is at least 44×44 CSS px
 
 #### Scenario: Unavailable machine
 - **WHEN** the machine is offline or monitoring is disabled
@@ -32,11 +32,11 @@ A registered machine SHALL support zero or more distinct people from the shared 
 
 ### Requirement: Assignment is displayed as advisory metadata
 
-The ordinary expanded machine list SHALL show assigned people in a dedicated column immediately after Status, and machine details SHALL show all assigned names without hover, including at narrow widths. Each list entry SHALL appear as a light read-only chip containing the full name; multiple people SHALL wrap within the cell, and an empty assignment SHALL show a localized **未登记 / Not assigned** value. Chips SHALL display names literally and preserve consecutive internal spaces, so distinct names that differ only in spacing remain visually distinguishable. The list SHALL NOT repeat the assignee summary below the machine name. The table SHALL appear only when its full width fits the list container; otherwise the list SHALL render labelled cards so no column requires horizontal scrolling and every metric field stays visible. In table mode, the machine identity button and its machine name, address, SSH alias, and scope text SHALL stay inside the machine column with in-column ellipsis when truncated, SHALL NOT overlap or extend under the adjacent status badge, and SHALL preserve the full accessible name along with existing navigation, drag-to-reorder, keyboard, and narrow-card wrapping behavior. Long names SHALL wrap without widening or truncating the cell. Names SHALL render as literal text. GPU process accounts, process ownership evidence, and SSH login SHALL continue to reflect their existing sources.
+The expanded machine list SHALL place assignees immediately after Status and show every assigned name as a read-only chip with localized labels. Machine details SHALL show every assigned name without hover. Narrow layouts SHALL keep assignees and every metric visible. Names SHALL render as literal text. GPU process accounts, process ownership evidence, and SSH login SHALL continue to reflect their existing sources.
 
 #### Scenario: Assigned machine displayed
 - **WHEN** an operator views the machine list or details for a machine with multiple assignees including a long name
-- **THEN** the column or summary shows the full names, wraps them within the available space, and remains inside the viewport
+- **THEN** the column shows each full name as a light read-only chip, while machine details show every full name without hover. The names wrap within their available space without widening the cell, truncating the names, or extending outside the viewport
 
 #### Scenario: Empty assignment
 - **WHEN** a machine has no assigned people
@@ -60,7 +60,7 @@ The ordinary expanded machine list SHALL show assigned people in a dedicated col
 
 #### Scenario: Long machine name and address in table mode
 - **WHEN** the list renders as a seven-column table in a tight container (around 861 to 1012 CSS px, including expanded 1156/1200 and collapsed 986/1024 CSS px) with a long machine name, address or SSH alias
-- **THEN** the machine identity button and its text remain within the machine column with in-column ellipsis truncation, do not overlap the adjacent status badge, and retain the button's full accessible name
+- **THEN** the machine identity button and its name, address, SSH alias and scope text stay inside the machine column. Truncated text uses a visible in-column ellipsis, the adjacent status badge remains unobstructed, and the button retains its full accessible name and existing navigation, drag-to-reorder and keyboard behavior. Identity text continues to wrap in narrow cards
 
 #### Scenario: Names differing by spacing
 - **WHEN** an assigned name contains consecutive internal spaces, including at a width where the name wraps

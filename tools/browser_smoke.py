@@ -1485,8 +1485,61 @@ def check_assignee_responsive(browser):
                     return [...range.getClientRects()];
                   };
                   const cells = [...table.querySelectorAll('tbody td')];
+                  const identityIssues = [];
+                  for (const row of table.querySelectorAll('tbody tr[data-machine-row]')) {
+                    const td = row.querySelector('td');
+                    const open = td.querySelector('.row-open');
+                    const statusCell = row.querySelector('.status-cell');
+                    const badge = row.querySelector('.status');
+                    const tdBox = td.getBoundingClientRect();
+                    const tdStyle = getComputedStyle(td);
+                    const contentBox = {
+                      left: tdBox.left + parseFloat(tdStyle.paddingLeft),
+                      right: tdBox.right - parseFloat(tdStyle.paddingRight),
+                    };
+                    const openBox = open.getBoundingClientRect();
+                    const textWrap = open.querySelector(':scope > span:last-child');
+                    const parts = [td.querySelector('.machine-cell'), td.querySelector('.machine-identity'),
+                                   open, textWrap, ...open.querySelectorAll('strong, small')];
+                    if (parts.some(el => !within(el.getBoundingClientRect(), contentBox))) {
+                      identityIssues.push({row: row.dataset.machineRow, reason: 'box-overflow',
+                        contentRight: +contentBox.right.toFixed(2), openRight: +openBox.right.toFixed(2)});
+                    }
+                    if (!card) {
+                      const statusLeft = Math.min(statusCell.getBoundingClientRect().left,
+                                                  badge.getBoundingClientRect().left);
+                      if (openBox.right > statusLeft + .5) {
+                        identityIssues.push({row: row.dataset.machineRow, reason: 'overlaps-status',
+                          openRight: +openBox.right.toFixed(2), statusLeft: +statusLeft.toFixed(2)});
+                      }
+                      for (const el of open.querySelectorAll('strong, small')) {
+                        const cs = getComputedStyle(el);
+                        const er = el.getBoundingClientRect();
+                        if (cs.overflowX !== 'hidden' || cs.textOverflow !== 'ellipsis') {
+                          identityIssues.push({row: row.dataset.machineRow, reason: 'missing-ellipsis',
+                            tag: el.localName, overflowX: cs.overflowX, textOverflow: cs.textOverflow});
+                        }
+                        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+                        const range = document.createRange();
+                        for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+                          for (let i = 0; i < node.length; i++) {
+                            range.setStart(node, i);
+                            range.setEnd(node, i + 1);
+                            const gr = range.getBoundingClientRect();
+                            const paintedRight = cs.overflowX === 'hidden' ? Math.min(gr.right, er.right) : gr.right;
+                            if (gr.left < er.right - .5 && paintedRight > tdBox.right + .5) {
+                              identityIssues.push({row: row.dataset.machineRow, reason: 'glyph-past-cell',
+                                tag: el.localName, glyphRight: +paintedRight.toFixed(2), tdRight: +tdBox.right.toFixed(2)});
+                              break;
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
                   return {card, container: region.clientWidth, scrollWidth: region.scrollWidth,
                           pageWidth: document.documentElement.scrollWidth,
+                          identityIssues,
                           overflowing: cells.filter(cell => {
                             const bounds = cell.getBoundingClientRect();
                             const wraps = card || !cell.querySelector('.row-open');
@@ -1500,6 +1553,7 @@ def check_assignee_responsive(browser):
                 result = {"locale": locale, "rail": rail, "width": width, **box}
                 assert box["scrollWidth"] == box["container"] and box["pageWidth"] <= width, result
                 assert not box["overflowing"], result
+                assert not box["identityIssues"], result
                 assert len(box["metrics"]) == 4, result
                 memory = "18000000.0 GiB used" if locale == "en" else "18000000.0 GiB 已用"
                 for metric, value in zip(box["metrics"], ("76%", "123456789012 W", "100%", memory)):
@@ -1551,12 +1605,14 @@ def check_assignee_responsive(browser):
                 for locale, headers in (("en", ["Machine", "Status", "Assignees"]),
                                         ("zh-CN", ["机器", "状态", "使用者"])):
                     page.locator("#locale-select").select_option(locale)
-                    for width in (320, 700, 730, 950, 986, 1024, 1156, 1440):
+                    for width in (320, 700, 730, 950, 986, 1024, 1080, 1140, 1156, 1200, 1260, 1310, 1440):
                         result = check_layout(locale, rail, width)
                         layouts.append(result)
                         if width in (320, 1440):
                             assert result["card"] == (width == 320), result
                     assert page.locator(".machine-table thead th").all_inner_texts()[:3] == headers
+                    expected_open_name = (f"View {hosts[0].name}" if locale == "en" else f"查看 {hosts[0].name}")
+                    expect(row.locator(".row-open")).to_have_accessible_name(expected_open_name)
                     low, high = 730, 1440
                     while high - low > 1:
                         middle = (low + high) // 2

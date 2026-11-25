@@ -32,7 +32,7 @@ A registered machine SHALL support zero or more distinct people from the shared 
 
 ### Requirement: Assignment is displayed as advisory metadata
 
-The ordinary expanded machine list SHALL show assigned people in a dedicated column immediately after Status, and machine details SHALL show all assigned names without hover, including at narrow widths. Each list entry SHALL appear as a light read-only chip containing the full name; multiple people SHALL wrap within the cell, and an empty assignment SHALL show a localized **未登记 / Not assigned** value. Chips SHALL display names literally and preserve consecutive internal spaces, so distinct names that differ only in spacing remain visually distinguishable. The list SHALL NOT repeat the assignee summary below the machine name. The table SHALL appear only when its full width fits the list container; otherwise the list SHALL render labelled cards so no column requires horizontal scrolling and every metric field stays visible. Long names SHALL wrap without widening or truncating the cell. Names SHALL render as literal text. GPU process accounts, process ownership evidence, and SSH login SHALL continue to reflect their existing sources.
+The ordinary expanded machine list SHALL show assigned people in a dedicated column immediately after Status, and machine details SHALL show all assigned names without hover, including at narrow widths. Each list entry SHALL appear as a light read-only chip containing the full name; multiple people SHALL wrap within the cell, and an empty assignment SHALL show a localized **未登记 / Not assigned** value. Chips SHALL display names literally and preserve consecutive internal spaces, so distinct names that differ only in spacing remain visually distinguishable. The list SHALL NOT repeat the assignee summary below the machine name. The table SHALL appear only when its full width fits the list container; otherwise the list SHALL render labelled cards so no column requires horizontal scrolling and every metric field stays visible. In table mode, the machine identity button and its machine name, address, SSH alias, and scope text SHALL stay inside the machine column with in-column ellipsis when truncated, SHALL NOT overlap or extend under the adjacent status badge, and SHALL preserve the full accessible name along with existing navigation, drag-to-reorder, keyboard, and narrow-card wrapping behavior. Long names SHALL wrap without widening or truncating the cell. Names SHALL render as literal text. GPU process accounts, process ownership evidence, and SSH login SHALL continue to reflect their existing sources.
 
 #### Scenario: Assigned machine displayed
 - **WHEN** an operator views the machine list or details for a machine with multiple assignees including a long name
@@ -57,6 +57,10 @@ The ordinary expanded machine list SHALL show assigned people in a dedicated col
 #### Scenario: Resizing with large metric values
 - **WHEN** window or navigation changes resize a list containing long machine names, multiple assignees, and large metric values across the layout boundary
 - **THEN** the table or labelled cards keep every metric value and memory usage explanation visible, and neither the list nor the page scrolls horizontally
+
+#### Scenario: Long machine name and address in table mode
+- **WHEN** the list renders as a seven-column table in a tight container (around 861 to 1012 CSS px, including expanded 1156/1200 and collapsed 986/1024 CSS px) with a long machine name, address or SSH alias
+- **THEN** the machine identity button and its text remain within the machine column with in-column ellipsis truncation, do not overlap the adjacent status badge, and retain the button's full accessible name
 
 #### Scenario: Names differing by spacing
 - **WHEN** an assigned name contains consecutive internal spaces, including at a width where the name wraps

@@ -15,7 +15,7 @@
 - [x] 3.1 Run pytest, JavaScript and translation checks, the README synthetic Chromium regression (including machine-identity column assertions across ~861–1012 CSS px containers, expanded 1156/1200, collapsed 986/1024, 320px cards, and 1440px table in both navigation states and languages, without skipping `.row-open`), replay the AN-140 synthetic fixtures, run OpenSpec 1.14.2 strict validation and diff checks, and record commands, outputs, commits, screenshots and limits in [`verification.md`](verification.md).
 - [x] 3.2 Preserve the independent findings and evidence from [AN-134](review-an-134.md), [AN-137](review-an-137.md), and [AN-140](review-an-140.md).
 - [x] 3.3 Record the AN-143 independent re-review of AN-144 against the reviewed SHA, diff, AN-140 reproduction and evidence. Review: [AN-143](review-an-143.md). Prior independent findings are linked in [`review-an-134.md`](review-an-134.md), [`review-an-137.md`](review-an-137.md), and [`review-an-140.md`](review-an-140.md).
-- [ ] 3.4 Mika integrates the reviewed result and records the verified remote SHA.
+- [x] 3.4 Mika integrates the reviewed result and records the verified remote SHA.
 
 ## Workflow follow-up
 

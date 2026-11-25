@@ -164,3 +164,19 @@
 ### 范围、兼容与限制
 
 仅改动 `wattline/static/monitor.css`、`tools/browser_smoke.py`、`docs/frontend-redesign.md` 和活动 change `style-machine-assignee-chips`；API、配置、权限、SQLite schema 与归档格式不变，工作树 `AGENTS.md` 本地注入保持未暂存。验证限于 Chromium Headless Shell、合成节点与临时 SQLite，未实测 Firefox、Safari、真实屏幕阅读器、真实节点或用户部署实例。本轮为执行者自测，AN-143 独立复验、规范同步/归档与远端 `main` 推送仍待完成（`tasks.md` 3.3 与 3.4 保持未勾选）。
+
+## AN-102 主干交付与归档
+
+2026-11-25（Asia/Shanghai），Mika 核对 [AN-143 独立复验](review-an-143.md)（Reviewer-DeepSeek，`deepseek/deepseek-flash`）及被审 HEAD `4179daef0634c3a58f899860989a865a4affe41e`，确认交付的代码、测试和产品文档与被审版本相同。差异基线为 `a738dabfd17d830be6fb8580cc6ea6570a63020d`，OpenSpec 3.3 关联该复验。
+
+| 交付检查 | 退出码 | 实际结果 |
+| --- | --- | --- |
+| `.venv/bin/python -m pytest -q` | 0 | 44 passed, 1 warning in 0.93s，既有 Starlette TestClient 的 httpx 弃用提示。 |
+| `node --check wattline/static/monitor.js`、`node --check wattline/static/locales.js`、`node tools/test_i18n.cjs` | 0 | 语法通过，311 个翻译键通过。 |
+| `.venv/bin/python tools/browser_smoke.py --browser "$HOME/Library/Caches/ms-playwright/chromium_headless_shell-1254/chrome-headless-shell-mac-arm64/chrome-headless-shell"` | 0 | Chromium 158.0.8127.18，`PASS`，中英文，`page_errors: []`。 |
+| `OPENSPEC_TELEMETRY=0 npx --offline @fission-ai/openspec@1.14.2 validate --specs --strict` | 0 | 7 项通过。首次同步的两个要求正文过长，严格校验退出 1。将细节移入对应场景后，主规范与 delta 匹配，复跑通过。 |
+| `git diff --check`、`git diff --cached --check`、`git diff --check a738dab..HEAD` | 0 | 无空白错误。 |
+| `git push origin 704065f6130d461c1ec4f4617457979fedc6359b:refs/heads/main`、`git ls-remote --exit-code origin refs/heads/main` | 0 | 远端 main 推送、回读 SHA 相同，任务 3.4 完成。含归档的最终远端提交在验收评论记录。 |
+| `OPENSPEC_TELEMETRY=0 npx --offline @fission-ai/openspec@1.14.2 validate style-machine-assignee-chips --strict`、`OPENSPEC_TELEMETRY=0 npx --offline @fission-ai/openspec@1.14.2 archive style-machine-assignee-chips --yes --skip-specs` | 0 | 变更有效，8/8 任务完成。主规范已同步，CLI 归档为 `2026-11-25-style-machine-assignee-chips`。 |
+
+复跑使用 Chromium 和合成数据。其他浏览器、真实屏幕阅读器、节点与用户实例未实测。本轮产品变更无需数据库迁移。

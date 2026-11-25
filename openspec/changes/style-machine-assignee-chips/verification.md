@@ -118,3 +118,49 @@
 原始 JSON、截图和重放脚本位于本地忽略目录 `artifacts/an141/`。`run-browser.py` 仅把原检查的截图重定向到该目录。`replay_an137.py` 沿用原 AN-137 夹具及断言，在两次测量中都加入报告点位，更新字形测量以遍历姓名文本节点，并允许渲染器自己的两种包裹 span。原审查包保留在原位置。索引的 `AGENTS.md` 只有通用约定，工作树注入摘要与开工时一致。
 
 覆盖限于 Chromium、合成节点、临时 SQLite 以及浏览器可访问名称和焦点断言。Firefox、Safari、真实屏幕阅读器、用户实例与部署未实测。API、权限、配置、SQLite schema 和归档格式保持兼容。
+
+## AN-144 补充修复验证
+
+2026-11-25（Asia/Shanghai），Expert-AGY 在 Wattline 固定开发目录，按用户在 AN-102 评论 `01a21211-5092-7dc6-865b-c938d89bfa39` 的授权完成 AN-140 报告的首列越界修复与自测。原独立审查证据完整保留于 [AN-134](review-an-134.md)、[AN-137](review-an-137.md) 和 [AN-140](review-an-140.md)，本地忽略目录 `artifacts/an140-review/` 原样保留。
+
+- 起点基线：`d9820cd3655efd70a4a02b39fac38723c17ce2bb`（AN-140 被审 HEAD）。
+- 本轮实现提交：`a0dc9dfff981b2e141bb0af5e41e2de51ea851a3`（`git diff d9820cd..a0dc9df`）；未推送远端。
+- 根因与修复：`.machine-identity` 补齐 `flex: 1 1 auto; min-width: 0;`，`.row-open` 补齐 `max-width: 100%;`（保持 `overflow: visible` 以免裁切 `:focus-visible` 焦点环），并将 `.row-open strong, .row-open small` 由固定 `max-width: 170px` 改为 `max-width: 100%` 配合 `overflow: hidden; text-overflow: ellipsis; white-space: nowrap;`；在 `@container (max-width: 860px)` 卡片态保持 `max-width: none; overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: anywhere;` 完整换行。`tools/browser_smoke.py` 的 `check_assignee_responsive` 移除对 `.row-open` 的检查跳过，显式断言首列容器/按钮/文本边界、状态徽章无重叠、表格态列内省略属性、裁剪后字形不越界以及完整可访问名称，并补充 1080/1140/1200/1260/1310 CSS px 视口以覆盖约 861–1012 CSS px 临界容器带。
+
+### AN-140 夹具前后对照（英文临界点，合成数据）
+
+使用 `artifacts/an144/verify_an144.py` 重放 AN-140 的 `Fixture Alpha`（63 字符 SSH 别名）和长名称/长别名夹具（`长机器名 × 9 + Z`、`u × 100 + .invalid` 及容器视角长名称节点），在 `d9820cd` 基线与 `a0dc9df` 实现上各测 46 组（双导航 × 双语言 × 320px/切换点/约 861–1012 CSS px 容器带/1440px）：
+
+| 夹具与视口（英文） | 容器宽 | `td` 内容右界 / 徽章左界 | 基线 `.row-open` 宽 / 右界 / 越界字形 | 修复后 `.row-open` 宽 / 右界 / 越界字形 |
+| --- | ---: | --- | --- | --- |
+| Alpha · 展开 1156 | 861 | 454.22 / 478.22 | 196 / 502.67 / 6（压徽章） | 147.55 / 454.22 / 0 |
+| Alpha · 展开 1200 | 902 | 465.47 / 489.47 | 196 / 504.00 / 5（压徽章） | 157.47 / 465.47 / 0 |
+| Alpha · 折叠 986 | 861 | 289.17 / 313.17 | 196 / 337.58 / 6（压徽章） | 147.59 / 289.17 / 0 |
+| Alpha · 折叠 1024 | 897 | 298.89 / 322.89 | 196 / 338.72 / 5（压徽章） | 156.17 / 298.89 / 0 |
+| Long · 展开 1156 | 861 | 454.22 / 478.22 | 196 / 502.67 / 9（压徽章） | 147.55 / 454.22 / 0 |
+| Long · 展开 1200 | 902 | 465.47 / 489.47 | 196 / 504.00 / 8（压徽章） | 157.47 / 465.47 / 0 |
+| Long · 折叠 986 | 861 | 289.17 / 313.17 | 196 / 337.58 / 9（压徽章） | 147.59 / 289.17 / 0 |
+| Long · 折叠 1024 | 897 | 298.89 / 322.89 | 196 / 338.72 / 8（压徽章） | 156.17 / 298.89 / 0 |
+| Long · 展开 320（卡片） | 286 | 274.00 / 换行卡片 | 190 / 274.00 / 0（完整换行） | 190 / 274.00 / 0（完整换行） |
+| Long · 展开 1440 | 1138 | 524.11 / 548.11 | 196 / 506.00 / 0 | 214.11 / 524.11 / 0 |
+
+两套夹具各 46 组基线失败均为 34 项（与 AN-140 报告一致），修复后失败均为 0 项，无页面错误。同步实测交互：截断态下 `.row-open` 仍保留完整 `aria-label` 与可访问名称（如 `View 长机器名 ... Z`），Tab 聚焦后 `:focus-visible` 轮廓为 `solid` 且父容器/按钮 `overflow` 均为 `visible` 不裁切焦点环，方向键与指针拖动重排及 Enter 跳转详情并返总览均正常。对照截图保存在忽略目录 `artifacts/an144/`（`an140-alpha-*.png`、`an140-long-*.png`、`verify-an144.json`、`browser-smoke.json`）。
+
+### 命令和结果
+
+环境为 Python 3.11.17、Node/npm、Playwright 1.65.2、Chromium Headless Shell `158.0.8127.18`、OpenSpec `1.14.2`；`"$sr_bin"` 为本机缓存 Chromium 路径。
+
+| 命令 | 退出码 | 实际结果 |
+| --- | ---: | --- |
+| `.venv/bin/python -m pytest -q` | 0 | `44 passed, 1 warning in 0.84s`（既有 Starlette/httpx 弃用警告） |
+| `node --check wattline/static/monitor.js`；`node --check wattline/static/locales.js` | 0；0 | 无输出 |
+| `node tools/test_i18n.cjs` | 0 | `PASS: 311 message keys, placeholder parity, references, interpolation, Intl, persistence, fallback, blocked storage` |
+| `.venv/bin/python tools/browser_smoke.py --browser "$sr_bin" > artifacts/an144/browser-smoke.json` | 0 | `result: PASS`，Chromium `158.0.8127.18`，`page_errors: []`，52 组固定视口（含首列边界与省略断言）+ 双导航/双语言切换边界（展开 1155/1156、折叠 985/986）+ 原多选与胶囊空格回归全通过 |
+| `.venv/bin/python artifacts/an144/verify_an144.py "$sr_bin"` | 0 | 基线 `d9820cd` 复现 34+34 处越界；修复后 0 失败、0 页面错误，可访问名称/焦点环/排序/拖拽/导航全通过 |
+| `OPENSPEC_TELEMETRY=0 npx --offline @fission-ai/openspec@1.14.2 validate style-machine-assignee-chips --strict` | 0 | `Change 'style-machine-assignee-chips' is valid` |
+| `OPENSPEC_TELEMETRY=0 npx --offline @fission-ai/openspec@1.14.2 validate --specs --strict` | 0 | `Totals: 7 passed, 0 failed (7 items)` |
+| `git diff --check`；`git diff --cached --check`；`git diff --check d9820cd..a0dc9df` | 0；0；0 | 无输出；`git show :AGENTS.md` 不含运行时注入块 |
+
+### 范围、兼容与限制
+
+仅改动 `wattline/static/monitor.css`、`tools/browser_smoke.py`、`docs/frontend-redesign.md` 和活动 change `style-machine-assignee-chips`；API、配置、权限、SQLite schema 与归档格式不变，工作树 `AGENTS.md` 本地注入保持未暂存。验证限于 Chromium Headless Shell、合成节点与临时 SQLite，未实测 Firefox、Safari、真实屏幕阅读器、真实节点或用户部署实例。本轮为执行者自测，AN-143 独立复验、规范同步/归档与远端 `main` 推送仍待完成（`tasks.md` 3.3 与 3.4 保持未勾选）。

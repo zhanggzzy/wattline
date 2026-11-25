@@ -41,6 +41,7 @@
       <div id="machine-connection" class="form-grid">
         <label><span data-i18n="ip_or_hostname">IP 或主机名</span><input name="host" type="text" maxlength="128" placeholder="例如 jg04" data-i18n-placeholder="e_g_jg04" autocomplete="off" spellcheck="false" required></label>
         <label><span data-i18n="ssh_username">SSH 用户名 </span><small><span data-i18n="optional">可选</span></small><input name="ssh_user" type="text" maxlength="64" placeholder="按现有 SSH 配置" data-i18n-placeholder="use_existing_ssh_configuration" autocomplete="off" spellcheck="false"></label>
+        <label><span data-i18n="target_operating_system">目标操作系统</span><select name="target_os"><option value="linux">Linux</option><option value="windows">Windows</option></select></label>
         <p class="full-width"><span data-i18n="an_existing_ssh_alias_also_works_saving_verifies_public_key_login">也可填写已有 SSH 别名。保存时会验证公钥登录和已信任的主机密钥。</span></p>
       </div>
       <div class="form-grid">

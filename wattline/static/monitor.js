@@ -164,6 +164,25 @@ const reason = host => i18n.diagnostic(host.reason) || host.warnings?.map(i18n.d
 const checks = host => host.checks ?? ['gpu','processes','cpu','memory','system'];
 const configUnavailable = () => state.snapshot.registry_loaded === false;
 const unlimitedMemory = host => host?.scope === 'container' && host.metrics?.memory?.total_bytes === null;
+const windowsHost = host => host.target_os === 'windows';
+const processMemory = process => Number.isFinite(process.used_memory_mib) ? process.used_memory_mib : -1;
+
+function displayedProcesses(host, gpu) {
+  const records = gpu?.processes ?? [];
+  if (!windowsHost(host) || records.length <= 1) return {rows:records, omitted:0};
+  const rows = [...records].sort((left,right) => processMemory(right)-processMemory(left) || left.pid-right.pid).slice(0,5);
+  return {rows, omitted:records.length-rows.length};
+}
+
+function processVram(host, process) {
+  if (windowsHost(host) && !Number.isFinite(process.used_memory_mib)) return t('unknown_value');
+  return fmt(vram(process.used_memory_mib),' GiB',1);
+}
+
+function omittedProcesses(count) {
+  return count ? `<small>${t('omitted_gpu_processes',{count:i18n.number(count)})}</small>` : '';
+}
+
 const processShape = gpu => [gpu?.uuid, gpu?.state, gpu?.process_visibility,
   gpu?.processes.map(proc => [proc.pid, proc.name, proc.uid, proc.user, proc.workload, proc.used_memory_mib])];
 
@@ -194,7 +213,7 @@ function renderPage(force = false) {
     hosts.map(node => {
       const model = machineModel(node);
       return [node.id, node.name, node.address, node.assigned_users, node.status, node.require_gpu, node.scope,
-        checks(node), reason(node), model.kind, model.names];
+        checks(node), reason(node), model.kind, model.names, node.target_os, node.gpu_inventory_complete];
     }),
     host?.devices, host?.metrics?.gpus.map(processShape),
     host?.metrics?.driver_version, unlimitedMemory(host)]);
@@ -466,7 +485,7 @@ function hostPage(host, device) {
   const active = checks(host);
   return `<section class="page-title"><div><p class="eyebrow">WATTLINE / NODE</p>${heading(host.name,statusBadge)}
     <p><span class="mono">${escape(host.address)}</span> · ${host.mode==='ssh' ? 'SSH' : t('local')}
-    ${container ? t('container_scope_m077') : ''}${device ? ' · '+escape(device.name || 'NVIDIA GPU') : ''}</p>
+    ${windowsHost(host) ? ' · Windows' : ''}${container ? t('container_scope_m077') : ''}${device ? ' · '+escape(device.name || 'NVIDIA GPU') : ''}</p>
     ${assigneeSummary(host)}</div>
     <div class="title-actions"><span class="time">${t('last_valid_sample')} ${field('host-time')}</span>
     <div class="machine-settings-actions">
@@ -485,7 +504,7 @@ function hostPage(host, device) {
     </section>
     ${host.metrics && (host.metrics.driver_version || active.some(key => key === 'cpu' || key === 'memory' || (!container && key === 'system'))) ? `<div class="panel facts" aria-label="${t('additional_resource_metrics')}">
       ${active.includes('cpu') ? `<span>${container ? t('container_cpu_capacity') : t('logical_cpus')} <strong>${field('cores')}</strong></span>` : ''}
-      ${!container && active.includes('cpu') ? `<span>${t('1_minute_load')} <strong>${field('load')}</strong></span>` : ''}
+      ${!container && !windowsHost(host) && active.includes('cpu') ? `<span>${t('1_minute_load')} <strong>${field('load')}</strong></span>` : ''}
       ${!container && active.includes('system') ? `<span>${t('system_disk_available')} <strong>${field('disk')}</strong></span><span>${t('uptime')} <strong>${field('uptime')}</strong></span>` : ''}
       ${active.includes('memory') && !unlimited ? `<span>${container ? t('memory_limit_headroom') : t('memory_available')} <strong>${field('available')}</strong></span>` : ''}
       ${host.metrics.driver_version ? `<span>${t('nvidia_driver')} <strong>`+escape(host.metrics.driver_version)+'</strong></span>' : ''}</div>` : ''}
@@ -500,18 +519,20 @@ function hardwareTable(host) {
       <caption class="sr-only">${label}</caption><thead><tr>${[t('device'),t('status')+' / '+t('gpu_utilization'),t('vram_used_total'),t('gpu_power')+' / '+t('gpu_temperature'),t('current_gpu_processes')].map(text => `<th scope="col">${text}</th>`).join('')}</tr></thead>
       <tbody>${host.devices.map(device => {
         const gpu = currentDevice(host,device);
-        const processes = active.includes('processes') ? gpu?.processes || [] : [];
+        const {rows:processes, omitted} = displayedProcesses(host, active.includes('processes') ? gpu : null);
         const empty = !active.includes('processes') ? t('process_checks_disabled')
           : !gpu || gpu.process_visibility !== 'complete' || gpu.state === 'unknown' ? t('no_verifiable_gpu_process_records_available') : t('no_gpu_processes_found');
         return `<tr><th scope="row"><button type="button" class="gpu-open" data-gpu="${escape(device.uuid)}" aria-haspopup="dialog" aria-label="${t('view_gpu')} ${device.index}"><strong>GPU ${device.index}</strong><span>${escape(device.name || 'NVIDIA GPU')}</span></button></th>
           <td data-label="${t('status')} / ${t('gpu_utilization')}">${status(gpu?.state || 'stale',gpuStates[gpu?.state] || t('no_fresh_sample'))}<strong>${field(device.uuid)}</strong></td>
           <td data-label="${t('vram_used_total')}">${field(device.uuid+'-memory')}</td>
           <td data-label="${t('gpu_power')} / ${t('gpu_temperature')}">${field(device.uuid+'-power')}<small>${field(device.uuid+'-temperature')}</small></td>
-          <td data-label="${t('current_gpu_processes')}">${processes.length ? `<ul class="gpu-processes">${processes.map(process => `<li><strong>${escape(process.name || t('unverified'))}</strong> <span class="mono">PID ${escape(process.pid)}</span><small>${t('host_account')}: ${escape(process.user || (process.uid == null ? t('unverified') : 'UID '+process.uid))}${process.user && process.uid != null ? ' · UID '+escape(process.uid) : ''}</small><small>${t('ownership_evidence')}: ${escape(workloadEvidence(process))} · ${t('process_vram')}: ${fmt(vram(process.used_memory_mib),' GiB',1)}</small>
+          <td data-label="${t('current_gpu_processes')}">${processes.length ? `<ul class="gpu-processes">${processes.map(process => `<li><strong>${escape(process.name || t('unverified'))}</strong> <span class="mono">PID ${escape(process.pid)}</span><small>${t('host_account')}: ${escape(process.user || (process.uid == null ? t('unverified') : 'UID '+process.uid))}${process.user && process.uid != null ? ' · UID '+escape(process.uid) : ''}</small><small>${t('ownership_evidence')}: ${escape(workloadEvidence(process))} · ${t('process_vram')}: ${processVram(host,process)}</small>
           <small>${t('process_started_at')}: ${field(processTimingKey(gpu,process,'start'))}</small>
           <small>${t('process_elapsed')}: ${field(processTimingKey(gpu,process,'elapsed'))}</small></li>`).join('')}</ul>` : `<span class="process-empty">${empty}</span>`}
-          ${gpu?.process_visibility === 'partial' ? `<small>${t('process_enumeration_is_only_partially_visible_for_this_device')}</small>` : ''}</td></tr>`;
-      }).join('')}</tbody></table></div>` : `<p class="empty">${active.includes('gpu') ? t('no_verified_devices_yet') : host.require_gpu ? t('gpu_checks_are_disabled') : t('monitored_as_a_cpu_only_machine')}</p>`}
+          ${omittedProcesses(omitted)}${gpu?.process_visibility === 'partial' ? `<small>${t('process_enumeration_is_only_partially_visible_for_this_device')}</small>` : ''}</td></tr>`;
+      }).join('')}</tbody></table></div>` : `<p class="empty">${active.includes('gpu')
+      ? t(windowsHost(host) && host.gpu_inventory_complete === true ? 'no_nvidia_devices_detected' : 'no_verified_devices_yet')
+      : host.require_gpu ? t('gpu_checks_are_disabled') : t('monitored_as_a_cpu_only_machine')}</p>`}
   </section>`;
 }
 
@@ -545,7 +566,6 @@ function gpuInfo(host, device, gpu) {
       <div><dt>${t('current_power_limit')}</dt><dd>${field('gpu-power-limit')}</dd></div>
     </dl>
     <details class="smi" id="smi"><summary>${t('show_nvidia_smi_sample_fields')}</summary><pre data-value="smi-detail"></pre></details>
-    ${gpu?.process_visibility === 'partial' ? `<p class="empty">${t('process_enumeration_is_only_partially_visible_for_this_device')}</p>` : ''}
   </section>`;
 }
 
@@ -579,33 +599,34 @@ function processTiming(process) {
     hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}), processRuntime(elapsed)];
 }
 
-function processTable(device, gpu) {
-  const rows = gpu?.processes ?? [];
+function processTable(host, device, gpu) {
+  const {rows, omitted} = displayedProcesses(host, gpu);
   const empty = gpu?.process_visibility === 'complete' && gpu.state !== 'unknown'
     ? t('no_gpu_processes_found') : t('no_verifiable_gpu_process_records_available');
   return `<section class="panel">
-    <div class="panel-head"><h2>${t('current_gpu_processes')}</h2><small>GPU ${device.index} · ${t('visible_record_count',{count:rows.length})}</small></div>
+    <div class="panel-head"><h2>${t('current_gpu_processes')}</h2><small>GPU ${device.index} · ${t('visible_record_count',{count:gpu?.processes.length ?? 0})}</small>${omittedProcesses(omitted)}</div>
     ${rows.length ? `<div class="scroll" tabindex="0" role="region" aria-label="${t('gpu_process_list')}"><table class="process-table">
       <thead><tr>${['process_pid','host_account','ownership_evidence','device','process_vram','process_started_at','process_elapsed'].map(key => `<th scope="col">${t(key)}</th>`).join('')}</tr></thead>
       <tbody>${rows.map(process => `<tr><td><strong>${escape(process.name || t('unverified'))}</strong><small class="mono">PID ${escape(process.pid)}</small></td>
       <td>${escape(process.user || (process.uid == null ? t('unverified') : 'UID '+process.uid))}
-      ${process.user ? '<small>UID '+escape(process.uid)+'</small>' : ''}</td><td>${escape(workloadEvidence(process))}</td>
-      <td>GPU ${device.index}</td><td class="value">${fmt(vram(process.used_memory_mib),' GiB',1)}</td>
+      ${process.user && process.uid != null ? '<small>UID '+escape(process.uid)+'</small>' : ''}</td><td>${escape(workloadEvidence(process))}</td>
+      <td>GPU ${device.index}</td><td class="value">${processVram(host,process)}</td>
       <td class="process-timing">${field(processTimingKey(gpu,process,'start'))}</td>
       <td class="process-timing">${field(processTimingKey(gpu,process,'elapsed'))}</td></tr>`).join('')}</tbody>
     </table></div>` : '<p class="empty">'+empty+'</p>'}
+    ${gpu?.process_visibility === 'partial' ? `<p class="empty">${t('process_enumeration_is_only_partially_visible_for_this_device')}</p>` : ''}
   </section>`;
 }
 
 function paintGpuDialogProcesses(host, device, gpu) {
   const panel = byId('gpu-dialog-processes');
-  const shape = device && checks(host).includes('processes') ? JSON.stringify([i18n.locale,device.index,processShape(gpu)]) : '';
+  const shape = device && checks(host).includes('processes') ? JSON.stringify([i18n.locale,device.index,host.target_os,processShape(gpu)]) : '';
   if (panel.dataset.shape === shape) return;
   const focused = panel.contains(document.activeElement);
   const scrollLeft = panel.querySelector('.scroll')?.scrollLeft ?? 0;
   panel.dataset.shape = shape;
   panel.hidden = !shape;
-  panel.innerHTML = shape ? processTable(device,gpu) : '';
+  panel.innerHTML = shape ? processTable(host,device,gpu) : '';
   const region = panel.querySelector('.scroll');
   if (region) region.scrollLeft = scrollLeft;
   if (focused) (region || gpuDialog.querySelector('[autofocus]')).focus({preventScroll:true});
@@ -651,7 +672,8 @@ function paint() {
     values['host-time'] = time(host.last_success_at);
     values['cores'] = fmt(metrics?.cpu_count,t('cores'),Number.isInteger(metrics?.cpu_count) ? 0 : 2);
     values['load'] = fmt(metrics?.load_average[0],'',2);
-    values['disk'] = fmt(gib(metrics?.root_disk?.available_bytes),' GiB',1);
+    const disk = metrics?.root_disk;
+    values['disk'] = (disk?.volume ? disk.volume + ' · ' : '') + fmt(gib(disk?.available_bytes),' GiB',1);
     values['available'] = fmt(gib(memory?.available_bytes),' GiB',1);
     values['uptime'] = uptime(metrics?.uptime_seconds);
     values['memory-detail'] = memory?.total_bytes != null
@@ -1071,7 +1093,7 @@ function openMachineDialog(host) {
   byId('machine-target').hidden = !host;
   byId('machine-connection').hidden = !!host;
   const fields = machineForm.elements;
-  fields.host.disabled = fields.ssh_user.disabled = !!host;
+  fields.host.disabled = fields.ssh_user.disabled = fields.target_os.disabled = !!host;
   fields.alias.value = host?.alias ?? '';
   fields.alias.placeholder = host?.default_name ?? t('leave_blank_for_default_name');
   fields.interval_seconds.value = host?.interval_seconds ?? state.snapshot.period_ms / 1000;
@@ -1115,6 +1137,7 @@ machineForm.addEventListener('submit', async event => {
   if (!id) {
     settings.host = fields.get('host').trim();
     settings.ssh_user = fields.get('ssh_user').trim() || null;
+    settings.target_os = fields.get('target_os');
   }
   machineSave.disabled = machineCancel.disabled = machineFields.disabled = true;
   setButtonLabel(machineSave, id ? 'saving' : 'verifying_connection');

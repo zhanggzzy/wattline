@@ -58,6 +58,24 @@ def measured_gpu_power(gpu):
     return None, None
 
 
+def gpu_measurements(gpu, uuid, warnings):
+    temperature = gpu_number(gpu, 'temperature/gpu_temp')
+    slowdown = gpu_number(gpu, 'temperature/gpu_temp_slow_threshold')
+    if temperature is not None and slowdown and temperature >= slowdown:
+        warnings.append(f'{uuid} 的温度已达到 GPU 降频阈值')
+    watts, power_kind = measured_gpu_power(gpu)
+    power_limit = gpu_power(gpu, 'current_power_limit')
+    if power_limit is None:
+        power_limit = gpu_power(gpu, 'enforced_power_limit')
+    return {
+        'uuid':uuid, 'name':gpu.findtext('product_name'), 'bus_id':gpu.findtext('pci/pci_bus_id'),
+        'memory_used_mib':gpu_number(gpu, 'fb_memory_usage/used'),
+        'memory_total_mib':gpu_number(gpu, 'fb_memory_usage/total'),
+        'utilization_percent':gpu_number(gpu, 'utilization/gpu_util'),
+        'temperature_c':temperature, 'power_w':watts, 'power_kind':power_kind, 'power_limit_w':power_limit,
+    }
+
+
 def pid_start_ticks(process):
     return int((process/'stat').read_text().rsplit(')', 1)[1].split()[19])
 
@@ -211,20 +229,8 @@ def monitor_gpus(config, proc, warnings, *, host_processes=True, warn_on_unknown
             state = 'occupied'
         elif inventory_ok and visible and used is not None and used <= config.get('idle_memory_tolerance_mib', 0):
             state = 'free'
-        temperature = gpu_number(gpu, 'temperature/gpu_temp')
-        slowdown = gpu_number(gpu, 'temperature/gpu_temp_slow_threshold')
-        if temperature is not None and slowdown and temperature >= slowdown:
-            warnings.append(f'{uuid} 的温度已达到 GPU 降频阈值')
-        watts, power_kind = measured_gpu_power(gpu)
-        power_limit = gpu_power(gpu, 'current_power_limit')
-        if power_limit is None:
-            power_limit = gpu_power(gpu, 'enforced_power_limit')
         gpus[uuid] = {
-            'uuid':uuid, 'name':gpu.findtext('product_name'), 'bus_id':gpu.findtext('pci/pci_bus_id'),
-            'memory_used_mib':used, 'memory_total_mib':gpu_number(gpu, 'fb_memory_usage/total'),
-            'utilization_percent':gpu_number(gpu, 'utilization/gpu_util'),
-            'temperature_c':temperature, 'power_w':watts, 'power_kind':power_kind,
-            'power_limit_w':power_limit,
+            **gpu_measurements(gpu, uuid, warnings),
             'processes':processes, 'process_visibility':('complete' if visible else 'partial') if processes_enabled else None,
             'state':state,
         }

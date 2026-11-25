@@ -219,6 +219,84 @@ def check_unlimited_container(browser):
     test_page.close()
     return {'used_text':used_text, 'duplicate_hidden':True, 'page_errors':page_errors}
 
+def check_windows_processes(browser):
+    global machines
+    windows_host = node(1)
+    windows_host.update(target_os='windows', gpu_inventory_complete=True)
+    windows_host['metrics'].update(load_average=[], root_disk={'volume':'D:', 'available_bytes':2**34})
+    measured = windows_host['metrics']['gpus'][0]
+    measured.update(process_visibility='partial', processes=[
+        dict(pid=16, used_memory_mib=None),
+        dict(pid=14, used_memory_mib=400, user=r'Fixture\Operator'),
+        dict(pid=13, used_memory_mib=512),
+        dict(pid=10, used_memory_mib=None),
+        dict(pid=12, used_memory_mib=512),
+        dict(pid=11, used_memory_mib=0),
+        dict(pid=15, used_memory_mib=None),
+    ])
+    empty = dict(measured, uuid='GPU-synthetic-empty', index=1, processes=[], state='unknown')
+    windows_host['metrics']['gpus'].append(empty)
+    windows_host['devices'] = [measured, empty]
+    linux = node(2)
+    linux['metrics']['gpus'][0]['processes'] = measured['processes']
+    no_cards = node(3)
+    no_cards.update(target_os='windows', devices=[], gpu_inventory_complete=True)
+    no_cards['metrics']['gpus'] = []
+    machines = [windows_host, linux, no_cards]
+
+    page = browser.new_page(viewport={'width':390,'height':844})
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.route('**/*', handle)
+    page.goto('http://wattline.test')
+    page.locator('#locale-select').select_option('en')
+    expect(page.locator('[data-value=processes]')).to_have_text('14')
+    page.locator('[data-add-machine]').click()
+    selector = page.get_by_label('Target operating system')
+    expect(selector).to_have_value('linux')
+    selector.select_option('windows')
+    page.locator('#machine-form [name=host]').fill('synthetic.invalid')
+    page.locator('#machine-save').click()
+    expect(page.locator('#machine-error')).to_be_visible()
+    assert json.loads(mutations[-1][2])['target_os'] == 'windows'
+    page.keyboard.press('Escape')
+
+    page.locator('#rail-nav [data-host=demo-1]').click()
+    hardware = page.locator('.hardware-table')
+    expect(page.locator('[data-value=disk]')).to_have_text('D: · 16.0 GiB')
+    expect(page.locator('[data-value=load]')).to_have_count(0)
+    expected = [f'PID {pid}' for pid in (12,13,14,11,10)]
+    expect(hardware.locator('.gpu-processes .mono')).to_have_text(expected)
+    expect(hardware).to_contain_text('2 more observed records omitted')
+    expect(hardware).to_contain_text('No verifiable GPU process records available')
+    expect(hardware).to_contain_text('Usage unknown')
+    expect(hardware).to_contain_text('In use')
+    page.get_by_role('button',name='View GPU 0',exact=True).click()
+    dialog = page.locator('#gpu-dialog')
+    expect(dialog.locator('.process-table .mono')).to_have_text(expected)
+    expect(dialog).to_contain_text('2 more observed records omitted')
+    expect(dialog).to_contain_text('Visible records: 7')
+    expect(dialog).to_contain_text(r'Fixture\Operator')
+    expect(dialog.locator('.process-table')).not_to_contain_text('UID')
+    expect(dialog.locator('.process-table tbody tr').last.locator('td').nth(4)).to_have_text('Unknown')
+    page.keyboard.press('Escape')
+    page.get_by_role('button',name='View GPU 1',exact=True).click()
+    expect(dialog).to_contain_text('No verifiable GPU process records available')
+    page.keyboard.press('Escape')
+
+    page.locator('#rail-nav [data-host=demo-3]').click()
+    expect(page.locator('.hardware-panel')).to_contain_text('No NVIDIA GPUs detected.')
+    no_cards['gpu_inventory_complete'] = False
+    expect(page.locator('.hardware-panel')).to_contain_text('No verified devices yet.', timeout=8000)
+    page.locator('#rail-nav [data-host=demo-2]').click()
+    expect(hardware.locator('.gpu-processes li')).to_have_count(7)
+    assert not errors, errors
+    page.close()
+    return {'enrollment_os':True, 'displayed_per_card':5, 'observed_per_card':7, 'omitted_per_card':2,
+            'unknown_empty_processes':True, 'confirmed_and_unavailable_inventory':True,
+            'account_without_uid':True, 'linux_rows':7, 'page_errors':errors}
+
+
 def check_gpu_process_timing(browser):
     page = browser.new_page(viewport={'width':1440,'height':900}, timezone_id='America/Los_Angeles')
     errors = []
@@ -1571,6 +1649,7 @@ with sync_playwright() as p:
     page.close()
     dialog_locales = check_dialog_locales(browser)
     unlimited_container = check_unlimited_container(browser)
+    windows_processes = check_windows_processes(browser)
     gpu_process_timing = check_gpu_process_timing(browser)
     focus_layout = check_focus_layout(browser)
     overview_regressions = check_overview_regressions(browser)
@@ -1581,6 +1660,6 @@ with sync_playwright() as p:
                       "metric_layouts":layout_results, "focus_refreshes":focus_results,
                       "people_directory":people_directory,
                       "unlimited_container":unlimited_container,"gpu_process_timing":gpu_process_timing,
-                      "overview_regressions":overview_regressions,
+                      "windows_processes":windows_processes, "overview_regressions":overview_regressions,
                       "silhouettes":silhouettes, "rail_identity_edges":rail_identity_edges}, ensure_ascii=False))
     browser.close()

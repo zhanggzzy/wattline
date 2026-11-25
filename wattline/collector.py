@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 import sys
 
-from . import host_probe
+from . import host_probe, windows
 from .transport import TransportError, command, ssh_command
 from .config import HOST_KEY
 
@@ -33,39 +33,52 @@ def handshake_key(stderr):
 
 
 class Collector:
-    """Run the same fixed, standard-library probe locally or over a configured SSH destination."""
+    """Run the Linux or Windows probe through its configured transport."""
     def __init__(self, config, run=command):
         self.config = config
         self.run = run
         self.script = Path(host_probe.__file__).read_text()
 
-    def ssh(self, host, user, args, connect_timeout, *, inspect_key=False, canonical_key=False):
-        argv = ssh_command(host, ['python3', *args], connect_timeout=connect_timeout)
+    def ssh(self, host, user, args, connect_timeout, *, inspect_key=False, canonical_key=False, target_os='linux'):
+        remote = windows.COMMAND if target_os == 'windows' else ['python3', *args]
+        argv = ssh_command(host, remote, connect_timeout=connect_timeout)
         argv[1:1] = ['-oPreferredAuthentications=publickey', '-oUpdateHostKeys=no', '-oPermitLocalCommand=no']
         if user:
             argv[1:1] = ['-l', user]
-        if inspect_key or canonical_key:
+        if inspect_key or canonical_key or target_os == 'windows':
             argv[1:1] = ['-v', '-oFingerprintHash=sha256', '-oControlMaster=no', '-oControlPath=none']
         if canonical_key:
             argv[1:1] = ['-oHostKeyAlgorithms=ssh-ed25519']
         return argv
 
-    async def identify(self, host, user, connect_timeout, *, canonical_key=False):
+    async def identify(self, host, user, connect_timeout, *, canonical_key=False, target_os='linux'):
+        canonical_key = canonical_key or target_os == 'windows'
         argv = self.ssh(host, user, ['-c', self.script, '--monitor-identity'], connect_timeout,
-                        inspect_key=True, canonical_key=canonical_key)
-        data, stderr = await self.probe(argv, {'mode':'ssh'}, connect_timeout)
+                        inspect_key=True, canonical_key=canonical_key, target_os=target_os)
+        options = {'mode':'ssh'}
+        if target_os == 'windows':
+            options['identity_only'] = True
+        data, stderr = await self.probe(argv, options, connect_timeout, target_os)
         identity = data.get('host_id')
         if not isinstance(identity, str) or not re.fullmatch(r'[a-f0-9]{32}', identity) or not data.get('boot_id'):
+            if target_os == 'windows':
+                raise CollectionError('unknown', '无法核实 Windows 机器身份或启动时间')
             raise CollectionError('unknown', '无法核实 Linux 机器身份，请检查 machine-id 和读取权限')
-        return HostIdentity(identity, handshake_key(stderr))
+        key = handshake_key(stderr)
+        if target_os == 'windows' and key is None:
+            raise CollectionError('unknown', '无法核实 Windows 节点的 ED25519 SSH 主机密钥')
+        return HostIdentity(identity, key)
 
-    async def probe(self, argv, options, connect_timeout):
+    async def probe(self, argv, options, connect_timeout, target_os='linux'):
+        payload = json.dumps(options).encode()
+        if target_os == 'windows':
+            payload = windows.SCRIPT + b'\n' + payload + b'\n'
         try:
-            code, stdout, stderr = await self.run(argv, json.dumps(options).encode(), self.config.probe_timeout(connect_timeout))
+            code, stdout, stderr = await self.run(argv, payload, self.config.probe_timeout(connect_timeout))
             if options['mode'] == 'ssh' and code == 255:
                 raise CollectionError('offline', 'SSH 连接失败，请确认工作台所在机器能通过公钥登录，且主机密钥已受信任')
             result = json.loads(stdout)
-            if code and result.get('error') == '宿主身份与固定配置不符':
+            if code and result.get('error') in ('宿主身份与固定配置不符', 'windows_identity_mismatch'):
                 raise CollectionError('unknown', '宿主身份与固定配置不符')
             if code or not isinstance(result.get('data'), dict):
                 raise CollectionError('unknown', '宿主探测未返回可用数据')
@@ -85,15 +98,16 @@ class Collector:
         args = ['-c', self.script, '--monitor']
         timeout = machine.connect_timeout
         if timeout is not None:
-            argv = self.ssh(machine.ssh_alias, machine.ssh_user, args, timeout, canonical_key=ssh_host_key is not None)
+            argv = self.ssh(machine.ssh_alias, machine.ssh_user, args, timeout,
+                            canonical_key=ssh_host_key is not None, target_os=machine.target_os)
         else:
             argv = [sys.executable, *args]
-        data, stderr = await self.probe(argv, options, timeout)
+        data, stderr = await self.probe(argv, options, timeout, machine.target_os)
         if ssh_host_key is not None and handshake_key(stderr) != ssh_host_key:
             raise CollectionError('unknown', 'SSH 主机密钥指纹与登记记录不一致')
         if data.get('host_id') != machine.expected_host_id or not data.get('boot_id'):
             raise CollectionError('unknown', '无法核实固定宿主或启动身份')
-        return data
+        return windows.metrics(data, options) if machine.target_os == 'windows' else data
 
 
 def cpu_percent(previous, current):

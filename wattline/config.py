@@ -8,6 +8,7 @@ from .transport import DEFAULT_SSH_CONNECT_TIMEOUT, valid_ssh_destination
 
 
 Check = Literal['gpu', 'processes', 'cpu', 'memory', 'system']
+TargetOS = Literal['linux', 'windows']
 DEFAULT_CHECKS = ('gpu', 'processes', 'cpu', 'memory', 'system')
 SSH_USER = r'^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,63}$'
 HOST_KEY = r'SHA256:[A-Za-z0-9+/]{43}'
@@ -52,6 +53,7 @@ class MachineSettings(AliasUpdate):
 class MachineRegistration(MachineSettings):
     host: str = Field(min_length=1, max_length=128)
     ssh_user: str | None = Field(default=None, pattern=SSH_USER)
+    target_os: TargetOS = 'linux'
 
     @field_validator('host')
     @classmethod
@@ -116,6 +118,7 @@ class Machine(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=80)
     address: str | None = Field(default=None, min_length=1, max_length=128)
     mode: Literal['local', 'ssh']
+    target_os: TargetOS = 'linux'
     ssh_alias: str | None = None
     ssh_user: str | None = Field(default=None, pattern=SSH_USER)
     expected_host_id: str = Field(pattern=r'^[a-f0-9]{32}$')
@@ -136,6 +139,8 @@ class Machine(BaseModel):
             raise ValueError('SSH 节点需要现有 ssh_alias')
         if self.mode == 'local' and (self.ssh_alias or self.ssh_user):
             raise ValueError('本机节点不能配置 SSH 连接参数')
+        if self.target_os == 'windows' and (self.mode != 'ssh' or self.host_proc or self.host_machine_id):
+            raise ValueError('Windows 节点须使用 SSH，且不能配置 Linux 宿主路径')
         if any(path and not path.is_absolute() for path in (self.host_proc, self.host_machine_id)):
             raise ValueError('宿主路径需要使用绝对路径')
         if not self.require_gpu and self.expected_gpu_count:

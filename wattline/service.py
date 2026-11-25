@@ -72,6 +72,7 @@ def metrics_from(data, percent):
             if memory and memory['total_bytes'] else None,
             'root_disk':data.get('root_disk'), 'uptime_seconds':data.get('uptime_seconds'),
             'driver_version':data.get('driver_version'), 'gpu_inventory_complete':complete,
+            **({'gpu_inventory_empty':True} if data.get('gpu_inventory_empty') else {}),
             'gpu_percent':avg(utilization), 'gpu_util_count':len(utilization), 'gpu_power_w':total_power,
             'gpu_power_kind':next(iter(power_modes)) if total_power is not None else None,
             'gpu_generation':','.join(sorted(gpu['uuid'] for gpu in devices)),
@@ -139,7 +140,8 @@ class Monitor:
         host_keys = defaultdict(list)
         for machine in machines.values():
             host_keys[machine.expected_host_id].append(pins.get(machine.history_key))
-            last, cards, scope, complete = await self.write(self.history.inventory, machine.history_key, self.clock())
+            last, cards, scope, complete = await self.write(
+                self.history.inventory, machine.history_key, self.clock(), machine.target_os == 'windows')
             self.last_seen[machine.id] = last
             self.scopes[machine.id] = scope
             self.set_inventory(machine, cards, complete=complete)
@@ -355,10 +357,10 @@ class Monitor:
         if any((machine.ssh_alias, machine.ssh_user) == (host, user) for machine in self.machines.values()):
             raise CollectionError('conflict', '这台机器已经登记，可在机器详情页修改配置')
 
-    async def verify_disambiguation_key(self, host, user, timeout, machine_id):
+    async def verify_disambiguation_key(self, host, user, timeout, machine_id, target_os):
         try:
             async with self.slots:
-                observed = await self.collector.identify(host, user, timeout, canonical_key=True)
+                observed = await self.collector.identify(host, user, timeout, canonical_key=True, target_os=target_os)
         except CollectionError as error:
             raise CollectionError('conflict', f'{host} 的 SSH 主机密钥暂时无法复核') from error
         if observed.machine_id != machine_id or not observed.ssh_host_key:
@@ -374,13 +376,13 @@ class Monitor:
         new_key = identity.ssh_host_key
         if not new_key:
             new_key = await self.verify_disambiguation_key(
-                request.host, request.ssh_user, request.ssh_connect_timeout_seconds, identity.machine_id)
+                request.host, request.ssh_user, request.ssh_connect_timeout_seconds, identity.machine_id, request.target_os)
         pins = {}
         for node in matches:
             key = self.ssh_pins.get(node.history_key)
             if key is None:
                 key = await self.verify_disambiguation_key(
-                    node.ssh_alias, node.ssh_user, node.connect_timeout, identity.machine_id)
+                    node.ssh_alias, node.ssh_user, node.connect_timeout, identity.machine_id, node.target_os)
                 pins[node.history_key] = key
             if key == new_key:
                 raise CollectionError('conflict', f'这台机器已经登记为 {self.default_name(node)}，可在机器详情页修改配置')
@@ -395,18 +397,26 @@ class Monitor:
             raise OSError('机器配置暂不可读')
         self.check_registration(request.host, request.ssh_user)
         async with self.slots:
-            identity = await self.collector.identify(request.host, request.ssh_user, request.ssh_connect_timeout_seconds)
-        values = request.model_dump(exclude={'host', 'ssh_user'}, exclude_unset=True)
+            options = {'target_os':request.target_os} if request.target_os != 'linux' else {}
+            identity = await self.collector.identify(
+                request.host, request.ssh_user, request.ssh_connect_timeout_seconds, **options)
+        if request.target_os == 'windows' and not identity.ssh_host_key:
+            raise CollectionError('unknown', '无法核实 Windows 节点的 ED25519 SSH 主机密钥')
+        values = request.model_dump(exclude={'host', 'ssh_user', 'target_os'}, exclude_unset=True)
         values.setdefault('interval_seconds', self.config.interval_seconds)
         settings = MachineSettings.model_validate(values)
         async with self.settings_lock:
             self.check_registration(request.host, request.ssh_user)
             history_id, pins = await self.resolve_collision(request, identity)
             machine = Machine(id=uuid.uuid4().hex, name=request.host[:80], mode='ssh', ssh_alias=request.host,
-                              ssh_user=request.ssh_user, expected_host_id=identity.machine_id, history_id=history_id)
+                              ssh_user=request.ssh_user, target_os=request.target_os,
+                              expected_host_id=identity.machine_id, history_id=history_id)
             if machine.history_key in self.pending_removals:
                 raise CollectionError('conflict', '此节点的历史归档正在清理，完成后可重新登记')
-            return await self.save_settings(machine, settings, registration=machine.model_dump_json(), pins=pins)
+            if request.target_os == 'windows':
+                pins[machine.history_key] = identity.ssh_host_key
+            registration = machine.model_dump_json(exclude={'target_os'} if machine.target_os == 'linux' else None)
+            return await self.save_settings(machine, settings, registration=registration, pins=pins)
 
     async def configure(self, id, settings):
         async with self.settings_lock:
@@ -507,7 +517,7 @@ class Monitor:
             next_due += interval*(1+math.floor(max(0, elapsed)/interval))
 
     def set_inventory(self, machine, devices, *, complete):
-        if devices:
+        if devices or complete is True:
             cards = {gpu['uuid']:{key:gpu.get(key) for key in DEVICE_FIELDS} for gpu in devices}
             if complete is False:
                 for old in self.inventory.get(machine.id, []):
@@ -530,6 +540,7 @@ class Monitor:
             self.scopes[machine.id] = 'container' if data.get('scope') == 'container' else 'host'
             if not any(data.get(field) is not None for field in ('cpu_count','memory','uptime_seconds','root_disk')) and not (
                 data.get('load_average') or data.get('gpus')
+                or (machine.target_os == 'windows' and 'gpu_inventory_complete' in data)
             ):
                 raise CollectionError('unknown', '；'.join(data.get('warnings', [])) or '已选巡检项目暂无可读指标')
             boot, counters = data['boot_id'], data.get('cpu_ticks')
@@ -540,7 +551,9 @@ class Monitor:
                 counters = container_cpu['observed_ns'], container_cpu['usage_ns']
             baseline = self.cpu_baseline.get(machine.id)
             percent = None
-            if baseline:
+            if machine.target_os == 'windows':
+                percent = data.get('cpu_percent')
+            elif baseline:
                 last_boot, last_at, last_cpu, previous = baseline
                 if boot == last_boot and 0 < started-last_at <= stale and last_cpu == cpu_identity:
                     if container_cpu and previous:
@@ -577,7 +590,8 @@ class Monitor:
         stale = round(self.stale_seconds(machine)*1000)
         view.update(id=machine.id, name=alias or default_name, alias=alias, default_name=default_name,
                     assigned_users=self.person_views(self.machine_assignees.get(machine.history_key, ())),
-                    scope=self.scopes.get(machine.id), address=machine.display_address, mode=machine.mode,
+                    scope=self.scopes.get(machine.id), address=machine.display_address,
+                    mode=machine.mode, target_os=machine.target_os,
                     require_gpu=machine.require_gpu or 'gpu' in machine.active_checks or bool(self.inventory.get(machine.id)),
                     expected_gpu_count=machine.expected_gpu_count, gpu_inventory_complete=self.inventory_complete.get(machine.id),
                     last_success_at=self.last_seen.get(machine.id), devices=self.inventory.get(machine.id, []),

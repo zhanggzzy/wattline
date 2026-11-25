@@ -200,7 +200,7 @@
 #machine-fields { display: grid; gap: 20px; }
 .machine-dialog label, .machine-dialog legend { font-size: 13px; font-weight: 650; }
 .machine-dialog label small { color: var(--muted); font-weight: 400; margin-left: 3px; }
-.machine-dialog :is(input:not([type=checkbox]), textarea) { display: block; width: 100%; margin-top: 5px; padding: 8px 10px; border: 1px solid #ced9e8; border-radius: 7px; color: var(--ink); }
+.machine-dialog :is(input:not([type=checkbox]), textarea, select) { display: block; width: 100%; margin-top: 5px; padding: 8px 10px; border: 1px solid #ced9e8; border-radius: 7px; color: var(--ink); }
 .machine-dialog textarea { resize: none; white-space: pre; }
 .machine-dialog input[type=checkbox] { accent-color: var(--accent-deep); }
 .machine-dialog p { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }

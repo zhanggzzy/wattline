@@ -19,7 +19,7 @@ OVERVIEW_METRICS = ('gpu', 'cpu', 'memory', 'power')
 GPU_METRICS = {'gpu':'utilization_percent', 'power':'power_w', 'vram':'memory_used_mib', 'temp':'temperature_c'}
 HOST_FIELDS = ('cpu_count','cpu_percent','load_average','memory','memory_percent','root_disk',
                'uptime_seconds','gpu_percent','gpu_util_count','gpu_power_w','gpu_inventory_complete','driver_version',
-               'gpu_power_kind','gpu_generation','scope')
+               'gpu_power_kind','gpu_generation','scope','gpu_inventory_empty')
 GPU_FIELDS = ('uuid','index','name','bus_id','utilization_percent','memory_used_mib','memory_total_mib',
               'temperature_c','power_w','power_kind','power_limit_w','state','process_visibility')
 
@@ -256,17 +256,24 @@ class History:
                 raise sqlite3.DatabaseError('未生成冷归档文件')
             db.execute('UPDATE history_maintenance SET completed_at=?,running_at=NULL WHERE id=1', (slot,))
 
-    def inventory(self, machine, now):
+    def inventory(self, machine, now, track_empty=False):
         with self.connect(read=True) as db:
             since = now-WARM_MS
             last, scope, complete = self.latest_host(db, 'host_ticks', machine, since, now)
+            catalog = db.execute('SELECT id FROM history_machines WHERE identity=?', (machine,)).fetchone()
+            if track_empty:
+                empty_at = self.latest_empty(db, 'host_ticks', machine, since, now)
+                if catalog:
+                    empty_at = max(empty_at, self.latest_empty(db, 'warm_host_ticks', *catalog, since, now))
+                since = max(since, empty_at)
             newest = db.execute('SELECT MAX(at) FROM gpu_ticks WHERE machine=? AND at BETWEEN ? AND ?',
                                 (machine, since, now)).fetchone()[0]
-            catalog = db.execute('SELECT id FROM history_machines WHERE identity=?', (machine,)).fetchone()
             if catalog:
                 warm_last, warm_scope, warm_complete = self.latest_host(db, 'warm_host_ticks', *catalog, since, now)
                 if warm_last is not None and (last is None or warm_last > last):
                     last, scope, complete = warm_last, warm_scope, warm_complete
+                if track_empty and last == empty_at:
+                    return last, [], scope, True
                 warm_newest = db.execute('SELECT MAX(at) FROM warm_gpu_ticks WHERE machine=? AND at BETWEEN ? AND ?',
                                          (*catalog,since,now)).fetchone()[0]
                 if warm_newest is not None and (newest is None or warm_newest > newest):
@@ -277,10 +284,19 @@ class History:
                         """, (*catalog,warm_newest))
                     devices = [{'uuid':uuid,**json.loads(details)} for uuid,details in rows]
                     return last, devices, scope, self.inventory_complete(complete, last, warm_newest)
+            if track_empty and last == empty_at:
+                return last, [], scope, True
             rows = db.execute(
                 """SELECT metrics FROM gpu_ticks WHERE machine=? AND at=?
                    ORDER BY json_extract(metrics, '$.index')""", (machine, newest))
             return last, [json.loads(row[0]) for row in rows], scope, self.inventory_complete(complete, last, newest)
+
+    @staticmethod
+    def latest_empty(db, table, machine, since, now):
+        return db.execute(f"""
+            SELECT MAX(at) FROM {table} WHERE machine=? AND at BETWEEN ? AND ?
+            AND json_type(metrics,'$.gpu_inventory_empty')='true'
+            """, (machine,since,now)).fetchone()[0] or since-1
 
     @staticmethod
     def inventory_complete(complete, sample_at, devices_at):

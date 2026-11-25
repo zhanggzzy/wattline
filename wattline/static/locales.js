@@ -4,6 +4,13 @@ globalThis.WattlineLocales = {
   "zh-CN": {
     "label": "中文",
     "messages": {
+      "target_operating_system": "目标操作系统",
+      "omitted_gpu_processes": "另有 {count} 条已观察到的记录未展开",
+      "no_nvidia_devices_detected": "未检测到 NVIDIA GPU。",
+      "diagnostic_windows_cpu_coverage": "无法读取覆盖所有逻辑处理器的 Windows CPU 数据",
+      "diagnostic_windows_system_volume": "无法读取 Windows 系统卷容量",
+      "diagnostic_windows_identity": "无法核实 Windows 机器身份或启动时间",
+      "diagnostic_windows_host_key": "无法核实 Windows 节点的 ED25519 SSH 主机密钥",
       "view_chart_data": "查看图表数据",
       "sample_time": "样本时间",
       "expand_sidebar": "展开侧边栏",
@@ -310,6 +317,13 @@ globalThis.WattlineLocales = {
   "en": {
     "label": "English",
     "messages": {
+      "target_operating_system": "Target operating system",
+      "omitted_gpu_processes": "{count} more observed records omitted",
+      "no_nvidia_devices_detected": "No NVIDIA GPUs detected.",
+      "diagnostic_windows_cpu_coverage": "Windows CPU data covering all logical processors is unavailable",
+      "diagnostic_windows_system_volume": "Unable to read Windows system volume capacity",
+      "diagnostic_windows_identity": "Unable to verify Windows machine identity or boot time",
+      "diagnostic_windows_host_key": "Unable to verify the Windows node’s ED25519 SSH host key",
       "view_chart_data": "View chart data",
       "sample_time": "Sample time",
       "expand_sidebar": "Expand sidebar",

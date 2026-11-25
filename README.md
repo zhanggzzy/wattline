@@ -1,8 +1,8 @@
 # Wattline
 
-A standalone workbench for monitoring Linux machines and NVIDIA GPUs over SSH. The web interface supports Simplified Chinese (default) and English, with a persistent language selector in the top bar. See [localization](docs/localization.md) for preferences, fallback rules and adding languages.
+A standalone workbench for monitoring Linux and Windows machines and their NVIDIA GPUs over SSH. The web interface supports Simplified Chinese (default) and English, with a persistent language selector in the top bar. See [localization](docs/localization.md) for preferences, fallback rules and adding languages.
 
-- The background sampler collects machine health, CPU and memory, GPU utilization, VRAM, temperature and power. The GPU process view shows Linux user, workload evidence, start time and elapsed runtime at sampling when available.
+- The background sampler collects machine health, CPU and memory, GPU utilization, VRAM, temperature and power. The GPU process view shows the account, workload evidence, start time and elapsed runtime at sampling when available.
 - Enroll machines from the overview, set per-machine checks and polling intervals, drag to reorder, and remove nodes with their monitoring data.
 - Assign people from a shared directory. The machine list and details show each machine's assignees alongside monitoring information.
 - The dashboard reads 24 hours of raw history. Machine and GPU details show up to 7 days. Older samples are kept in local gzip archives.
@@ -10,7 +10,7 @@ A standalone workbench for monitoring Linux machines and NVIDIA GPUs over SSH. T
 
 ## Quick start
 
-Run Wattline on macOS or Linux with Python 3.11 or newer and OpenSSH. Targets run Linux with Python 3. NVIDIA metrics require a working nvidia-smi on the target.
+Run Wattline on macOS or Linux with Python 3.11 or newer and OpenSSH. Linux targets require Python 3. Windows targets require OpenSSH Server, Windows PowerShell and read access to CIM. NVIDIA metrics require a working nvidia-smi on the target.
 
 ~~~sh
 python3 -m venv .venv
@@ -20,9 +20,16 @@ cp config.example.json config.json
 wattline --config config.json
 ~~~
 
-Open [the local workbench](http://127.0.0.1:8090/) and choose **新增机器**. Enter an IP, hostname or SSH alias. Use the account that runs Wattline to set up public-key login and verify the server host key before enrollment.
+Open [the local workbench](http://127.0.0.1:8090/) and choose **新增机器**. Enter an IP, hostname or SSH alias and select the target operating system. Use the account that runs Wattline to set up public-key login and verify the server host key before enrollment. Windows enrollment requires a trusted ED25519 server key and pins its fingerprint.
 
 The example configuration starts with an empty machine list. Machine settings and monitoring samples are stored under the configured data directory. Relative paths are resolved from the JSON configuration file. The service binds to loopback. An optional viewer_password_file enables HTTP Basic authentication for the dashboard and its API.
+
+The registration API and file configuration accept `target_os: "linux"` or
+`target_os: "windows"`. Omitted values default to Linux, including in older
+registrations. A file-configured Windows SSH target uses its SMBIOS UUID in
+32-character lowercase hexadecimal form without hyphens for `expected_host_id`.
+To roll back to a binary released before Windows support, use a consistent
+pre-upgrade data backup if Windows registrations were created.
 
 Daily history maintenance runs at 03:00 in the configured archive_timezone (UTC by default). The [example configuration](config.example.json) can be copied and customized locally.
 
@@ -118,3 +125,17 @@ button or Escape, or use **查看此 GPU 趋势 / View this GPU’s trends** to 
 that device’s history. CPU, memory, logical CPU count/load and system facts
 remain above trends. See the [archived dashboard layout change](openspec/changes/archive/2026-11-20-add-dashboard-focus-layout/closeout.md)
 for implementation verification, independent review and integration status.
+
+Windows CPU usage uses the current formatted Windows processor counters when
+they account for every reported logical processor. This also applies to the
+first sample after reboot. System volume readings follow the volume hosting
+Windows. Load average is unavailable on Windows. Host history stays with the
+SMBIOS identity and GPU history uses the card UUID.
+
+Windows GPU process views show up to five rows per card. Rows with reported
+VRAM sort by descending VRAM, followed by unknown values. Ties use ascending
+PID. Both views show how many observed rows were omitted. The dashboard uses
+all observed records for occupancy and totals. Windows NVIDIA process
+enumeration is treated as partial, so an empty list leaves occupancy unknown.
+WDDM can leave per-process VRAM unavailable even when card-level VRAM and
+other measurements are available.

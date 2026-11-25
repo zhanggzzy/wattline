@@ -12,9 +12,10 @@
 
 ## 3. Integration verification
 
-- [ ] 3.1 Run the full suite, JavaScript and locale checks, the synthetic API browser check, OpenSpec 1.14.2 strict validation, and diff checks; record commands, outputs, base/implementation SHAs, coverage and limitations in [verification.md](verification.md), including the AN-106 and AN-110 regression evidence and the preserved AN-103 and AN-105 review records.
+- [x] 3.1 Run the full suite, JavaScript and locale checks, the synthetic API browser check, OpenSpec 1.14.2 strict validation, and diff checks; record commands, outputs, base/implementation SHAs, coverage and limitations in [verification.md](verification.md), including the AN-106 and AN-110 regression evidence and the preserved AN-103 and AN-105 review records.
+- [ ] 3.2 Record AN-109's independent review of the AN-110 correction in [verification.md](verification.md), including the reviewed commit SHA, checks, and passing outcome before archive.
 
 ## Workflow follow-up
 
-- AN-103 and AN-105 record the previous independent reviews. AN-109 independently reviews the AN-110 correction and records its outcome in verification.md.
+- [AN-103](review-an-103.md) and [AN-105](review-an-105.md) record the previous independent reviews.
 - Mika syncs the `machine-registry` delta, archives the change after review, and verifies the remote main commit.

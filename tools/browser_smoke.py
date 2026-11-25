@@ -1189,6 +1189,10 @@ def check_people_directory(browser):
             def checkbox(name):
                 return picker.get_by_role("checkbox", name=name, exact=True)
 
+            def expect_count(number):
+                expect(picker.locator("#assignee-count")).to_have_text(
+                    f"{number} selected" if page.locator("#locale-select").input_value() == "en" else f"已选 {number} 人")
+
             def save_assignments(status=200):
                 return request(assign_url, "PUT", page.locator("#assignee-save").click, status)
 
@@ -1197,7 +1201,8 @@ def check_people_directory(browser):
                 page.evaluate("(text) => navigator.clipboard.writeText(text)", text)
                 name_field.press("ControlOrMeta+v")
 
-            expect(row.locator(".machine-assignees")).to_have_text("使用者：" + initial_name)
+            expect(row.locator(".assignee-cell .person-chip")).to_have_text(initial_name)
+            expect(row.locator(".machine-identity .machine-assignees")).to_have_count(0)
             page.locator("[data-people-directory]").click()
             expect(directory_dialog.get_by_text(initial_name, exact=True)).to_be_visible()
             page.locator("#people-close").click()
@@ -1205,6 +1210,29 @@ def check_people_directory(browser):
             expect(page.locator("[data-configure-machine] + [data-edit-assignees]")).to_have_text("使用者")
             assign_button.click()
             expect(checkbox(initial_name)).to_be_checked()
+            expect_count(1)
+            if page.evaluate("document.activeElement?.type === 'checkbox'"):
+                page.keyboard.press("Tab")
+                page.keyboard.press("Shift+Tab")
+            else:
+                for _ in range(10):
+                    page.keyboard.press("Tab")
+                    if page.evaluate("document.activeElement?.type === 'checkbox'"):
+                        break
+            focused_name = page.evaluate(
+                "document.activeElement?.closest('.assignee-chip')?.querySelector('.assignee-chip-name')?.textContent")
+            assert focused_name, page.evaluate("document.activeElement?.outerHTML")
+            target = page.evaluate("""() => {
+              const chip = document.activeElement.closest('.assignee-chip');
+              const box = chip.getBoundingClientRect();
+              return {width: box.width, height: box.height, outline: getComputedStyle(chip).outlineStyle};
+            }""")
+            assert target["width"] >= 44 and target["height"] >= 44, target
+            assert target["outline"] != "none", target
+            page.keyboard.press("Space")
+            expect_count(0 if focused_name == initial_name else 2)
+            page.keyboard.press("Space")
+            expect_count(1)
             page.locator("#assignee-manage").click()
             expect(directory_dialog).to_be_visible()
             rename_url = f"/api/people/{initial_person['id']}"
@@ -1246,20 +1274,26 @@ def check_people_directory(browser):
             page.locator("#people-close").click()
             expect(checkbox(literal_name)).to_be_checked()
             expect(checkbox(long_name)).not_to_be_checked()
+            expect_count(1)
             checkbox(long_name).check()
+            expect_count(2)
             page.locator("#assignee-cancel").click()
             assert assignments() == [[literal_name], [literal_name]]
             assign_button.click()
             expect(checkbox(long_name)).not_to_be_checked()
+            expect_count(1)
+            page.screenshot(path=str(OUT / "assignee-picker-zh-CN.png"))
 
             with history.connect() as db:
                 db.execute(f"""CREATE TRIGGER fail_browser_assignment BEFORE INSERT ON machine_assignees
                            WHEN NEW.person = {long_person['id']}
                            BEGIN SELECT RAISE(ABORT, 'fixture failure'); END""")
             checkbox(long_name).check()
+            expect_count(2)
             save_assignments(503)
             expect(picker).to_be_visible()
             expect(checkbox(long_name)).to_be_checked()
+            expect_count(2)
             expect(page.locator("#assignee-error")).to_have_text("保存失败，请稍后重试。")
             expect(page.locator(".page-title .machine-assignees")).not_to_contain_text(long_name)
             assert assignments() == [[literal_name], [literal_name]]
@@ -1296,6 +1330,30 @@ def check_people_directory(browser):
                 assert box["scrollHeight"] <= box["height"], box
                 return box
 
+            def inspect_listing(cell, label, width):
+                expect(cell).to_be_visible()
+                chips = cell.locator(".person-chip")
+                expect(chips).to_have_count(2)
+                for value in (literal_name, long_name):
+                    expect(cell).to_contain_text(value)
+                assert cell.locator("b").count() == 0
+                assert label not in cell.inner_text(), cell.inner_text()
+                assert cell.get_attribute("data-label") == label.rstrip("：:"), cell.get_attribute("data-label")
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                box = cell.evaluate("""el => ({
+                  right: el.getBoundingClientRect().right, width: el.clientWidth, scrollWidth: el.scrollWidth,
+                  height: el.clientHeight, scrollHeight: el.scrollHeight,
+                })""")
+                assert box["right"] <= width and box["scrollWidth"] <= box["width"], box
+                assert box["scrollHeight"] <= box["height"], box
+                chip_boxes = chips.evaluate_all("""els => els.map(el => {
+                  const box = el.getBoundingClientRect();
+                  return {right: box.right, width: el.clientWidth, scrollWidth: el.scrollWidth};
+                })""")
+                assert all(chip["right"] <= width and chip["scrollWidth"] <= chip["width"]
+                           for chip in chip_boxes), chip_boxes
+                return box
+
             for locale, label in (("zh-CN", "使用者："), ("en", "Assignees:")):
                 page.locator("#locale-select").select_option(locale)
                 for width in (1440, 320):
@@ -1306,7 +1364,12 @@ def check_people_directory(browser):
                     if width == 320:
                         page.screenshot(path=str(OUT / f"assignees-detail-{locale}.png"), full_page=True)
                     page.locator("#breadcrumb [data-overview]").click()
-                    listing = inspect_summary(row.locator(".machine-assignees"), label, width)
+                    headers = [text.strip() for text in page.locator(".machine-table thead th").all_inner_texts()]
+                    assert headers[:3] == (["机器", "状态", "使用者"] if locale == "zh-CN"
+                                           else ["Machine", "Status", "Assignees"]), headers
+                    listing = inspect_listing(row.locator(".assignee-cell"), label, width)
+                    if width == 1440:
+                        page.locator(".machine-scroll").screenshot(path=str(OUT / f"assignees-list-desktop-{locale}.png"))
                     if width == 320:
                         page.locator(".machine-scroll").screenshot(path=str(OUT / f"assignees-list-{locale}.png"))
                     layout_results.append({"locale": locale, "width": width, "detail": detail, "list": listing})
@@ -1316,19 +1379,27 @@ def check_people_directory(browser):
             expect(picker.get_by_role("heading", name="Assignees")).to_be_visible()
             expect(checkbox(literal_name)).to_be_checked()
             expect(checkbox(long_name)).to_be_checked()
+            expect_count(2)
             checkbox(literal_name).uncheck()
+            expect_count(1)
             picker.get_by_role("button", name="People directory").click()
             expect(directory_dialog.get_by_role("heading", name="People directory")).to_be_visible()
             expect(directory_dialog.get_by_text(long_name, exact=True)).to_be_visible()
             directory_dialog.get_by_role("button", name="Close directory").click()
             expect(checkbox(literal_name)).not_to_be_checked()
+            expect_count(1)
             save_assignments()
             expect(page.locator(".page-title .machine-assignees")).not_to_contain_text(literal_name)
             assert assignments() == [[long_name], [literal_name]]
             assign_button.click()
+            expect_count(1)
             page.get_by_role("button", name="Clear selection").click()
+            expect_count(0)
             save_assignments()
             expect(page.locator(".page-title .machine-assignees")).to_have_count(0)
+            page.locator("#breadcrumb [data-overview]").click()
+            expect(row.locator(".assignee-cell .person-chip")).to_have_count(0)
+            expect(row.locator(".assignee-cell .unassigned")).to_have_text("Not assigned")
             assert assignments() == [[], [literal_name]]
             assert not errors, errors
             context.close()
@@ -1346,11 +1417,18 @@ with sync_playwright() as p:
     page.route("**/*", handle)
     page.goto("http://wattline.test")
     expect(page.locator("#host-rows tr")).to_have_count(3)
-    expect(page.locator('#host-rows tr[data-machine-row="demo-1"]')).to_contain_text("使用者：张工")
-    expect(page.locator('#host-rows tr[data-machine-row="demo-2"]')).not_to_contain_text("使用者：")
+    alpha_row = page.locator('#host-rows tr[data-machine-row="demo-1"]')
+    beta_row = page.locator('#host-rows tr[data-machine-row="demo-2"]')
+    expect(alpha_row.locator(".assignee-cell .person-chip")).to_have_text("张工")
+    expect(alpha_row.locator(".machine-identity .machine-assignees")).to_have_count(0)
+    expect(beta_row.locator(".assignee-cell .unassigned")).to_have_text("未登记")
+    headers = [text.strip() for text in page.locator(".machine-table thead th").all_inner_texts()]
+    assert headers[:3] == ["机器", "状态", "使用者"], headers
     page.locator('#locale-select').select_option('en')
-    expect(page.locator('#host-rows tr[data-machine-row="demo-1"]')).to_contain_text("Assignees: 张工")
-    expect(page.locator('#host-rows tr[data-machine-row="demo-2"]')).not_to_contain_text("Assignees:")
+    expect(alpha_row.locator(".assignee-cell .person-chip")).to_have_text("张工")
+    expect(beta_row.locator(".assignee-cell .unassigned")).to_have_text("Not assigned")
+    headers = [text.strip() for text in page.locator(".machine-table thead th").all_inner_texts()]
+    assert headers[:3] == ["Machine", "Status", "Assignees"], headers
     page.locator('#locale-select').select_option('zh-CN')
     expect(page.locator("#chart-summary")).to_contain_text("11 个有效时段")
     def assert_card_stack():
@@ -1474,15 +1552,17 @@ with sync_playwright() as p:
     page.screenshot(path=str(OUT/"detail.png"), full_page=True)
     page.get_by_role("button", name="机器总览", exact=True).first.click()
     page.wait_for_function("!state.machine && state.history?.machines?.length === 3")
-    expect(page.locator('#host-rows tr[data-machine-row="demo-1"]')).to_contain_text("使用者：张工")
+    expect(page.locator('#host-rows tr[data-machine-row="demo-1"] .assignee-cell .person-chip')).to_have_text("张工")
     assert history_queries[-1]["machine"] is None and history_queries[-1]["hours"] == 24, history_queries[-1]
     page.set_viewport_size({"width":390,"height":844})
     assert_card_stack()
     page.screenshot(path=str(OUT/"mobile.png"))
     page.locator(".machine-scroll").screenshot(path=str(OUT/"mobile-list.png"))
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-    expect(page.locator('#host-rows tr').first.locator('[data-label="内存"]')).to_be_visible()
-    expect(page.locator('#host-rows tr').first.locator('.memory-used')).to_contain_text("48.0 GiB 已用")
+    expect(page.locator('#host-rows tr[data-machine-row="demo-1"] [data-label="使用者"]')).to_be_visible()
+    expect(page.locator('#host-rows tr[data-machine-row="demo-1"] .person-chip')).to_have_text("张工")
+    expect(page.locator('#host-rows tr[data-machine-row="demo-1"] [data-label="内存"]')).to_be_visible()
+    expect(page.locator('#host-rows tr[data-machine-row="demo-1"] .memory-used')).to_contain_text("48.0 GiB 已用")
     page.get_by_role("button", name="新增机器", exact=True).click()
     page.locator('[name="host"]').fill("unreachable.invalid")
     page.get_by_role("button", name="保存", exact=True).click()

@@ -302,7 +302,7 @@ function overviewPage(hosts) {
           </div><input class="search" id="host-search" type="search" aria-label="${t('search_machines')}" placeholder="${t('search_name_or_address')}"></div>
         <p id="order-message" class="order-message" role="status" ${orderMessage ? '' : 'hidden'}>${escape(orderMessage)}</p>
         <div class="scroll machine-scroll" tabindex="0" role="region" aria-label="${t('machines')}"><table class="machine-table">
-          <thead><tr><th>${t('machine')}</th><th>${t('status')}</th><th><span class="wide-label">${t('gpu_utilization')}</span><span class="compact-label" title="${t('average_gpu_utilization')}">GPU</span></th>
+          <thead><tr><th>${t('machine')}</th><th>${t('status')}</th><th>${t('assignees')}</th><th><span class="wide-label">${t('gpu_utilization')}</span><span class="compact-label" title="${t('average_gpu_utilization')}">GPU</span></th>
           <th aria-label="${t('gpu_power')}"><span class="power-label">${t('gpu_power')}</span><span class="narrow-power-label">${t('power')}</span></th><th>CPU</th><th>${t('memory')}</th></tr></thead>
           <tbody id="host-rows"></tbody></table></div>
       </section>
@@ -314,6 +314,13 @@ function assigneeSummary(node) {
   if (!names?.length) return '';
   const list = new Intl.ListFormat(i18n.locale).format(names);
   return `<p class="machine-assignees">${escape(t('assignees_value',{names:list}))}</p>`;
+}
+
+function assigneeChips(node) {
+  const names = node.assigned_users?.map(person => person.name);
+  return names?.length
+    ? `<ul class="assignee-chips">${names.map(name => `<li class="person-chip">${escape(name)}</li>`).join('')}</ul>`
+    : `<span class="unassigned">${t('unassigned')}</span>`;
 }
 
 function drawRows(hosts) {
@@ -331,12 +338,13 @@ function drawRows(hosts) {
       <div class="machine-identity"><button type="button" class="row-open" data-host="${escape(node.id)}" aria-label="${t('view')} ${escape(node.name)}">
       ${machineGlyph(node)}<span><strong>${escape(node.name)}</strong><small class="mono">${escape(node.address)}</small>
       ${node.scope === 'container' ? `<small>${t('container_scope')}</small>` : ''}</span></button>
-      ${assigneeSummary(node)}</div></div></td>
-    <td data-label="${t('status')}">${status(node.status, machineStates[node.status])}</td>
+      </div></div></td>
+    <td class="status-cell" data-label="${t('status')}">${status(node.status, machineStates[node.status])}</td>
+    <td class="assignee-cell" data-label="${t('assignees')}">${assigneeChips(node)}</td>
     ${['gpu','power','cpu','memory'].map(key => `<td class="number-cell" data-label="${{gpu:t('gpu_utilization'),power:t('gpu_power'),cpu:'CPU',memory:t('memory')}[key]}">${field(node.id+'-'+key)}
       ${key === 'power' ? '' : meter(node.id+'-'+key, key === 'memory' ? 'memory' : '')}
       ${key === 'memory' ? `<small class="memory-used">· ${field(node.id+'-memory-used')}<span>${t('used')}</span></small>` : ''}</td>`).join('')}
-  </tr>`).join('') : `<tr><td colspan="6" class="empty">${hosts.length ? t('no_matching_machines_adjust_the_filter_or_search') : t('no_machines_yet_select_add_machine_to_start_monitoring')}</td></tr>`;
+  </tr>`).join('') : `<tr><td colspan="7" class="empty">${hosts.length ? t('no_matching_machines_adjust_the_filter_or_search') : t('no_machines_yet_select_add_machine_to_start_monitoring')}</td></tr>`;
 }
 
 function showOrderMessage(message) {
@@ -1182,6 +1190,7 @@ const assigneeCancel = byId('assignee-cancel');
 const assigneeClear = byId('assignee-clear');
 const assigneeManage = byId('assignee-manage');
 const assigneeError = byId('assignee-error');
+const assigneeCount = byId('assignee-count');
 const peopleDialog = byId('people-dialog');
 const peopleForm = byId('people-form');
 const peopleList = byId('people-list');
@@ -1215,11 +1224,16 @@ function selectedAssignees() {
   return new Set([...assigneeOptions.querySelectorAll('input:checked')].map(input => Number(input.value)));
 }
 
+function updateAssigneeCount() {
+  assigneeCount.textContent = t('selected_people_count',{count:selectedAssignees().size});
+}
+
 function renderAssigneeOptions(selected) {
   const people = directoryPeople();
   assigneeOptions.innerHTML = people.length ? people.map(person =>
-    `<label class="check-label"><input type="checkbox" value="${person.id}" ${selected.has(person.id) ? 'checked' : ''}>
-      <span>${escape(person.name)}</span></label>`).join('') : `<p>${t('no_people')}</p>`;
+    `<label class="assignee-chip"><input type="checkbox" value="${person.id}" ${selected.has(person.id) ? 'checked' : ''}>
+      <span class="assignee-chip-mark" aria-hidden="true"></span><span class="assignee-chip-name">${escape(person.name)}</span></label>`).join('') : `<p>${t('no_people')}</p>`;
+  updateAssigneeCount();
 }
 
 function openAssigneeDialog(host) {
@@ -1232,7 +1246,9 @@ function openAssigneeDialog(host) {
 
 assigneeClear.addEventListener('click', () => {
   for (const input of assigneeOptions.querySelectorAll('input:checked')) input.checked = false;
+  updateAssigneeCount();
 });
+assigneeOptions.addEventListener('change', updateAssigneeCount);
 assigneeCancel.addEventListener('click', () => assigneeDialog.close());
 assigneeManage.addEventListener('click', openPeopleDialog);
 assigneeDialog.addEventListener('cancel', event => {

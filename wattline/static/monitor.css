@@ -187,6 +187,8 @@
 .chart-error { color: var(--amber); padding: 0 15px 10px; font-size: 12px; }
 .title-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 9px 12px; }
 .page-title h1 { overflow-wrap: anywhere; min-width: 0; }
+.page-title > div { min-width: 0; max-width: 100%; }
+.page-title p { overflow-wrap: anywhere; }
 .machine-dialog { width: min(480px, calc(100% - 32px)); max-height: calc(100% - 32px); padding: 0; color: var(--ink); border: 1px solid var(--line); border-radius: 16px; }
 .machine-dialog::backdrop { background: #101f3570; }
 .machine-dialog form { display: grid; gap: 14px; padding: 20px; }

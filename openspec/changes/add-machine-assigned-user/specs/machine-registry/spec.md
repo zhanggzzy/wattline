@@ -24,11 +24,15 @@ Each registered machine SHALL support one optional assigned-user text value. The
 
 ### Requirement: Assigned user input constraints
 
-The assigned-user value SHALL be trimmed single-line text within the existing machine-settings field limits. Empty input SHALL be stored as no assigned user, and values containing control characters or exceeding the length limit SHALL be rejected without changing the stored value.
+The assigned-user value SHALL be trimmed single-line text within the existing machine-settings field limits. Empty input SHALL be stored as no assigned user. Values containing ASCII control characters, C1 control characters, Unicode line or paragraph separators, or exceeding the length limit SHALL be rejected without changing the stored value, including when such characters appear only at the start or end of the input or make up the whole input.
 
 #### Scenario: Invalid assignment rejected
-- **WHEN** a settings request supplies a multi-line or over-length assigned-user value
+- **WHEN** a settings request supplies an over-length value or a value containing a control character or line/paragraph separator at any position, including a value made only of such characters
 - **THEN** the request is rejected and the previously stored assignment remains unchanged
+
+#### Scenario: Ordinary whitespace still trims
+- **WHEN** a settings request supplies a value padded with ordinary spaces around legal text
+- **THEN** the stored assignment is the trimmed legal text
 
 ### Requirement: Persistent and machine-isolated assignment
 

@@ -1173,6 +1173,36 @@ with sync_playwright() as p:
     page.locator('[name="assigned_user"]').fill("")
     page.get_by_role("button", name="保存", exact=True).click()
     expect(page.locator(".page-title")).not_to_contain_text("使用者：")
+    # A legal 80-character unbroken value must wrap fully on the narrow detail view.
+    long_user = "LongUser" * 10
+    page.get_by_role("button", name="配置", exact=True).click()
+    page.locator('[name="assigned_user"]').fill(long_user)
+    page.get_by_role("button", name="保存", exact=True).click()
+    expect(page.locator(".page-title")).to_contain_text("使用者：" + long_user)
+    long_user_results = []
+    for locale, label in (("zh-CN", "使用者："), ("en", "Assigned user: ")):
+        page.locator('#locale-select').select_option(locale)
+        page.set_viewport_size({"width":320,"height":900})
+        expect(page.locator(".page-title")).to_contain_text(label + long_user)
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), locale
+        subtitle = page.locator(".page-title p:not(.eyebrow)").evaluate("""el => {
+          const r = el.getBoundingClientRect();
+          return {right:r.right, height:r.height, scrollWidth:el.scrollWidth,
+                  clientWidth:el.clientWidth, scrollHeight:el.scrollHeight,
+                  clientHeight:el.clientHeight};
+        }""")
+        assert subtitle["right"] <= 320, (locale, subtitle)
+        assert subtitle["scrollWidth"] <= subtitle["clientWidth"], (locale, subtitle)
+        assert subtitle["scrollHeight"] <= subtitle["clientHeight"], (locale, subtitle)
+        long_user_results.append({"locale":locale, "width":320, "subtitle":subtitle})
+        page.screenshot(path=str(OUT/f"assigned-user-long-{locale}.png"), full_page=True)
+    page.set_viewport_size({"width":1440,"height":1100})
+    page.locator('#locale-select').select_option('zh-CN')
+    page.get_by_role("button", name="配置", exact=True).click()
+    expect(page.locator('[name="assigned_user"]')).to_have_value(long_user)
+    page.locator('[name="assigned_user"]').fill("")
+    page.get_by_role("button", name="保存", exact=True).click()
+    expect(page.locator(".page-title")).not_to_contain_text("使用者：")
     page.get_by_role("button", name="机器总览", exact=True).first.click()
     page.wait_for_function("!state.machine && state.history?.machines?.length === 3")
     expect(page.locator('#host-rows tr[data-machine-row="demo-1"]')).not_to_contain_text("使用者：")
@@ -1358,6 +1388,7 @@ with sync_playwright() as p:
     print(json.dumps({"focus_layout":focus_layout,"result":"PASS", "browser":browser.version, "page_errors":errors,
                       "mutations":len(mutations), "history_queries":len(history_queries), "screenshots":26, "locales":["zh-CN","en"], "dialog_locales":dialog_locales,
                       "metric_layouts":layout_results, "focus_refreshes":focus_results,
+                      "assigned_user_long":long_user_results,
                       "unlimited_container":unlimited_container,"gpu_process_timing":gpu_process_timing,
                       "overview_regressions":overview_regressions,
                       "silhouettes":silhouettes, "rail_identity_edges":rail_identity_edges}, ensure_ascii=False))

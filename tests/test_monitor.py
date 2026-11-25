@@ -724,9 +724,18 @@ def test_assigned_user_persists_isolates_clears_and_reads_legacy_settings(tmp_pa
                           headers={'Sec-Fetch-Site':'cross-site'}).status_code == 403
         assert client.put(first_url,content='assigned_user=x',
                           headers={'Content-Type':'text/plain'}).status_code == 415
-        assert client.put(first_url,json={'assigned_user':'one\ntwo','enabled':False}).status_code == 422
         assert client.put(first_url,json={'assigned_user':'a'*81,'enabled':False}).status_code == 422
         assert client.put(first_url,json={'assigned_user':'张三','enabled':False}).json()['assigned_user'] == '张三'
+        rejected = ('first\nsecond','\nnext','next\t','\x00next','next\x7f',
+                    'first\u0085second','first\u009bsecond','first\u2028second',
+                    'first\u2029second','\n','\u0085','\u2028','\u2029')
+        for value in rejected:
+            assert client.put(first_url,json={'assigned_user':value,'enabled':False}).status_code == 422, repr(value)
+            node = {item['id']:item for item in client.get('/api/snapshot').json()['machines']}['lab-01']
+            assert node['assigned_user'] == '张三', repr(value)
+        with History(tmp_path).connect(read=True) as db:
+            persisted = json.loads(dict(db.execute('SELECT machine,settings FROM machine_settings'))[ID])
+        assert persisted['assigned_user'] == '张三'
         assert client.put(second_url,json={'assigned_user':'  李四  ','enabled':False}).json()['assigned_user'] == '李四'
         machines = {node['id']:node for node in client.get('/api/snapshot').json()['machines']}
         assert (machines['lab-01']['assigned_user'],machines['lab-02']['assigned_user']) == ('张三','李四')
@@ -735,9 +744,13 @@ def test_assigned_user_persists_isolates_clears_and_reads_legacy_settings(tmp_pa
         machines = {node['id']:node for node in client.get('/api/snapshot').json()['machines']}
         assert (machines['lab-01']['assigned_user'],machines['lab-02']['assigned_user']) == ('张三','李四')
         assert client.put('/api/machines/lab-01/settings',
-                          json={'assigned_user':'','enabled':False}).json()['assigned_user'] is None
+                          json={'assigned_user':'   ','enabled':False}).json()['assigned_user'] is None
         machines = {node['id']:node for node in client.get('/api/snapshot').json()['machines']}
         assert (machines['lab-01']['assigned_user'],machines['lab-02']['assigned_user']) == (None,'李四')
+        assert client.put('/api/machines/lab-01/settings',
+                          json={'assigned_user':'王五','enabled':False}).json()['assigned_user'] == '王五'
+        assert client.put('/api/machines/lab-01/settings',
+                          json={'assigned_user':'','enabled':False}).json()['assigned_user'] is None
         assert client.request('DELETE','/api/machines/lab-02',json={'confirm':True}).status_code == 200
         assert [node['id'] for node in client.get('/api/snapshot').json()['machines']] == ['lab-01']
 

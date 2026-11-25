@@ -34,11 +34,19 @@ class MachineSettings(AliasUpdate):
     interval_seconds: float = Field(default=10, ge=1, le=300)
     ssh_connect_timeout_seconds: int = Field(default=DEFAULT_SSH_CONNECT_TIMEOUT, ge=1, le=60)
 
+    @field_validator('assigned_user', mode='before')
+    @classmethod
+    def reject_assigned_user_control_characters(cls, value):
+        if isinstance(value, str) and any(
+            ord(char) < 32 or 0x7f <= ord(char) <= 0x9f or char in '\u2028\u2029'
+            for char in value
+        ):
+            raise ValueError('使用者须为单行文字')
+        return value
+
     @field_validator('assigned_user')
     @classmethod
-    def validate_assigned_user(cls, value):
-        if value and any(ord(char) < 32 or ord(char) == 127 for char in value):
-            raise ValueError('使用者须为单行文字')
+    def normalize_assigned_user(cls, value):
         return value or None
 
     @field_validator('checks')

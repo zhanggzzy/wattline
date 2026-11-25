@@ -302,7 +302,7 @@ dialog::backdrop { overflow: hidden; overscroll-behavior: contain; }
 .machine-dialog { max-height: calc(100dvh - 32px); box-shadow: 0 24px 90px #101f3533; }
 .machine-dialog :is(input:not([type=checkbox]), textarea) { min-height: 44px; }
 .check-label { min-height: 40px; }
-@container (max-width: 830px) {
+@container (max-width: 860px) {
   .machine-table { min-width: 0; }
   .machine-table thead { display: none; }
   .machine-table, .machine-table tbody { display: block; }

@@ -80,3 +80,41 @@
 仓库合成 Chromium 回归新增独立 `check_assignee_responsive`，覆盖双空格姓名在列表与选择器的字面显示及渲染宽度差、320/700/730/950/1024/1440 中英文布局、卡片与表格两侧的 `scrollWidth`、页面无横向溢出、四个指标字段可见，以及二分得到的切换边界。既有人员名单回归继续覆盖列位、空值、字面安全、80 字符换行、选择计数、鼠标/空格、焦点、44 px 命中区、保存取消、失败草稿、禁用态和旧单人登记迁移。
 
 范围为 Chromium、合成节点、临时 SQLite；Firefox、Safari、真实屏幕阅读器、真实节点、用户实例与部署未实测。AN-137 独立复审、Mika 的规范同步/归档和远端 `main` 核对仍待进行，活动 change 保持未归档。
+
+## AN-141 返工验证
+
+2026-11-25（Asia/Shanghai），Executor-Codex 自测。原独立结论见 [AN-134](review-an-134.md) 和 [AN-137](review-an-137.md)。本轮起点为 AN-137 被审提交 `592f19fabfca4d844406691cb7f2ba0e35822001`，实现提交为 `c6e59a7e0e2d4d475aa820de489c6efb68bc07e5`。用 `git diff 592f19f..c6e59a7` 查看实际改动。开工时 `git ls-remote origin refs/heads/main` 返回 `a738dabfd17d830be6fb8580cc6ea6570a63020d`。本轮交付为本地提交，AN-140 独立复审和 Mika 的规范同步、归档及主干整合仍待完成。
+
+### 原夹具对照
+
+| 英文场景 | 原列表可用宽度 / 滚动宽度 | 修复后可用宽度 / 滚动宽度 | 修复后内存 |
+| --- | ---: | ---: | --- |
+| 展开导航 1156 CSS px | 861 / 901 | 861 / 861 | 完整 |
+| 折叠导航 986 CSS px | 861 / 901 | 861 / 861 | 完整 |
+| 折叠导航 1024 CSS px | 897 / 901 | 897 / 897 | 完整 |
+| 折叠导航 320 CSS px | 230 / 230 | 230 / 230 | 说明在单元格内 |
+
+原夹具折叠导航 320 CSS px 时，页面滚动宽度由 346 降为 320。中英文均在展开导航 1155/1156 CSS px、折叠导航 985/986 CSS px 从卡片切到表格。仓库回归在每种导航和语言组合里逐像素往返穿过边界，额外覆盖 32 个固定视口组合。使用 80 字符机器名、长 SSH 别名、四名人员、`123456789012 W`、`18000000.0 GiB`，验证列、标签、指标文字和内存说明均在可用区域内。
+
+原夹具的三个临界表格宽度已能区分两条 Ada 姓名。仓库回归另约束列表和弹窗的姓名宽度，验证两条姓名都折成两行时，第二行 `L` 的横向位置仍不同。列表相对姓名胶囊左缘为 12.19/15.38 CSS px，弹窗相对姓名文本框左缘为 3.33/6.66 CSS px。更窄的用例也验证了字形区分、80 字符姓名、字面文本和安全渲染。原生 checkbox 的可访问名称、可见焦点、Space、选择计数、多人选择、取消后焦点返回、保存、禁用和失败草稿均在浏览器复跑中覆盖。
+
+### 命令和结果
+
+环境为 Python 3.11.17、Node 26.11.0、npm 11.20.0、Playwright 1.65.2、Chromium Headless Shell 158.0.8127.18、OpenSpec 1.14.2。`"$sr_bin"` 为 README 的 `--browser` 参数所用的本机缓存 Chromium 路径。
+
+| 命令 | 退出码 | 结果 |
+| --- | ---: | --- |
+| `.venv/bin/python -m pytest -q` | 0 | `44 passed, 1 warning in 0.89s`。既有 Starlette TestClient/httpx 弃用提示。 |
+| `node --check wattline/static/monitor.js`、`node --check wattline/static/locales.js` | 均为 0 | 无输出。 |
+| `node tools/test_i18n.cjs` | 0 | `PASS: 311 message keys, placeholder parity, references, interpolation, Intl, persistence, fallback, blocked storage` |
+| `.venv/bin/python artifacts/an141/run-browser.py tools/browser_smoke.py --browser "$sr_bin"` | 0 | README Chromium 检查，`result: PASS`，`page_errors: []`，见 `smoke.json`。 |
+| `.venv/bin/python artifacts/an141/run-browser.py artifacts/an134-repro.py "$sr_bin"` | 0 | AN-134 原夹具重放，`page_errors: []`，见 `review-an134-replay.json`。 |
+| `.venv/bin/python artifacts/an137-review/layout.py "$sr_bin" --static-ref 592f19fabfca4d844406691cb7f2ba0e35822001` | 0 | 基线测量模式，重现三个宽度的裁切和相同的可见字形。见 `review-baseline.json`。 |
+| `.venv/bin/python artifacts/an141/replay_an137.py "$sr_bin"` | 0 | 原 AN-137 数据及布局断言通过，`page_errors: []`。见 `review-replay.json`。 |
+| `OPENSPEC_TELEMETRY=0 npx --offline @fission-ai/openspec@1.14.2 validate style-machine-assignee-chips --strict` | 0 | `Change 'style-machine-assignee-chips' is valid` |
+| `OPENSPEC_TELEMETRY=0 npx --offline @fission-ai/openspec@1.14.2 validate --specs --strict` | 0 | `7 passed, 0 failed`。 |
+| `git diff --check`、`git diff --cached --check`、`git diff --check 592f19f..c6e59a7` | 均为 0 | 无输出。 |
+
+原始 JSON、截图和重放脚本位于本地忽略目录 `artifacts/an141/`。`run-browser.py` 仅把原检查的截图重定向到该目录。`replay_an137.py` 沿用原 AN-137 夹具及断言，在两次测量中都加入报告点位，更新字形测量以遍历姓名文本节点，并允许渲染器自己的两种包裹 span。原审查包保留在原位置。索引的 `AGENTS.md` 只有通用约定，工作树注入摘要与开工时一致。
+
+覆盖限于 Chromium、合成节点、临时 SQLite 以及浏览器可访问名称和焦点断言。Firefox、Safari、真实屏幕阅读器、用户实例与部署未实测。API、权限、配置、SQLite schema 和归档格式保持兼容。

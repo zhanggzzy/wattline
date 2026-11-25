@@ -35,3 +35,19 @@
 旧配置格式继续有效。API 客户端需切换到 `assigned_users` 和专用的 `/assignees` 接口。人员名按修剪后的精确拼写去重，实际同名人员可用不同的显示名称区分。升级前保留一致的数据目录备份，回退旧程序时同时恢复该备份。升级后的记录留在升级后的数据库中。
 
 验证范围为合成环境和 Chromium。Firefox、Safari、真实节点、真实历史库及实例部署均在本轮验证范围之外。AN-115 独立审查、Mika 的主干整合与远端 SHA 核对仍待进行。活动 change 保留对应待办。
+
+## AN-102 主干交付与归档
+
+2026-11-25（Asia/Shanghai），Mika 核对 [AN-115 独立审查](review-an-115.md)（Reviewer-DeepSeek，`deepseek/deepseek-flash`）和被审 HEAD `4dfc82c4b92e344e5f06e49790d8fed81a5d4b1d`。审查提交 `843087d40ecbf9558a7118661e03a04ef3b8d03e` 与被审 HEAD 的差异仅为 OpenSpec 审查报告及任务勾选。交付基线为 `04e006cfe067e56deeade6512c12003f272c142c`。
+
+| 命令 | 退出码 | 实际结果 |
+| --- | --- | --- |
+| `.venv/bin/python -m pytest -q` | 0 | 37 passed, 1 warning in 0.98s，警告为 Starlette TestClient 的 httpx 弃用提示。 |
+| `node --check wattline/static/monitor.js`、`node --check wattline/static/locales.js`、`node tools/test_i18n.cjs` | 0 | 语法通过，301 个翻译键通过。 |
+| `.venv/bin/python tools/browser_smoke.py --browser "$HOME/Library/Caches/ms-playwright/chromium_headless_shell-1254/chrome-headless-shell-mac-arm64/chrome-headless-shell"` | 0 | Chromium 158.0.8127.18，`PASS`，中英文界面，`page_errors: []`。 |
+| `git diff --check`、`git diff --cached --check`、`git diff --check 04e006c..HEAD` | 0 | 无空白错误。 |
+| `git push origin 843087d40ecbf9558a7118661e03a04ef3b8d03e:refs/heads/main`、`git ls-remote --exit-code origin refs/heads/main` | 0 | 远端 main 快进至该被审提交，回读 SHA 相同。此为任务 3.3 的核验，验收评论记录包含归档的最终远端提交。 |
+| `OPENSPEC_TELEMETRY=0 npx --offline @fission-ai/openspec@1.14.2 validate --specs --strict` | 0 | 6 项规范通过。保留 machine-registry 目的，按受审 delta 修改 4 项要求并新增 2 项。 |
+| `OPENSPEC_TELEMETRY=0 npx --offline @fission-ai/openspec@1.14.2 validate manage-machine-assignees --strict`、`OPENSPEC_TELEMETRY=0 npx --offline @fission-ai/openspec@1.14.2 archive manage-machine-assignees --yes --skip-specs` | 0 | 变更有效，6/6 任务完成。主规范已先同步，CLI 归档为 `2026-11-25-manage-machine-assignees`。 |
+
+验证使用合成数据与 Chromium。其他浏览器、真实节点、用户实例和部署级升级或回退未实测。审查结论及非阻塞边界见 AN-115 报告。

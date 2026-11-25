@@ -701,6 +701,68 @@ def test_display_alias_migrates_and_persists_under_fixed_machine_identity(tmp_pa
         assert client.put(url,json={'alias':None}).json()['name'] == '默认名称'
 
 
+def test_assigned_user_persists_isolates_clears_and_reads_legacy_settings(tmp_path):
+    first = machine('lab-01', ID, enabled=False)
+    second = machine('lab-02', 'b'*32, enabled=False)
+    config = Config(data_dir=tmp_path, machines=(first,second))
+    history = History(tmp_path)
+    history.prepare()
+    legacy = MachineSettings(enabled=False).model_dump_json(exclude={'alias','assigned_user'})
+    history.save_machine(second.history_key,None,legacy,'旧别名',{},None)
+    history.close()
+
+    def app():
+        return create_app(config)
+
+    with TestClient(app(),base_url='http://127.0.0.1') as client:
+        machines = {node['id']:node for node in client.get('/api/snapshot').json()['machines']}
+        assert machines['lab-01']['assigned_user'] is None
+        assert machines['lab-02']['assigned_user'] is None and machines['lab-02']['name'] == '旧别名'
+        first_url = '/api/machines/lab-01/settings'
+        second_url = '/api/machines/lab-02/settings'
+        assert client.put(first_url,json={'assigned_user':'cross','enabled':False},
+                          headers={'Sec-Fetch-Site':'cross-site'}).status_code == 403
+        assert client.put(first_url,content='assigned_user=x',
+                          headers={'Content-Type':'text/plain'}).status_code == 415
+        assert client.put(first_url,json={'assigned_user':'one\ntwo','enabled':False}).status_code == 422
+        assert client.put(first_url,json={'assigned_user':'a'*81,'enabled':False}).status_code == 422
+        assert client.put(first_url,json={'assigned_user':'张三','enabled':False}).json()['assigned_user'] == '张三'
+        assert client.put(second_url,json={'assigned_user':'  李四  ','enabled':False}).json()['assigned_user'] == '李四'
+        machines = {node['id']:node for node in client.get('/api/snapshot').json()['machines']}
+        assert (machines['lab-01']['assigned_user'],machines['lab-02']['assigned_user']) == ('张三','李四')
+
+    with TestClient(app(),base_url='http://127.0.0.1') as client:
+        machines = {node['id']:node for node in client.get('/api/snapshot').json()['machines']}
+        assert (machines['lab-01']['assigned_user'],machines['lab-02']['assigned_user']) == ('张三','李四')
+        assert client.put('/api/machines/lab-01/settings',
+                          json={'assigned_user':'','enabled':False}).json()['assigned_user'] is None
+        machines = {node['id']:node for node in client.get('/api/snapshot').json()['machines']}
+        assert (machines['lab-01']['assigned_user'],machines['lab-02']['assigned_user']) == (None,'李四')
+        assert client.request('DELETE','/api/machines/lab-02',json={'confirm':True}).status_code == 200
+        assert [node['id'] for node in client.get('/api/snapshot').json()['machines']] == ['lab-01']
+
+    with History(tmp_path).connect(read=True) as db:
+        stored = dict(db.execute('SELECT machine,settings FROM machine_settings'))
+        assert 'assigned_user' not in json.loads(stored[ID])
+        assert second.history_key not in stored
+
+
+def test_assigned_user_write_failure_is_reported_without_changing_the_view(tmp_path,monkeypatch):
+    host = machine(enabled=False)
+    config = Config(data_dir=tmp_path, machines=(host,))
+    service = Monitor(config)
+    url = '/api/machines/lab-01/settings'
+
+    def failed(*args, **kwargs):
+        raise OSError('fixture')
+
+    with TestClient(create_app(config,monitor=service),base_url='http://127.0.0.1') as client:
+        assert client.put(url,json={'assigned_user':'张三','enabled':False}).json()['assigned_user'] == '张三'
+        monkeypatch.setattr(service.history,'save_machine',failed)
+        assert client.put(url,json={'assigned_user':'李四','enabled':False}).status_code == 503
+        assert client.get('/api/snapshot').json()['machines'][0]['assigned_user'] == '张三'
+
+
 def test_register_and_reconfigure_with_pinned_host_and_persistent_settings(tmp_path):
     config = Config(data_dir=tmp_path, machines=(machine(),))
     commands = []
@@ -732,10 +794,12 @@ def test_register_and_reconfigure_with_pinned_host_and_persistent_settings(tmp_p
                            headers={'Sec-Fetch-Site':'cross-site'}).status_code == 403
         assert client.post('/api/machines',json={'host':'offline.invalid'}).status_code == 502
         response = client.post('/api/machines',json={'host':'2001:db8::114','ssh_user':'observer',
-            'alias':'新机器','enabled':False,'interval_seconds':60,'checks':['gpu'],'ssh_connect_timeout_seconds':10})
+            'alias':'新机器','assigned_user':'值班员','enabled':False,'interval_seconds':60,'checks':['gpu'],
+            'ssh_connect_timeout_seconds':10})
         assert response.status_code == 201
         created = response.json()
         assert created['name'] == '新机器' and created['status'] == 'disabled'
+        assert created['assigned_user'] == '值班员'
         assert 'expected_host_id' not in created
         assert client.post('/api/machines',json={'host':'different-name'}).status_code == 409
         assert all('expected_host_id' not in options for host, options in commands if host == '2001:db8::114')
@@ -743,9 +807,10 @@ def test_register_and_reconfigure_with_pinned_host_and_persistent_settings(tmp_p
         assert client.put(url,json={'checks':['processes']}).status_code == 422
         assert client.put(url,json={'ssh_connect_timeout_seconds':0}).status_code == 422
         assert client.put(url,json={'host':'other.invalid'}).status_code == 422
-        result = client.put(url,json={'alias':'新名称','enabled':True,'checks':['gpu'],'interval_seconds':90}).json()
+        result = client.put(url,json={'alias':'新名称','assigned_user':'新使用者','enabled':True,
+                                      'checks':['gpu'],'interval_seconds':90}).json()
         assert result['name'] == '新名称' and result['stale_ms'] == 107000
-        assert result['ssh_connect_timeout_seconds'] == 10
+        assert (result['assigned_user'],result['ssh_connect_timeout_seconds']) == ('新使用者',10)
         for _ in range(100):
             if any(options.get('expected_host_id') == 'b'*32 for _, options in commands):
                 break
@@ -758,7 +823,7 @@ def test_register_and_reconfigure_with_pinned_host_and_persistent_settings(tmp_p
         restored = next(node for node in client.get('/api/snapshot').json()['machines'] if node['id'] == created['id'])
         assert (restored['name'],restored['enabled'],restored['interval_seconds'],restored['checks']) == (
             '新名称',True,90,['gpu'])
-        assert restored['ssh_connect_timeout_seconds'] == 10
+        assert (restored['assigned_user'],restored['ssh_connect_timeout_seconds']) == ('新使用者',10)
 
 
 def test_duplicate_machine_id_with_verified_distinct_keys_keeps_histories_separate(tmp_path):

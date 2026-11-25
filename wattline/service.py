@@ -103,6 +103,7 @@ class Monitor:
         self.pending_removals = set()
         self.latest = {}
         self.aliases = {}
+        self.assigned_users = {}
         self.ssh_pins = {}
         self.machine_order = {}
         self.scopes = {}
@@ -120,6 +121,7 @@ class Monitor:
         removed, pending = await self.write(self.history.removal_state)
         machines = {machine.id:machine for machine in self.config.machines if machine.history_key not in removed}
         identities = {machine.history_key:machine.id for machine in machines.values()}
+        self.assigned_users = {}
         for identity, registration, settings in await self.write(self.history.machine_settings):
             if registration is not None:
                 machine = Machine.model_validate_json(registration)
@@ -129,7 +131,9 @@ class Monitor:
                 identities[identity] = machine.id
             if identity in identities:
                 id = identities[identity]
-                machines[id] = self.with_settings(machines[id], MachineSettings.model_validate_json(settings))
+                parsed = MachineSettings.model_validate_json(settings)
+                machines[id] = self.with_settings(machines[id], parsed)
+                self.set_assigned_user(identity, parsed.assigned_user)
         pins = await self.write(self.history.ssh_pins)
         order = await self.write(self.history.machine_order)
         host_keys = defaultdict(list)
@@ -221,7 +225,7 @@ class Monitor:
             raise
         self.pending_removals.add(identity)
         self.machines.pop(machine.id)
-        for index in (self.ssh_pins,self.machine_order,self.aliases):
+        for index in (self.ssh_pins,self.machine_order,self.aliases,self.assigned_users):
             index.pop(identity, None)
         for index in (self.latest,self.scopes,self.inventory,self.inventory_complete,self.last_seen,self.cpu_baseline):
             index.pop(machine.id, None)
@@ -273,13 +277,19 @@ class Monitor:
         else:
             self.aliases[identity] = alias
 
+    def set_assigned_user(self, identity, user):
+        if user is None:
+            self.assigned_users.pop(identity, None)
+        else:
+            self.assigned_users[identity] = user
+
     @staticmethod
     def default_name(machine):
         return machine.name or machine.id
 
     @staticmethod
     def with_settings(machine, settings):
-        values = settings.model_dump(exclude={'alias'})
+        values = settings.model_dump(exclude={'alias', 'assigned_user'})
         if 'ssh_connect_timeout_seconds' not in settings.model_fields_set:
             values.pop('ssh_connect_timeout_seconds')
         return machine.model_copy(update=values)
@@ -365,14 +375,16 @@ class Monitor:
                 machines = [*self.ordered_machines(), machine]
                 order = {node.history_key:index for index,node in enumerate(machines)}
             persisted = settings.model_copy(update={'ssh_connect_timeout_seconds':updated.ssh_connect_timeout_seconds})
+            stored = persisted.model_dump_json(exclude={'alias'} | ({'assigned_user'} if persisted.assigned_user is None else set()))
             await self.write(self.history.save_machine, identity, registration,
-                             persisted.model_dump_json(exclude={'alias'}), settings.alias, pins or {}, order)
+                             stored, settings.alias, pins or {}, order)
             if pins:
                 self.ssh_pins.update(pins)
                 for existing in self.machines.values():
                     if existing.history_key in pins:
                         await self.restart_sampler(existing)
             self.set_alias(identity, settings.alias)
+            self.set_assigned_user(identity, settings.assigned_user)
             if order is not None:
                 self.machine_order = order
             self.machines[machine.id] = updated
@@ -516,6 +528,7 @@ class Monitor:
         alias = self.aliases.get(machine.history_key)
         stale = round(self.stale_seconds(machine)*1000)
         view.update(id=machine.id, name=alias or default_name, alias=alias, default_name=default_name,
+                    assigned_user=self.assigned_users.get(machine.history_key),
                     scope=self.scopes.get(machine.id), address=machine.display_address, mode=machine.mode,
                     require_gpu=machine.require_gpu or 'gpu' in machine.active_checks or bool(self.inventory.get(machine.id)),
                     expected_gpu_count=machine.expected_gpu_count, gpu_inventory_complete=self.inventory_complete.get(machine.id),

@@ -4,6 +4,7 @@ A standalone workbench for monitoring Linux machines and NVIDIA GPUs over SSH. T
 
 - The background sampler collects machine health, CPU and memory, GPU utilization, VRAM, temperature and power. The GPU process view shows Linux user, workload evidence, start time and elapsed runtime at sampling when available.
 - Enroll machines from the overview, set per-machine checks and polling intervals, drag to reorder, and remove nodes with their monitoring data.
+- Record an optional assigned user for each machine in its settings. The machine list and detail show the recorded value as an operator note; it does not change GPU process accounts, ownership evidence, or SSH login settings.
 - The dashboard reads 24 hours of raw history. Machine and GPU details show up to 7 days. Older samples are kept in local gzip archives.
 - Container SSH endpoints can report their own cgroup v2 CPU and memory usage alongside visible GPU metrics.
 

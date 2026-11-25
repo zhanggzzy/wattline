@@ -193,7 +193,7 @@ function renderPage(force = false) {
   const shape = JSON.stringify([host?.id, device?.uuid, state.filter, state.syncFailed, state.snapshot?.registry_loaded,
     hosts.map(node => {
       const model = machineModel(node);
-      return [node.id, node.name, node.address, node.status, node.require_gpu, node.scope,
+      return [node.id, node.name, node.address, node.assigned_user, node.status, node.require_gpu, node.scope,
         checks(node), reason(node), model.kind, model.names];
     }),
     host?.devices, host?.metrics?.gpus.map(processShape),
@@ -303,6 +303,7 @@ function drawRows(hosts) {
         aria-keyshortcuts="ArrowUp ArrowDown" ${sortable ? '' : 'disabled'}></button>
       <button type="button" class="row-open" data-host="${escape(node.id)}" aria-label="${t('view')} ${escape(node.name)}">
       ${machineGlyph(node)}<span><strong>${escape(node.name)}</strong><small class="mono">${escape(node.address)}</small>
+      ${node.assigned_user ? `<small>${escape(t('assigned_user_value',{user:node.assigned_user}))}</small>` : ''}
       ${node.scope === 'container' ? `<small>${t('container_scope')}</small>` : ''}</span></button></div></td>
     <td data-label="${t('status')}">${status(node.status, machineStates[node.status])}</td>
     ${['gpu','power','cpu','memory'].map(key => `<td class="number-cell" data-label="${{gpu:t('gpu_utilization'),power:t('gpu_power'),cpu:'CPU',memory:t('memory')}[key]}">${field(node.id+'-'+key)}
@@ -457,6 +458,7 @@ function hostPage(host, device) {
   const active = checks(host);
   return `<section class="page-title"><div><p class="eyebrow">WATTLINE / NODE</p>${heading(host.name,statusBadge)}
     <p><span class="mono">${escape(host.address)}</span> · ${host.mode==='ssh' ? 'SSH' : t('local')}
+    ${host.assigned_user ? ' · '+escape(t('assigned_user_value',{user:host.assigned_user})) : ''}
     ${container ? t('container_scope_m077') : ''}${device ? ' · '+escape(device.name || 'NVIDIA GPU') : ''}</p></div>
     <div class="title-actions"><span class="time">${t('last_valid_sample')} ${field('host-time')}</span>
     <button type="button" class="control" data-configure-machine ${configUnavailable() ? 'disabled' : ''}>${t('configure')}</button>
@@ -1062,6 +1064,7 @@ function openMachineDialog(host) {
   fields.host.disabled = fields.ssh_user.disabled = !!host;
   fields.alias.value = host?.alias ?? '';
   fields.alias.placeholder = host?.default_name ?? t('leave_blank_for_default_name');
+  fields.assigned_user.value = host?.assigned_user ?? '';
   fields.interval_seconds.value = host?.interval_seconds ?? state.snapshot.period_ms / 1000;
   const local = host?.mode === 'local';
   byId('ssh-timeout-field').hidden = local;
@@ -1087,6 +1090,7 @@ machineForm.addEventListener('submit', async event => {
   const fields = new FormData(machineForm);
   const settings = {
     alias:fields.get('alias').trim() || null,
+    assigned_user:fields.get('assigned_user').trim() || null,
     enabled:fields.has('enabled'),
     interval_seconds:Number(fields.get('interval_seconds')),
     checks:fields.getAll('checks'),

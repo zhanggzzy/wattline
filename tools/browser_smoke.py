@@ -33,6 +33,7 @@ def node(i, status="normal"):
                 require_gpu=True, expected_gpu_count=1, scope="host", observed_at=int(time.time()*1000),
                 last_success_at=int(time.time()*1000), enabled=True, interval_seconds=5,
                 mode="ssh", checks=["gpu", "processes", "cpu", "memory", "system"],
+                assigned_user=["张工", None, None][i-1],
                 ssh_connect_timeout_seconds=5)
 machines = [node(1), node(2), node(3, "offline")]
 mode = "normal"
@@ -1033,6 +1034,12 @@ with sync_playwright() as p:
     page.route("**/*", handle)
     page.goto("http://wattline.test")
     expect(page.locator("#host-rows tr")).to_have_count(3)
+    expect(page.locator('#host-rows tr[data-machine-row="demo-1"]')).to_contain_text("使用者：张工")
+    expect(page.locator('#host-rows tr[data-machine-row="demo-2"]')).not_to_contain_text("使用者：")
+    page.locator('#locale-select').select_option('en')
+    expect(page.locator('#host-rows tr[data-machine-row="demo-1"]')).to_contain_text("Assigned user: 张工")
+    expect(page.locator('#host-rows tr[data-machine-row="demo-2"]')).not_to_contain_text("Assigned user:")
+    page.locator('#locale-select').select_option('zh-CN')
     expect(page.locator("#chart-summary")).to_contain_text("11 个有效时段")
     def assert_card_stack():
         cards = [page.locator(selector).bounding_box()
@@ -1129,6 +1136,7 @@ with sync_playwright() as p:
     expect(page.locator("#host-rows tr").first).to_have_attribute("data-machine-row", "demo-2")
     page.get_by_role("button", name="查看 训练节点 Alpha", exact=True).click()
     expect(page.get_by_role("heading", name="硬件与 GPU 进程")).to_be_visible()
+    expect(page.locator(".page-title")).to_contain_text("使用者：张工")
     expect(page.locator(".hardware-table")).to_contain_text("demo-user")
     expect(page.locator('.metric [data-value="card-memory"]')).to_have_text("38")
     expect(page.locator('.metric [data-value="memory-detail"]')).to_have_text("48.0 GiB / 128.0 GiB 已用")
@@ -1142,10 +1150,14 @@ with sync_playwright() as p:
     page.locator("#trend-chart").press("ArrowLeft")
     expect(page.locator("#chart-announcement")).to_contain_text("GPU 利用率")
     page.get_by_role("button", name="配置", exact=True).click()
+    expect(page.locator('[name="assigned_user"]')).to_have_value("张工")
     page.locator('[name="alias"]').fill("合成训练节点")
+    page.locator('[name="assigned_user"]').fill("李工 <b>值班</b>")
     page.get_by_role("button", name="保存", exact=True).click()
     expect(page.locator("#machine-dialog")).not_to_be_visible()
     expect(page.locator("#page-heading")).to_contain_text("合成训练节点")
+    expect(page.locator(".page-title")).to_contain_text("使用者：李工 <b>值班</b>")
+    assert page.locator(".page-title b").count() == 0
     page.get_by_role("button", name="移除节点", exact=True).click()
     expect(page.locator("#remove-cancel")).to_be_focused()
     page.keyboard.press("Escape")
@@ -1153,6 +1165,17 @@ with sync_playwright() as p:
     page.screenshot(path=str(OUT/"detail.png"), full_page=True)
     page.get_by_role("button", name="机器总览", exact=True).first.click()
     page.wait_for_function("!state.machine && state.history?.machines?.length === 3")
+    expect(page.locator('#host-rows tr[data-machine-row="demo-1"]')).to_contain_text("使用者：李工 <b>值班</b>")
+    assert page.locator('#host-rows tr[data-machine-row="demo-1"] b').count() == 0
+    page.get_by_role("button", name="查看 合成训练节点", exact=True).click()
+    page.get_by_role("button", name="配置", exact=True).click()
+    expect(page.locator('[name="assigned_user"]')).to_have_value("李工 <b>值班</b>")
+    page.locator('[name="assigned_user"]').fill("")
+    page.get_by_role("button", name="保存", exact=True).click()
+    expect(page.locator(".page-title")).not_to_contain_text("使用者：")
+    page.get_by_role("button", name="机器总览", exact=True).first.click()
+    page.wait_for_function("!state.machine && state.history?.machines?.length === 3")
+    expect(page.locator('#host-rows tr[data-machine-row="demo-1"]')).not_to_contain_text("使用者：")
     assert history_queries[-1]["machine"] is None and history_queries[-1]["hours"] == 24, history_queries[-1]
     page.set_viewport_size({"width":390,"height":844})
     assert_card_stack()

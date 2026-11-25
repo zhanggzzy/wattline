@@ -28,10 +28,18 @@ class AliasUpdate(BaseModel):
 
 class MachineSettings(AliasUpdate):
     alias: str | None = Field(default=None, max_length=80)
+    assigned_user: str | None = Field(default=None, max_length=80)
     enabled: bool = True
     checks: tuple[Check, ...] = Field(default=DEFAULT_CHECKS, max_length=len(DEFAULT_CHECKS))
     interval_seconds: float = Field(default=10, ge=1, le=300)
     ssh_connect_timeout_seconds: int = Field(default=DEFAULT_SSH_CONNECT_TIMEOUT, ge=1, le=60)
+
+    @field_validator('assigned_user')
+    @classmethod
+    def validate_assigned_user(cls, value):
+        if value and any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError('使用者须为单行文字')
+        return value or None
 
     @field_validator('checks')
     @classmethod

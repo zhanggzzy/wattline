@@ -11,7 +11,7 @@
 
 ## 3. Handoff
 
-- [ ] 3.1 Run the complete local checks and link reproducible evidence in `verification.md` for AN-116.
+- [x] 3.1 Run the complete local checks and link reproducible evidence in [`verification.md`](verification.md) for AN-116.
 - [ ] 3.2 Record the independent review of the implementation under AN-115 and resolve any findings.
 - [ ] 3.3 Mika integrates the reviewed result and records the verified remote SHA.
 

@@ -17,7 +17,7 @@
 | `node tools/test_i18n.cjs` | 0 | `PASS: 285 message keys, placeholder parity, references, interpolation, Intl, persistence, fallback, blocked storage` |
 | `OPENSPEC_TELEMETRY=0 npx --offline @fission-ai/openspec@1.14.2 validate add-machine-assigned-user --strict` | 0 | `Change 'add-machine-assigned-user' is valid` |
 | `git diff --check` | 0 | 无输出。 |
-| `git show --check f6a66244ce7158cdf644c1a20e9683538d3d59e4` | 0 | 无输出。 |
+| `git show --check f6a66244ce7158cdf644c1a20e9683538d3d59e4` | 0 | 无空白错误（只打印提交信息）。 |
 
 README 的合成 API 浏览器检查使用现有 Chromium 缓存：
 

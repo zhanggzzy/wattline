@@ -12,7 +12,7 @@
 
 ## 3. Integration verification
 
-- [ ] 3.1 Run the full suite, JavaScript and locale checks, the synthetic API browser check, OpenSpec 1.14.2 strict validation, and diff checks; record commands, outputs, base/implementation SHAs, coverage and limitations in [verification.md](verification.md).
+- [x] 3.1 Run the full suite, JavaScript and locale checks, the synthetic API browser check, OpenSpec 1.14.2 strict validation, and diff checks; record commands, outputs, base/implementation SHAs, coverage and limitations in [verification.md](verification.md).
 
 ## Workflow follow-up
 

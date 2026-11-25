@@ -11,7 +11,7 @@
 
 ## 3. Verification and handoff
 
-- [ ] 3.1 Run pytest, JavaScript and translation checks, the synthetic Chromium regression, OpenSpec strict validation and diff checks; record commands, outputs, commits, screenshots and limits in [`verification.md`](verification.md).
+- [x] 3.1 Run pytest, JavaScript and translation checks, the synthetic Chromium regression, OpenSpec strict validation and diff checks; record commands, outputs, commits, screenshots and limits in [`verification.md`](verification.md).
 - [ ] 3.2 Record the independent review of AN-134 and resolve its findings. Review report: pending.
 - [ ] 3.3 Mika integrates the reviewed result and records the verified remote SHA.
 

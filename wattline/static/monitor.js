@@ -193,7 +193,7 @@ function renderPage(force = false) {
   const shape = JSON.stringify([host?.id, device?.uuid, state.filter, state.syncFailed, state.snapshot?.registry_loaded,
     hosts.map(node => {
       const model = machineModel(node);
-      return [node.id, node.name, node.address, node.assigned_user, node.status, node.require_gpu, node.scope,
+      return [node.id, node.name, node.address, node.assigned_users, node.status, node.require_gpu, node.scope,
         checks(node), reason(node), model.kind, model.names];
     }),
     host?.devices, host?.metrics?.gpus.map(processShape),
@@ -276,7 +276,8 @@ function overviewPage(hosts) {
       </section>
       ${chartPanel(null,null)}
       <section class="panel machine-panel">
-        <div class="panel-head"><h2>${t('machines')}</h2><small id="row-count"></small></div>
+        <div class="panel-head"><h2>${t('machines')}</h2><small id="row-count"></small>
+          <button type="button" class="control" data-people-directory ${configUnavailable() ? 'disabled' : ''}>${t('people_directory')}</button></div>
         <div class="tools"><div class="seg" role="group" aria-label="${t('filter_by_machine_status')}">
           ${filters.map(([key,label]) => toggle(label, 'data-filter', key, state.filter === key)).join('')}
           </div><input class="search" id="host-search" type="search" aria-label="${t('search_machines')}" placeholder="${t('search_name_or_address')}"></div>
@@ -287,6 +288,13 @@ function overviewPage(hosts) {
           <tbody id="host-rows"></tbody></table></div>
       </section>
     </div>`;
+}
+
+function assigneeSummary(node) {
+  const names = node.assigned_users?.map(person => person.name);
+  if (!names?.length) return '';
+  const list = new Intl.ListFormat(i18n.locale).format(names);
+  return `<p class="machine-assignees">${escape(t('assignees_value',{names:list}))}</p>`;
 }
 
 function drawRows(hosts) {
@@ -301,10 +309,10 @@ function drawRows(hosts) {
       <button type="button" class="sort-handle" data-sort-host="${escape(node.id)}"
         aria-label="${t('reorder')} ${escape(node.name)}" title="${t('drag_to_reorder_or_use_up_and_down_arrow_keys')}"
         aria-keyshortcuts="ArrowUp ArrowDown" ${sortable ? '' : 'disabled'}></button>
-      <button type="button" class="row-open" data-host="${escape(node.id)}" aria-label="${t('view')} ${escape(node.name)}">
+      <div class="machine-identity"><button type="button" class="row-open" data-host="${escape(node.id)}" aria-label="${t('view')} ${escape(node.name)}">
       ${machineGlyph(node)}<span><strong>${escape(node.name)}</strong><small class="mono">${escape(node.address)}</small>
-      ${node.assigned_user ? `<small>${escape(t('assigned_user_value',{user:node.assigned_user}))}</small>` : ''}
-      ${node.scope === 'container' ? `<small>${t('container_scope')}</small>` : ''}</span></button></div></td>
+      ${node.scope === 'container' ? `<small>${t('container_scope')}</small>` : ''}</span></button>
+      ${assigneeSummary(node)}</div></div></td>
     <td data-label="${t('status')}">${status(node.status, machineStates[node.status])}</td>
     ${['gpu','power','cpu','memory'].map(key => `<td class="number-cell" data-label="${{gpu:t('gpu_utilization'),power:t('gpu_power'),cpu:'CPU',memory:t('memory')}[key]}">${field(node.id+'-'+key)}
       ${key === 'power' ? '' : meter(node.id+'-'+key, key === 'memory' ? 'memory' : '')}
@@ -458,10 +466,12 @@ function hostPage(host, device) {
   const active = checks(host);
   return `<section class="page-title"><div><p class="eyebrow">WATTLINE / NODE</p>${heading(host.name,statusBadge)}
     <p><span class="mono">${escape(host.address)}</span> · ${host.mode==='ssh' ? 'SSH' : t('local')}
-    ${host.assigned_user ? ' · '+escape(t('assigned_user_value',{user:host.assigned_user})) : ''}
-    ${container ? t('container_scope_m077') : ''}${device ? ' · '+escape(device.name || 'NVIDIA GPU') : ''}</p></div>
+    ${container ? t('container_scope_m077') : ''}${device ? ' · '+escape(device.name || 'NVIDIA GPU') : ''}</p>
+    ${assigneeSummary(host)}</div>
     <div class="title-actions"><span class="time">${t('last_valid_sample')} ${field('host-time')}</span>
+    <div class="machine-settings-actions">
     <button type="button" class="control" data-configure-machine ${configUnavailable() ? 'disabled' : ''}>${t('configure')}</button>
+    <button type="button" class="control" data-edit-assignees ${configUnavailable() ? 'disabled' : ''}>${t('assignees')}</button></div>
     <button type="button" class="control danger-control" data-remove-machine ${configUnavailable() ? 'disabled' : ''}>${t('remove_node')}</button></div></section>
     ${container ? `<p class="message scope-note"><strong>${t('container_scope')}</strong> ${t('cpu_and_memory_describe_this_container_gpu_metrics_cover_visible_')}</p>` : ''}
     ${host.reason || host.warnings?.length ? '<p class="message">'+escape(reason(host))+'</p>' : ''}
@@ -1044,7 +1054,6 @@ const machineFields = byId('machine-fields');
 const machineError = byId('machine-error');
 const machineCancel = byId('machine-cancel');
 const machineSave = byId('machine-save');
-const assignedUserField = machineForm.elements.assigned_user;
 const checkboxes = [...machineForm.querySelectorAll('input[name="checks"]')];
 const gpuCheck = checkboxes.find(input => input.value === 'gpu');
 const processCheck = checkboxes.find(input => input.value === 'processes');
@@ -1065,7 +1074,6 @@ function openMachineDialog(host) {
   fields.host.disabled = fields.ssh_user.disabled = !!host;
   fields.alias.value = host?.alias ?? '';
   fields.alias.placeholder = host?.default_name ?? t('leave_blank_for_default_name');
-  assignedUserField.value = host?.assigned_user ?? '';
   fields.interval_seconds.value = host?.interval_seconds ?? state.snapshot.period_ms / 1000;
   const local = host?.mode === 'local';
   byId('ssh-timeout-field').hidden = local;
@@ -1080,12 +1088,6 @@ function openMachineDialog(host) {
 }
 
 gpuCheck.addEventListener('change', updateProcessCheck);
-assignedUserField.addEventListener('keydown', event => {
-  if (event.key === 'Enter' && !event.isComposing) {
-    event.preventDefault();
-    machineForm.requestSubmit(machineSave);
-  }
-});
 machineCancel.addEventListener('click', () => machineDialog.close());
 machineDialog.addEventListener('cancel', event => {
   if (machineSave.disabled) event.preventDefault();
@@ -1097,7 +1099,6 @@ machineForm.addEventListener('submit', async event => {
   const fields = new FormData(machineForm);
   const settings = {
     alias:fields.get('alias').trim() || null,
-    assigned_user:assignedUserField.value,
     enabled:fields.has('enabled'),
     interval_seconds:Number(fields.get('interval_seconds')),
     checks:fields.getAll('checks'),
@@ -1124,10 +1125,6 @@ machineForm.addEventListener('submit', async event => {
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) {
-      if (response.status === 422 && Array.isArray(result.detail)
-          && result.detail.some(issue => issue.loc?.[1] === 'assigned_user')) {
-        throw new Error(t('assigned_user_invalid'));
-      }
       const detail = typeof result.detail === 'string' ? t('could_not_save_please_retry_later')+' '+i18n.diagnostic(result.detail)
         : response.status === 422 ? t('check_the_address_username_and_monitoring_settings') : t('could_not_save_please_retry_later');
       throw new Error(detail);
@@ -1152,6 +1149,187 @@ machineForm.addEventListener('submit', async event => {
     machineSave.disabled = machineCancel.disabled = machineFields.disabled = false;
     setButtonLabel(machineSave, 'save');
   }
+});
+
+const assigneeDialog = byId('assignee-dialog');
+const assigneeForm = byId('assignee-form');
+const assigneeOptions = byId('assignee-options');
+const assigneeSave = byId('assignee-save');
+const assigneeCancel = byId('assignee-cancel');
+const assigneeClear = byId('assignee-clear');
+const assigneeManage = byId('assignee-manage');
+const assigneeError = byId('assignee-error');
+const peopleDialog = byId('people-dialog');
+const peopleForm = byId('people-form');
+const peopleList = byId('people-list');
+const peopleName = peopleForm.elements.name;
+const peopleSave = byId('people-save');
+const peopleCancelEdit = byId('people-cancel-edit');
+const peopleClose = byId('people-close');
+const peopleError = byId('people-error');
+let editingPerson = null;
+
+function directoryPeople() {
+  return [...(state.snapshot.people ?? [])].sort((a,b) => a.name.localeCompare(b.name, i18n.locale));
+}
+
+async function peopleRequest(path, method, body, invalidKey) {
+  const response = await fetch(path, {method, headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+  if (response.status === 204) return null;
+  const result = await response.json();
+  if (response.ok) return result;
+  const known = ['person_in_use', 'person_name_taken', 'person_missing', 'assignee_machine_missing'];
+  const key = known.includes(result.detail) ? result.detail : response.status === 422 ? invalidKey : 'people_save_failed';
+  throw new Error(t(key));
+}
+
+function showPeopleError(target, error) {
+  target.textContent = error.name === 'Error' ? error.message : t('people_save_failed');
+  target.hidden = false;
+}
+
+function selectedAssignees() {
+  return new Set([...assigneeOptions.querySelectorAll('input:checked')].map(input => Number(input.value)));
+}
+
+function renderAssigneeOptions(selected) {
+  const people = directoryPeople();
+  assigneeOptions.innerHTML = people.length ? people.map(person =>
+    `<label class="check-label"><input type="checkbox" value="${person.id}" ${selected.has(person.id) ? 'checked' : ''}>
+      <span>${escape(person.name)}</span></label>`).join('') : `<p>${t('no_people')}</p>`;
+}
+
+function openAssigneeDialog(host) {
+  assigneeForm.dataset.machine = host.id;
+  byId('assignee-machine').textContent = host.name;
+  assigneeError.hidden = true;
+  renderAssigneeOptions(new Set(host.assigned_users?.map(person => person.id)));
+  assigneeDialog.showModal();
+}
+
+assigneeClear.addEventListener('click', () => {
+  for (const input of assigneeOptions.querySelectorAll('input:checked')) input.checked = false;
+});
+assigneeCancel.addEventListener('click', () => assigneeDialog.close());
+assigneeManage.addEventListener('click', openPeopleDialog);
+assigneeDialog.addEventListener('cancel', event => {
+  if (assigneeSave.disabled) event.preventDefault();
+});
+assigneeDialog.addEventListener('close', () => {
+  renderPage();
+  paint();
+});
+assigneeForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  if (assigneeSave.disabled) return;
+  const id = assigneeForm.dataset.machine;
+  const personIds = [...selectedAssignees()];
+  assigneeSave.disabled = assigneeCancel.disabled = assigneeOptions.disabled = assigneeClear.disabled = assigneeManage.disabled = true;
+  setButtonLabel(assigneeSave, 'saving');
+  assigneeError.hidden = true;
+  try {
+    const saved = await peopleRequest('/api/machines/'+encodeURIComponent(id)+'/assignees', 'PUT', {person_ids:personIds}, 'invalid_assignees');
+    snapshotRevision++;
+    const host = nodes().find(node => node.id === id);
+    if (host) host.assigned_users = saved.assigned_users;
+    assigneeDialog.close();
+  } catch (error) {
+    showPeopleError(assigneeError, error);
+  } finally {
+    assigneeSave.disabled = assigneeCancel.disabled = assigneeOptions.disabled = assigneeClear.disabled = assigneeManage.disabled = false;
+    setButtonLabel(assigneeSave, 'save');
+  }
+});
+
+function renderPeopleList() {
+  const people = directoryPeople();
+  byId('people-empty').hidden = people.length > 0;
+  peopleList.innerHTML = people.map(person =>
+    `<li><span>${escape(person.name)}</span><div class="people-actions">
+      <button type="button" class="control" data-rename-person="${person.id}" aria-label="${escape(t('rename_person_named',{name:person.name}))}">${t('rename_person')}</button>
+      <button type="button" class="control danger-control" data-remove-person="${person.id}" aria-label="${escape(t('remove_person_named',{name:person.name}))}">${t('remove_person')}</button>
+    </div></li>`).join('');
+}
+
+function editPerson(person = null) {
+  editingPerson = person?.id ?? null;
+  peopleName.value = person?.name ?? '';
+  peopleCancelEdit.hidden = !person;
+  setButtonLabel(peopleSave, person ? 'save' : 'add_person');
+  peopleError.hidden = true;
+}
+
+function openPeopleDialog() {
+  editPerson();
+  renderPeopleList();
+  peopleDialog.showModal();
+}
+
+async function changePeople(person, {remove = false} = {}) {
+  if (peopleClose.disabled) return;
+  byId('people-edit-fields').disabled = peopleClose.disabled = true;
+  for (const button of peopleList.querySelectorAll('button')) button.disabled = true;
+  peopleError.hidden = true;
+  setButtonLabel(peopleSave, 'saving');
+  try {
+    const path = person === null ? '/api/people' : '/api/people/'+person;
+    const saved = await peopleRequest(path, remove ? 'DELETE' : person === null ? 'POST' : 'PUT',
+      remove ? {} : {name:peopleName.value}, 'person_name_invalid');
+    snapshotRevision++;
+    const others = directoryPeople().filter(entry => entry.id !== person && entry.id !== saved?.id);
+    state.snapshot.people = saved ? [...others, saved] : others;
+    if (saved && person !== null) {
+      for (const host of nodes()) {
+        host.assigned_users = host.assigned_users.map(entry => entry.id === person ? saved : entry);
+      }
+    }
+    if (!remove || editingPerson === person) editPerson();
+    renderPeopleList();
+  } catch (error) {
+    showPeopleError(peopleError, error);
+    return;
+  } finally {
+    byId('people-edit-fields').disabled = peopleClose.disabled = false;
+    for (const button of peopleList.querySelectorAll('button')) button.disabled = false;
+    setButtonLabel(peopleSave, editingPerson === null ? 'add_person' : 'save');
+  }
+  peopleName.focus();
+}
+
+peopleList.addEventListener('click', event => {
+  const button = event.target.closest('button');
+  if (button?.hasAttribute('data-rename-person')) {
+    const person = directoryPeople().find(entry => entry.id === Number(button.dataset.renamePerson));
+    if (person) {
+      editPerson(person);
+      peopleName.focus();
+    }
+  } else if (button?.hasAttribute('data-remove-person')) {
+    void changePeople(Number(button.dataset.removePerson), {remove:true});
+  }
+});
+peopleName.addEventListener('keydown', event => {
+  if (event.key === 'Enter' && !event.isComposing) {
+    event.preventDefault();
+    peopleForm.requestSubmit(peopleSave);
+  }
+});
+peopleForm.addEventListener('submit', event => {
+  event.preventDefault();
+  void changePeople(editingPerson);
+});
+peopleCancelEdit.addEventListener('click', () => {
+  editPerson();
+  peopleName.focus();
+});
+peopleClose.addEventListener('click', () => peopleDialog.close());
+peopleDialog.addEventListener('cancel', event => {
+  if (peopleClose.disabled) event.preventDefault();
+});
+peopleDialog.addEventListener('close', () => {
+  if (assigneeDialog.open) renderAssigneeOptions(selectedAssignees());
+  renderPage();
+  paint();
 });
 
 const removeDialog = byId('remove-dialog');
@@ -1206,6 +1384,8 @@ document.addEventListener('click',event => {
   if (button.hasAttribute('data-overview')) openHost(null);
   else if (button.hasAttribute('data-add-machine')) openMachineDialog(null);
   else if (button.hasAttribute('data-configure-machine')) openMachineDialog(getHost());
+  else if (button.hasAttribute('data-edit-assignees')) openAssigneeDialog(getHost());
+  else if (button.hasAttribute('data-people-directory')) openPeopleDialog();
   else if (button.hasAttribute('data-remove-machine')) openRemoveDialog(getHost());
   else if (button.hasAttribute('data-focus-trends')) setTrendFocus(true);
   else if (button.hasAttribute('data-exit-focus')) setTrendFocus(false);

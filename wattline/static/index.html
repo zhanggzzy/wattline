@@ -45,10 +45,8 @@
       </div>
       <div class="form-grid">
         <label><span data-i18n="display_alias">显示别名</span><input name="alias" type="text" maxlength="80" placeholder="留空使用默认名称" data-i18n-placeholder="leave_blank_for_default_name" autocomplete="off"></label>
-        <label><span data-i18n="assigned_user">使用者</span><small><span data-i18n="optional">可选</span></small><textarea name="assigned_user" rows="1" placeholder="登记当前使用者" data-i18n-placeholder="record_current_user" autocomplete="off" enterkeyhint="done"></textarea></label>
         <label><span data-i18n="check_interval_seconds">巡检间隔（秒）</span><input name="interval_seconds" type="number" min="1" max="300" step="any" required></label>
         <label id="ssh-timeout-field"><span data-i18n="ssh_connection_timeout_seconds">SSH 连接超时（秒）</span><input name="ssh_connect_timeout_seconds" type="number" min="1" max="60" step="1" required></label>
-        <p class="full-width"><span data-i18n="assigned_user_is_an_operator_note_and_not_process_ownership_or_ssh_login">使用者为人工登记的备注，不表示进程归属或 SSH 登录用户。</span></p>
       </div>
       <label class="check-label"><input name="enabled" type="checkbox"><span data-i18n="enable_background_monitoring">启用后台巡检</span></label>
       <fieldset class="check-options">
@@ -65,6 +63,38 @@
       <button id="machine-cancel" type="button" class="control"><span data-i18n="cancel">取消</span></button>
       <button id="machine-save" type="submit" class="control primary-control" data-i18n="save">保存</button>
     </div>
+  </form>
+</dialog>
+<dialog class="machine-dialog" id="assignee-dialog" aria-labelledby="assignee-title">
+  <form id="assignee-form">
+    <h2 id="assignee-title" data-i18n="assignees">使用者</h2>
+    <p id="assignee-machine"></p>
+    <fieldset id="assignee-options" aria-label="使用者" data-i18n-aria-label="assignees"></fieldset>
+    <div class="people-actions">
+      <button id="assignee-manage" type="button" class="control" data-i18n="people_directory">人员名单</button>
+      <button id="assignee-clear" type="button" class="control" data-i18n="clear_selection">清空选择</button>
+    </div>
+    <p id="assignee-error" class="form-error" role="alert" hidden></p>
+    <div class="dialog-actions">
+      <button id="assignee-cancel" type="button" class="control" data-i18n="cancel">取消</button>
+      <button id="assignee-save" type="submit" class="control primary-control" data-i18n="save">保存</button>
+    </div>
+  </form>
+</dialog>
+<dialog class="machine-dialog" id="people-dialog" aria-labelledby="people-title">
+  <form id="people-form">
+    <h2 id="people-title" data-i18n="people_directory">人员名单</h2>
+    <ul id="people-list" class="people-list"></ul>
+    <p id="people-empty" data-i18n="no_people">名单中还没有人员。</p>
+    <fieldset id="people-edit-fields">
+      <label><span data-i18n="person_name">人员姓名</span><textarea name="name" rows="1" autocomplete="off" enterkeyhint="done"></textarea></label>
+      <div class="people-actions">
+        <button id="people-save" type="submit" class="control primary-control" data-i18n="add_person">新增人员</button>
+        <button id="people-cancel-edit" type="button" class="control" data-i18n="cancel_rename" hidden>取消改名</button>
+      </div>
+    </fieldset>
+    <p id="people-error" class="form-error" role="alert" hidden></p>
+    <div class="dialog-actions"><button id="people-close" type="button" class="control" data-i18n="close_people">关闭名单</button></div>
   </form>
 </dialog>
 <dialog class="machine-dialog" id="remove-dialog" aria-labelledby="remove-title" aria-describedby="remove-description">

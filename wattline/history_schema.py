@@ -1,7 +1,10 @@
+import json
 import sqlite3
 
+from .config import normalize_person_name
 
-SCHEMA_VERSION = 7
+
+SCHEMA_VERSION = 8
 GPU_DESCRIPTOR_FIELDS = ('index','name','bus_id','memory_total_mib')
 GPU_SAMPLE_FIELDS = ('utilization_percent','memory_used_mib','temperature_c','power_w',
                      'power_kind','power_limit_w','state','process_visibility')
@@ -52,7 +55,7 @@ def prepare_schema(db):
     version = db.execute('PRAGMA user_version').fetchone()[0]
     if version == SCHEMA_VERSION:
         return
-    if version not in (0, 2, 3, 4, 5, 6):
+    if version not in (0, 2, 3, 4, 5, 6, 7):
         raise sqlite3.DatabaseError('监控历史库版本不受支持')
     db.execute('BEGIN IMMEDIATE')
     if version == 0:
@@ -72,9 +75,39 @@ def prepare_schema(db):
     if version < 6:
         db.execute("""CREATE TABLE machine_order (
             machine TEXT PRIMARY KEY, position INTEGER NOT NULL UNIQUE) WITHOUT ROWID""")
-    db.execute('CREATE TABLE removed_config_machines (machine TEXT PRIMARY KEY) WITHOUT ROWID')
-    db.execute('CREATE TABLE pending_machine_removals (machine TEXT PRIMARY KEY) WITHOUT ROWID')
+    if version < 7:
+        db.execute('CREATE TABLE removed_config_machines (machine TEXT PRIMARY KEY) WITHOUT ROWID')
+        db.execute('CREATE TABLE pending_machine_removals (machine TEXT PRIMARY KEY) WITHOUT ROWID')
+    migrate_assignees(db)
     db.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
+
+
+def migrate_assignees(db):
+    db.execute('CREATE TABLE people (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE)')
+    db.execute("""CREATE TABLE machine_assignees (
+        machine TEXT NOT NULL, person INTEGER NOT NULL REFERENCES people(id) ON DELETE RESTRICT,
+        PRIMARY KEY(machine, person)) WITHOUT ROWID""")
+    db.execute('CREATE INDEX machine_assignees_person ON machine_assignees(person)')
+    names = {}
+    rows = db.execute('SELECT machine,settings FROM machine_settings ORDER BY machine').fetchall()
+    for identity, settings in rows:
+        try:
+            parsed = json.loads(settings)
+            if not isinstance(parsed, dict):
+                raise ValueError('旧版机器设置不是对象')
+            if 'assigned_user' not in parsed:
+                continue
+            value = parsed.pop('assigned_user')
+            name = normalize_person_name(value) if value is not None else ''
+            if len(name) > 80:
+                raise ValueError('旧版机器使用者名称过长')
+        except (ValueError, TypeError) as error:
+            raise sqlite3.DatabaseError('旧版机器使用者登记无法迁移') from error
+        if name:
+            if name not in names:
+                names[name] = db.execute('INSERT INTO people(name) VALUES (?)', (name,)).lastrowid
+            db.execute('INSERT INTO machine_assignees VALUES (?,?)', (identity, names[name]))
+        db.execute('UPDATE machine_settings SET settings=? WHERE machine=?', (json.dumps(parsed), identity))
 
 
 def pack_batch(db, cutoff, limit):

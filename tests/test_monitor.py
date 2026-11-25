@@ -672,7 +672,7 @@ def test_display_alias_migrates_and_persists_under_fixed_machine_identity(tmp_pa
         conn.execute('DROP TABLE machine_order')
         conn.execute('DROP TABLE removed_config_machines')
         conn.execute('DROP TABLE pending_machine_removals')
-        conn.execute('PRAGMA user_version=2')
+        set_legacy_registry_version(conn, 2)
     history.close()
 
     async def collect(node):
@@ -701,81 +701,148 @@ def test_display_alias_migrates_and_persists_under_fixed_machine_identity(tmp_pa
         assert client.put(url,json={'alias':None}).json()['name'] == '默认名称'
 
 
-def test_assigned_user_persists_isolates_clears_and_reads_legacy_settings(tmp_path):
-    first = machine('lab-01', ID, enabled=False)
-    second = machine('lab-02', 'b'*32, enabled=False)
-    config = Config(data_dir=tmp_path, machines=(first,second))
+def set_legacy_registry_version(db, version):
+    db.execute('DROP TABLE machine_assignees')
+    db.execute('DROP TABLE people')
+    db.execute(f'PRAGMA user_version={version}')
+
+
+def test_assignees_migrate_legacy_names_once_and_retry_atomically(tmp_path):
+    hosts = [machine(f'lab-{i}', char*32, enabled=False) for i, char in enumerate('abcde')]
+    config = Config(data_dir=tmp_path, machines=tuple(hosts[:-1]))
     history = History(tmp_path)
     history.prepare()
-    legacy = MachineSettings(enabled=False).model_dump_json(exclude={'alias','assigned_user'})
-    history.save_machine(second.history_key,None,legacy,'旧别名',{},None)
+    old = MachineSettings(enabled=False).model_dump(mode='json', exclude={'alias'})
+    rows = [dict(old, assigned_user='  张三  '), dict(old, assigned_user='张三'),
+            dict(old, assigned_user=None), old, dict(old, assigned_user='  ')]
+    for host, settings in zip(hosts, rows):
+        registration = host.model_dump_json() if host == hosts[-1] else None
+        history.save_machine(host.history_key, registration, json.dumps(settings), '旧别名', {})
+    with history.connect() as db:
+        set_legacy_registry_version(db, 7)
+        db.execute("""CREATE TRIGGER fail_migration BEFORE UPDATE OF settings ON machine_settings
+                      WHEN OLD.machine LIKE 'b%'
+                      BEGIN SELECT RAISE(ABORT, 'fixture migration failure'); END""")
     history.close()
 
-    def app():
-        return create_app(config)
+    with pytest.raises(sqlite3.IntegrityError, match='fixture migration failure'):
+        try:
+            history.prepare()
+        finally:
+            history.close()
+    with history.connect() as db:
+        assert db.execute('PRAGMA user_version').fetchone() == (7,)
+        assert not db.execute("SELECT name FROM sqlite_master WHERE name IN ('people','machine_assignees')").fetchall()
+        assert [json.loads(row[0]) for row in db.execute(
+            'SELECT settings FROM machine_settings ORDER BY machine')] == rows
+        db.execute('DROP TRIGGER fail_migration')
 
-    with TestClient(app(),base_url='http://127.0.0.1') as client:
-        machines = {node['id']:node for node in client.get('/api/snapshot').json()['machines']}
-        assert machines['lab-01']['assigned_user'] is None
-        assert machines['lab-02']['assigned_user'] is None and machines['lab-02']['name'] == '旧别名'
-        first_url = '/api/machines/lab-01/settings'
-        second_url = '/api/machines/lab-02/settings'
-        assert client.put(first_url,json={'assigned_user':'cross','enabled':False},
-                          headers={'Sec-Fetch-Site':'cross-site'}).status_code == 403
-        assert client.put(first_url,content='assigned_user=x',
-                          headers={'Content-Type':'text/plain'}).status_code == 415
-        assert client.put(first_url,json={'assigned_user':'a'*81,'enabled':False}).status_code == 422
-        assert client.put(first_url,json={'assigned_user':'张三','enabled':False}).json()['assigned_user'] == '张三'
-        rejected = ('first\nsecond','\nnext','next\r','next\t','\x00next','next\x7f',
-                    'first\u0085second','first\u009bsecond','first\u2028second',
-                    'first\u2029second','\u2028next','next\u2028','\u2029next','next\u2029',
-                    '\n','\u0085','\u2028','\u2029')
-        for value in rejected:
-            assert client.put(first_url,json={'assigned_user':value,'enabled':False}).status_code == 422, repr(value)
-            node = {item['id']:item for item in client.get('/api/snapshot').json()['machines']}['lab-01']
-            assert node['assigned_user'] == '张三', repr(value)
-            with History(tmp_path).connect(read=True) as db:
-                persisted = json.loads(db.execute('SELECT settings FROM machine_settings WHERE machine=?',
-                                                 (first.history_key,)).fetchone()[0])
-            assert persisted['assigned_user'] == '张三', repr(value)
-        assert client.put(second_url,json={'assigned_user':'  李四  ','enabled':False}).json()['assigned_user'] == '李四'
-        machines = {node['id']:node for node in client.get('/api/snapshot').json()['machines']}
-        assert (machines['lab-01']['assigned_user'],machines['lab-02']['assigned_user']) == ('张三','李四')
+    with TestClient(create_app(config), base_url='http://127.0.0.1') as client:
+        snapshot = client.get('/api/snapshot').json()
+        person, = snapshot['people']
+        assert person['name'] == '张三'
+        assert [item['assigned_users'] for item in snapshot['machines']] == [[person], [person], [], [], []]
+        assert all(item['name'] == '旧别名' for item in snapshot['machines'])
+        assert client.put('/api/machines/lab-0/assignees', json={'person_ids': []}).status_code == 200
+        assert client.put(f"/api/people/{person['id']}", json={'name': '张工'}).status_code == 200
 
-    with TestClient(app(),base_url='http://127.0.0.1') as client:
-        machines = {node['id']:node for node in client.get('/api/snapshot').json()['machines']}
-        assert (machines['lab-01']['assigned_user'],machines['lab-02']['assigned_user']) == ('张三','李四')
-        assert client.put('/api/machines/lab-01/settings',
-                          json={'assigned_user':'   ','enabled':False}).json()['assigned_user'] is None
-        machines = {node['id']:node for node in client.get('/api/snapshot').json()['machines']}
-        assert (machines['lab-01']['assigned_user'],machines['lab-02']['assigned_user']) == (None,'李四')
-        assert client.put('/api/machines/lab-01/settings',
-                          json={'assigned_user':'王五','enabled':False}).json()['assigned_user'] == '王五'
-        assert client.put('/api/machines/lab-01/settings',
-                          json={'assigned_user':'','enabled':False}).json()['assigned_user'] is None
-        assert client.request('DELETE','/api/machines/lab-02',json={'confirm':True}).status_code == 200
-        assert [node['id'] for node in client.get('/api/snapshot').json()['machines']] == ['lab-01']
-
-    with History(tmp_path).connect(read=True) as db:
-        stored = dict(db.execute('SELECT machine,settings FROM machine_settings'))
-        assert 'assigned_user' not in json.loads(stored[ID])
-        assert second.history_key not in stored
+    renamed_config = config.model_copy(update={'machines': (
+        hosts[0], hosts[1].model_copy(update={'id': 'new-public-id'}), *hosts[2:-1],
+    )})
+    with TestClient(create_app(renamed_config), base_url='http://127.0.0.1') as client:
+        snapshot = client.get('/api/snapshot').json()
+        assert snapshot['people'] == [dict(person, name='张工')]
+        hosts_by_id = {item['id']: item for item in snapshot['machines']}
+        assert hosts_by_id['lab-0']['assigned_users'] == []
+        assert hosts_by_id['new-public-id']['assigned_users'] == snapshot['people']
+    with history.connect(read=True) as db:
+        assert db.execute('PRAGMA user_version').fetchone() == (8,)
+        assert [json.loads(row[0]) for row in db.execute('SELECT settings FROM machine_settings')] == [old]*5
 
 
-def test_assigned_user_write_failure_is_reported_without_changing_the_view(tmp_path,monkeypatch):
-    host = machine(enabled=False)
-    config = Config(data_dir=tmp_path, machines=(host,))
-    service = Monitor(config)
-    url = '/api/machines/lab-01/settings'
+def test_people_directory_and_machine_assignees_persist_and_preserve_settings(tmp_path):
+    first = machine(enabled=False)
+    second = machine('lab-02', 'b'*32, enabled=False)
+    config = Config(data_dir=tmp_path, machines=(first, second))
+    directory = '/api/people'
+    assign_first = '/api/machines/lab-01/assignees'
+    assign_second = '/api/machines/lab-02/assignees'
+    settings = '/api/machines/lab-01/settings'
+    with TestClient(create_app(config), base_url='http://127.0.0.1') as client:
+        assert client.post(directory, json={'name': '跨站'}, headers={'Sec-Fetch-Site': 'cross-site'}).status_code == 403
+        assert client.put(assign_first, json={'person_ids': []}, headers={'Sec-Fetch-Site': 'cross-site'}).status_code == 403
+        assert client.post(directory, content='name=x', headers={'Content-Type': 'text/plain'}).status_code == 415
+        created = client.post(directory, json={'name': '  Ada  '})
+        assert created.status_code == 201
+        ada = created.json()
+        assert ada['name'] == 'Ada'
+        bob = client.post(directory, json={'name': 'Bob'}).json()
+        unused = client.post(directory, json={'name': 'ada'}).json()
+        assert client.post(directory, json={'name': ' Ada '}).json()['detail'] == 'person_name_taken'
+        assert client.put(f"{directory}/{ada['id']}", json={'name': 'Bob'}).json()['detail'] == 'person_name_taken'
+        rejected = ('', '  ', 'a'*81, 'first\nsecond', '\nnext', 'next\r', 'next\t', '\x00next', 'next\x7f',
+                    'first\u0085second', 'first\u009bsecond', 'first\u2028second', '\u2029next', 'next\u2029',
+                    '\n', '\u0085', '\u2028', '\u2029', None, 12)
+        for name in rejected:
+            assert client.put(f"{directory}/{ada['id']}", json={'name': name}).status_code == 422, repr(name)
 
-    def failed(*args, **kwargs):
-        raise OSError('fixture')
+        def assigned(client, path, *ids):
+            return client.put(path, json={'person_ids': ids})
 
-    with TestClient(create_app(config,monitor=service),base_url='http://127.0.0.1') as client:
-        assert client.put(url,json={'assigned_user':'张三','enabled':False}).json()['assigned_user'] == '张三'
-        monkeypatch.setattr(service.history,'save_machine',failed)
-        assert client.put(url,json={'assigned_user':'李四','enabled':False}).status_code == 503
-        assert client.get('/api/snapshot').json()['machines'][0]['assigned_user'] == '张三'
+        assert assigned(client, assign_first, bob['id'], ada['id']).json()['assigned_users'] == [ada, bob]
+        assert assigned(client, assign_second, ada['id']).json()['assigned_users'] == [ada]
+        assert assigned(client, assign_first, ada['id'], ada['id']).status_code == 422
+        assert assigned(client, assign_first, True).status_code == 422
+        assert assigned(client, assign_first, 1.0).status_code == 422
+        assert assigned(client, assign_first, 999).json()['detail'] == 'person_missing'
+        assert assigned(client, '/api/machines/missing/assignees').status_code == 404
+        assert client.request('DELETE', f"{directory}/{ada['id']}", json={}).json()['detail'] == 'person_in_use'
+        assert client.request('DELETE', f"{directory}/{unused['id']}", json={}).status_code == 204
+        assert assigned(client, assign_first, unused['id']).status_code == 409
+        another = client.post(directory, json={'name': 'New Person'}).json()
+        assert another['id'] != unused['id']
+        assert client.put(settings, json={'assigned_user': 'old API', 'enabled': False}).status_code == 422
+        updated = client.put(settings, json={'alias': '保留设置', 'enabled': False, 'interval_seconds': 60}).json()
+        assert updated['assigned_users'] == [ada, bob]
+
+    with TestClient(create_app(config), base_url='http://127.0.0.1') as client:
+        ada = client.put(f"{directory}/{ada['id']}", json={'name': 'Ada Renamed'}).json()
+        snapshot = client.get('/api/snapshot').json()
+        assert [node['assigned_users'] for node in snapshot['machines']] == [[ada, bob], [ada]]
+        assert client.request('DELETE', '/api/machines/lab-02', json={'confirm': True}).status_code == 200
+        snapshot = client.get('/api/snapshot').json()
+        assert [node['assigned_users'] for node in snapshot['machines']] == [[ada, bob]]
+        assert snapshot['people'] == [ada, bob, another]
+        updated = assigned(client, assign_first, bob['id']).json()
+        assert updated['assigned_users'] == [bob]
+        assert (updated['name'], updated['interval_seconds'], updated['enabled']) == ('保留设置', 60, False)
+        assert assigned(client, assign_first).json()['assigned_users'] == []
+        assert client.request('DELETE', f"{directory}/{ada['id']}", json={}).status_code == 204
+    assert History(tmp_path).people_and_assignees() == ({bob['id']: 'Bob', another['id']: 'New Person'}, {})
+
+
+def test_assignee_and_person_save_failure_roll_back_without_changing_snapshot(tmp_path):
+    config = Config(data_dir=tmp_path, machines=(machine(enabled=False),))
+    url = '/api/machines/lab-01/assignees'
+    history = History(tmp_path)
+    with TestClient(create_app(config), base_url='http://127.0.0.1') as client:
+        first = client.post('/api/people', json={'name': 'First'}).json()
+        second = client.post('/api/people', json={'name': 'Second'}).json()
+        assert client.put(url, json={'person_ids': [first['id']]}).status_code == 200
+        with history.connect() as db:
+            db.execute(f"""CREATE TRIGGER fail_assign BEFORE INSERT ON machine_assignees
+                       WHEN NEW.person = {second['id']}
+                       BEGIN SELECT RAISE(ABORT, 'fixture failure'); END""")
+            db.execute("""CREATE TRIGGER fail_rename BEFORE UPDATE ON people
+                       BEGIN SELECT RAISE(ABORT, 'fixture failure'); END""")
+        assert client.put(url, json={'person_ids': [second['id']]}).status_code == 503
+        assert client.put(f"/api/people/{first['id']}", json={'name': 'Changed'}).status_code == 503
+        snapshot = client.get('/api/snapshot').json()
+        assert snapshot['people'] == [first, second]
+        assert snapshot['machines'][0]['assigned_users'] == [first]
+        assert history.people_and_assignees() == (
+            {first['id']: 'First', second['id']: 'Second'}, {ID: (first['id'],)},
+        )
 
 
 def test_register_and_reconfigure_with_pinned_host_and_persistent_settings(tmp_path):
@@ -809,12 +876,15 @@ def test_register_and_reconfigure_with_pinned_host_and_persistent_settings(tmp_p
                            headers={'Sec-Fetch-Site':'cross-site'}).status_code == 403
         assert client.post('/api/machines',json={'host':'offline.invalid'}).status_code == 502
         response = client.post('/api/machines',json={'host':'2001:db8::114','ssh_user':'observer',
-            'alias':'新机器','assigned_user':'值班员','enabled':False,'interval_seconds':60,'checks':['gpu'],
+            'alias':'新机器','enabled':False,'interval_seconds':60,'checks':['gpu'],
             'ssh_connect_timeout_seconds':10})
         assert response.status_code == 201
         created = response.json()
         assert created['name'] == '新机器' and created['status'] == 'disabled'
-        assert created['assigned_user'] == '值班员'
+        assert created['assigned_users'] == []
+        person = client.post('/api/people', json={'name': '值班员'}).json()
+        assignees = f"/api/machines/{created['id']}/assignees"
+        assert client.put(assignees, json={'person_ids': [person['id']]}).json()['assigned_users'] == [person]
         assert 'expected_host_id' not in created
         assert client.post('/api/machines',json={'host':'different-name'}).status_code == 409
         assert all('expected_host_id' not in options for host, options in commands if host == '2001:db8::114')
@@ -822,10 +892,10 @@ def test_register_and_reconfigure_with_pinned_host_and_persistent_settings(tmp_p
         assert client.put(url,json={'checks':['processes']}).status_code == 422
         assert client.put(url,json={'ssh_connect_timeout_seconds':0}).status_code == 422
         assert client.put(url,json={'host':'other.invalid'}).status_code == 422
-        result = client.put(url,json={'alias':'新名称','assigned_user':'新使用者','enabled':True,
+        result = client.put(url,json={'alias':'新名称','enabled':True,
                                       'checks':['gpu'],'interval_seconds':90}).json()
         assert result['name'] == '新名称' and result['stale_ms'] == 107000
-        assert (result['assigned_user'],result['ssh_connect_timeout_seconds']) == ('新使用者',10)
+        assert (result['assigned_users'], result['ssh_connect_timeout_seconds']) == ([person], 10)
         for _ in range(100):
             if any(options.get('expected_host_id') == 'b'*32 for _, options in commands):
                 break
@@ -838,7 +908,13 @@ def test_register_and_reconfigure_with_pinned_host_and_persistent_settings(tmp_p
         restored = next(node for node in client.get('/api/snapshot').json()['machines'] if node['id'] == created['id'])
         assert (restored['name'],restored['enabled'],restored['interval_seconds'],restored['checks']) == (
             '新名称',True,90,['gpu'])
-        assert (restored['assigned_user'],restored['ssh_connect_timeout_seconds']) == ('新使用者',10)
+        assert (restored['assigned_users'], restored['ssh_connect_timeout_seconds']) == ([person], 10)
+        assert client.request('DELETE', f"/api/machines/{restored['id']}", json={'confirm': True}).status_code == 200
+        reenrolled = client.post('/api/machines', json={'host': '2001:db8::114', 'ssh_user': 'observer',
+                                 'enabled': False, 'ssh_connect_timeout_seconds': 10})
+        assert reenrolled.status_code == 201
+        assert reenrolled.json()['assigned_users'] == []
+        assert client.get('/api/snapshot').json()['people'] == [person]
 
 
 def test_duplicate_machine_id_with_verified_distinct_keys_keeps_histories_separate(tmp_path):
@@ -855,7 +931,7 @@ def test_duplicate_machine_id_with_verified_distinct_keys_keeps_histories_separa
         db.execute('DROP TABLE machine_order')
         db.execute('DROP TABLE removed_config_machines')
         db.execute('DROP TABLE pending_machine_removals')
-        db.execute('PRAGMA user_version=4')
+        set_legacy_registry_version(db, 4)
     history.close()
     keys = {'node-first':'A'*43, 'node-second':'B'*43, 'other-alias-for-first':'A'*43}
 
@@ -914,7 +990,7 @@ def test_machine_order_survives_restart_and_appends_new_machines(tmp_path):
         db.execute('DROP TABLE machine_order')
         db.execute('DROP TABLE removed_config_machines')
         db.execute('DROP TABLE pending_machine_removals')
-        db.execute('PRAGMA user_version=5')
+        set_legacy_registry_version(db, 5)
     history.close()
 
     async def identify(host,user,timeout):
@@ -981,7 +1057,7 @@ def test_remove_scrubs_all_history_and_keeps_other_archived_records(tmp_path):
     with history.connect() as db:
         db.execute('DROP TABLE removed_config_machines')
         db.execute('DROP TABLE pending_machine_removals')
-        db.execute('PRAGMA user_version=6')
+        set_legacy_registry_version(db, 6)
     history.close()
 
     with TestClient(create_app(config),base_url='http://127.0.0.1') as client:

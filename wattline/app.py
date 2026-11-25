@@ -11,7 +11,9 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .collector import CollectionError
-from .config import AliasUpdate, MachineOrder, MachineRegistration, MachineRemoval, MachineSettings
+from .config import (
+    AliasUpdate, MachineAssignees, MachineOrder, MachineRegistration, MachineRemoval, MachineSettings, PersonName,
+)
 from .history import GPU_METRICS, HOST_METRICS, OVERVIEW_METRICS, WARM_HOURS
 from .service import Monitor
 
@@ -79,6 +81,46 @@ def create_app(config, *, monitor=None):
     @app.get('/api/snapshot')
     async def snapshot():
         return service.snapshot()
+
+    async def store_person(body: PersonName, person: int | None = None):
+        try:
+            return await service.save_person(body.name, person)
+        except KeyError as error:
+            raise HTTPException(404, 'person_missing') from error
+        except CollectionError as error:
+            raise HTTPException(409, str(error)) from error
+        except (OSError, sqlite3.Error) as error:
+            raise HTTPException(503, 'people_save_failed') from error
+
+    @app.post('/api/people', status_code=201, dependencies=[Depends(same_origin_json)])
+    async def create_person(body: PersonName):
+        return await store_person(body)
+
+    @app.put('/api/people/{person}', dependencies=[Depends(same_origin_json)])
+    async def rename_person(person: int, body: PersonName):
+        return await store_person(body, person)
+
+    @app.delete('/api/people/{person}', status_code=204, dependencies=[Depends(same_origin_json)])
+    async def delete_person(person: int):
+        try:
+            await service.delete_person(person)
+        except KeyError as error:
+            raise HTTPException(404, 'person_missing') from error
+        except CollectionError as error:
+            raise HTTPException(409, str(error)) from error
+        except (OSError, sqlite3.Error) as error:
+            raise HTTPException(503, 'people_save_failed') from error
+
+    @app.put('/api/machines/{machine}/assignees', dependencies=[Depends(same_origin_json)])
+    async def configure_assignees(machine: str, body: MachineAssignees):
+        try:
+            return await service.configure_assignees(machine, body.person_ids)
+        except KeyError as error:
+            raise HTTPException(404, 'assignee_machine_missing') from error
+        except CollectionError as error:
+            raise HTTPException(409, str(error)) from error
+        except (OSError, sqlite3.Error) as error:
+            raise HTTPException(503, 'people_save_failed') from error
 
     @app.put('/api/machines/order', dependencies=[Depends(same_origin_json)])
     async def order(body: MachineOrder):

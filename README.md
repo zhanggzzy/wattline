@@ -4,7 +4,7 @@ A standalone workbench for monitoring Linux machines and NVIDIA GPUs over SSH. T
 
 - The background sampler collects machine health, CPU and memory, GPU utilization, VRAM, temperature and power. The GPU process view shows Linux user, workload evidence, start time and elapsed runtime at sampling when available.
 - Enroll machines from the overview, set per-machine checks and polling intervals, drag to reorder, and remove nodes with their monitoring data.
-- Record an optional assigned user for each machine in its settings. The machine list and detail show the recorded value as an operator note; it does not change GPU process accounts, ownership evidence, or SSH login settings.
+- Assign people from a shared directory. The machine list and details show each machine's assignees alongside monitoring information.
 - The dashboard reads 24 hours of raw history. Machine and GPU details show up to 7 days. Older samples are kept in local gzip archives.
 - Container SSH endpoints can report their own cgroup v2 CPU and memory usage alongside visible GPU metrics.
 
@@ -37,8 +37,8 @@ The frontend uses native HTML controls, CSS Grid and container queries. Current
 Chrome, Edge, Firefox and Safari are the intended browser targets; without
 container query support, the machine table remains horizontally scrollable.
 
-Run the isolated browser checks with synthetic fixtures. The assigned-user
-settings check also uses the in-process API and temporary SQLite. No HTTP
+Run the isolated browser checks with synthetic fixtures. The people directory
+and assignees check also uses the in-process API and temporary SQLite. No HTTP
 server, collection, or SSH connection is started:
 
 ~~~sh
@@ -67,6 +67,23 @@ Product maintenance delivers reviewed main commits. Instance updates remain a
 separate deployment session requested by the user.
 
 ## Dashboard workspace
+
+On a machine's detail page, choose **使用者 / Assignees** beside **配置 /
+Configure**. Select one or more people, then save. Clear the selection and save
+to leave the machine unassigned. Open **人员名单 / People directory** from the
+machine list or the assignee editor to add or rename people. Clear a person's
+machine associations before removing them from the directory. Assignments are
+operator notes. GPU process accounts, ownership evidence, and SSH login settings
+continue to use their existing sources.
+
+Startup imports existing single assignees automatically, reusing one directory
+entry for each exact trimmed name. Before upgrading an existing instance, keep
+a consistent backup of its data directory. Reverting to the older binary also
+requires restoring that backup. Changes made after the backup stay in the
+upgraded database. API clients should read `machines[].assigned_users` and
+`people` from the snapshot and write `person_ids` to
+`PUT /api/machines/{id}/assignees`. This replaces the previous
+`assigned_user` field on the snapshot and settings API.
 
 Use the arrow beside Wattline to collapse navigation into a narrow
 machine-identity rail. Each machine keeps a monochrome model silhouette: B300 as

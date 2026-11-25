@@ -14,8 +14,9 @@ from fastapi.testclient import TestClient
 from playwright.sync_api import sync_playwright, expect
 
 from wattline.app import create_app
-from wattline.config import Config, Machine
+from wattline.config import Config, Machine, MachineSettings
 from wattline.history import History
+from wattline.service import Monitor
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "artifacts"
@@ -39,7 +40,7 @@ def node(i, status="normal"):
                 require_gpu=True, expected_gpu_count=1, scope="host", observed_at=int(time.time()*1000),
                 last_success_at=int(time.time()*1000), enabled=True, interval_seconds=5,
                 mode="ssh", checks=["gpu", "processes", "cpu", "memory", "system"],
-                assigned_user=["张工", None, None][i-1],
+                assigned_users=[{"id": 1, "name": "张工"}] if i == 1 else [],
                 ssh_connect_timeout_seconds=5)
 machines = [node(1), node(2), node(3, "offline")]
 mode = "normal"
@@ -1032,28 +1033,42 @@ def check_rail_identity_edges(browser):
     return {'transitions':transitions, 'aliases':aliases, 'page_errors':errors}
 
 
-def check_assigned_user_settings(browser):
-    """Send dialog saves to the real API with a disabled fixture and temporary SQLite."""
-    host = Machine(id="assignment-test", name="Assignment fixture", mode="ssh",
-                   ssh_alias="assignment.invalid", expected_host_id="a" * 32, enabled=False)
+def check_people_directory(browser):
+    """Exercise the real API and old registry using a browser without a listening server."""
+    first = Machine(id="assignment-test", name="Assignment fixture", mode="ssh",
+                    ssh_alias="assignment.invalid", expected_host_id="a" * 32)
+    second = Machine(id="second-test", name="Second fixture", mode="ssh",
+                     ssh_alias="second.invalid", expected_host_id="b" * 32, enabled=False)
     origin = "http://localhost"
-    settings_url = f"/api/machines/{host.id}/settings"
-    initial_user = "原登记"
-    rejected_statuses = []
+    assign_url = f"/api/machines/{first.id}/assignees"
+    initial_name = "原登记"
+    literal_name = "李工 <b>值班</b>"
+    long_name = "LongUser" * 10
+    layout_results = []
     with TemporaryDirectory() as directory:
         data_dir = Path(directory)
-        app = create_app(Config(data_dir=data_dir, machines=(host,)))
+        history = History(data_dir)
+        history.prepare()
+        for host in (first, second):
+            old = MachineSettings(enabled=host.enabled).model_dump(mode="json", exclude={"alias"})
+            history.save_machine(host.history_key, None, json.dumps(dict(old, assigned_user=initial_name)), None, {})
+        with history.connect() as db:
+            db.execute("DROP TABLE machine_assignees")
+            db.execute("DROP TABLE people")
+            db.execute("PRAGMA user_version=7")
+        history.close()
+
+        config = Config(data_dir=data_dir, machines=(first, second))
+        monitor = Monitor(config)
+        monitor.start_sampler = lambda _machine: None
+        monitor.latest[first.id] = dict(status="offline", reason="synthetic offline", metrics=None)
+        app = create_app(config, monitor=monitor)
         with TestClient(app, base_url=origin) as client:
-            seeded = client.put(settings_url, json={"assigned_user": initial_user, "enabled": False})
-            assert seeded.status_code == 200, seeded.text
+            def snapshot():
+                return client.get("/api/snapshot").json()
 
-            def persisted_settings():
-                with History(data_dir).connect(read=True) as db:
-                    return db.execute("SELECT settings FROM machine_settings WHERE machine = ?",
-                                      (host.history_key,)).fetchone()[0]
-
-            def snapshot_user():
-                return client.get("/api/snapshot").json()["machines"][0]["assigned_user"]
+            def assignments():
+                return [[person["name"] for person in machine["assigned_users"]] for machine in snapshot()["machines"]]
 
             def forward(route):
                 request = route.request
@@ -1067,93 +1082,186 @@ def check_assigned_user_settings(browser):
                 route.fulfill(status=response.status_code, body=response.content,
                               content_type=response.headers.get("content-type"))
 
-            original_settings = persisted_settings()
-            context = browser.new_context(permissions=["clipboard-read", "clipboard-write"])
+            initial_person, = snapshot()["people"]
+            assert assignments() == [[initial_name], [initial_name]]
+            assert [node["status"] for node in snapshot()["machines"]] == ["offline", "disabled"]
+            context = browser.new_context(permissions=["clipboard-read", "clipboard-write"],
+                                          viewport={"width": 1440, "height": 1000})
             page = context.new_page()
             errors = []
             page.on("pageerror", lambda error: errors.append(str(error)))
             page.route("**/*", forward)
             page.goto(origin)
-            page.get_by_role("button", name="查看 Assignment fixture", exact=True).click()
-            page.get_by_role("button", name="配置", exact=True).click()
-            dialog = page.locator("#machine-dialog")
-            error = page.locator("#machine-error")
-            field = dialog.locator('[name="assigned_user"]')
-            expect(field).to_have_value(initial_user)
+            config_button = page.locator("[data-configure-machine]")
+            assign_button = page.locator("[data-edit-assignees]")
+            picker = page.locator("#assignee-dialog")
+            directory_dialog = page.locator("#people-dialog")
+            people_error = page.locator("#people-error")
+            name_field = directory_dialog.locator("textarea")
+            row = page.locator(f'[data-machine-row="{first.id}"]')
 
-            def paste(value):
-                page.evaluate("(text) => navigator.clipboard.writeText(text)", value)
-                field.press("ControlOrMeta+v")
-
-            def save(expected_value, expected_status, *, enter=False):
-                with page.expect_response(lambda response: response.url == origin + settings_url
-                                          and response.request.method == "PUT") as pending:
-                    if enter:
-                        field.press("Enter")
-                    else:
-                        page.get_by_role("button", name="保存", exact=True).click()
+            def request(path, method, action, status):
+                with page.expect_response(lambda response: response.url == origin + path
+                                          and response.request.method == method) as pending:
+                    action()
                 response = pending.value
-                sent = response.request.post_data_json["assigned_user"]
-                assert (sent, response.status) == (expected_value, expected_status), (
-                    repr(sent), response.status, repr(expected_value), expected_status
-                )
+                assert response.status == status, (path, response.status, response.text())
+                return response
 
-            cases = [
-                ("\u2028", "\u2028", False), ("\u2029", "\u2029", False),
-                ("\u2028next", "\u2028next", True), ("next\u2029", "next\u2029", True),
-                ("first\u2028second\u2029third", "first\u2028second\u2029third", True),
-                ("\n", "\n", True), ("\r", "\n", True), ("first\r\nsecond", "first\nsecond", True),
-                ("next\t", "next\t", True), ("next\u0085", "next\u0085", True),
-                ("a" * 80 + "\u2028", "a" * 80 + "\u2028", True),
-                ("a" * 81, "a" * 81, True),
+            def checkbox(name):
+                return picker.get_by_role("checkbox", name=name, exact=True)
+
+            def save_assignments(status=200):
+                return request(assign_url, "PUT", page.locator("#assignee-save").click, status)
+
+            def paste(text):
+                name_field.fill("")
+                page.evaluate("(text) => navigator.clipboard.writeText(text)", text)
+                name_field.press("ControlOrMeta+v")
+
+            expect(row.locator(".machine-assignees")).to_have_text("使用者：" + initial_name)
+            page.locator("[data-people-directory]").click()
+            expect(directory_dialog.get_by_text(initial_name, exact=True)).to_be_visible()
+            page.locator("#people-close").click()
+            row.locator(".row-open").click()
+            expect(page.locator("[data-configure-machine] + [data-edit-assignees]")).to_have_text("使用者")
+            assign_button.click()
+            expect(checkbox(initial_name)).to_be_checked()
+            page.locator("#assignee-manage").click()
+            expect(directory_dialog).to_be_visible()
+            rename_url = f"/api/people/{initial_person['id']}"
+            directory_dialog.get_by_role("button", name=f"为 {initial_name} 改名").click()
+            expect(name_field).to_have_value(initial_name)
+
+            rejected = [
+                ("\u2028", "\u2028"), ("\u2029", "\u2029"),
+                ("\u2028next", "\u2028next"), ("next\u2029", "next\u2029"),
+                ("first\u2028second\u2029third", "first\u2028second\u2029third"),
+                ("\n", "\n"), ("\r", "\n"), ("first\r\nsecond", "first\nsecond"),
+                ("next\t", "next\t"), ("next\u0085", "next\u0085"),
+                ("a" * 80 + "\u2028", "a" * 80 + "\u2028"), ("a" * 81, "a" * 81),
             ]
-            for raw, draft, via_clipboard in cases:
-                field.fill("")
-                if via_clipboard:
-                    paste(raw)
-                else:
-                    page.keyboard.insert_text(raw)
-                expect(field).to_have_value(draft)
-                save(draft, 422)
-                expect(error).to_be_visible()
-                expect(error).to_have_text("请填写不超过 80 个字符的单行使用者名称。")
-                expect(dialog).to_be_visible()
-                expect(field).to_have_value(draft)
-                assert snapshot_user() == initial_user, repr(raw)
-                assert persisted_settings() == original_settings, repr(raw)
-                rejected_statuses.append(422)
+            for raw, draft in rejected:
+                paste(raw)
+                expect(name_field).to_have_value(draft)
+                response = request(rename_url, "PUT", page.locator("#people-save").click, 422)
+                assert response.request.post_data_json["name"] == draft
+                expect(people_error).to_have_text("请填写不超过 80 个字符的单行姓名。")
+                expect(name_field).to_have_value(draft)
+                assert assignments() == [[initial_name], [initial_name]]
 
-            updated_user = "临时值班 " + "a" * 75
-            for empty_draft in ("   ", ""):
-                field.fill("")
-                padded_user = "  " + updated_user + "  "
-                paste(padded_user)
-                save(padded_user, 200, enter=True)
-                expect(dialog).not_to_be_visible()
-                expect(page.locator(".page-title")).to_contain_text("使用者：" + updated_user)
-                assert page.evaluate("state.snapshot.machines[0].assigned_user") == updated_user
-                assert snapshot_user() == json.loads(persisted_settings())["assigned_user"] == updated_user
+            paste("  " + literal_name + "  ")
+            request(rename_url, "PUT", lambda: name_field.press("Enter"), 200)
+            expect(directory_dialog.get_by_text(literal_name, exact=True)).to_be_visible()
+            assert directory_dialog.locator("b").count() == 0
+            assert assignments() == [[literal_name], [literal_name]]
+            name_field.fill(long_name)
+            long_person = request("/api/people", "POST", page.locator("#people-save").click, 201).json()
+            name_field.fill("可移除人员")
+            unused_person = request("/api/people", "POST", page.locator("#people-save").click, 201).json()
+            request(rename_url, "DELETE", directory_dialog.get_by_role("button", name=f"移除 {literal_name}").click, 409)
+            expect(people_error).to_contain_text("解除关联")
+            assert assignments() == [[literal_name], [literal_name]]
+            request(f"/api/people/{unused_person['id']}", "DELETE",
+                    directory_dialog.get_by_role("button", name="移除 可移除人员").click, 204)
+            expect(directory_dialog.get_by_text("可移除人员", exact=True)).to_have_count(0)
+            page.locator("#people-close").click()
+            expect(checkbox(literal_name)).to_be_checked()
+            expect(checkbox(long_name)).not_to_be_checked()
+            checkbox(long_name).check()
+            page.locator("#assignee-cancel").click()
+            assert assignments() == [[literal_name], [literal_name]]
+            assign_button.click()
+            expect(checkbox(long_name)).not_to_be_checked()
 
-                page.get_by_role("button", name="配置", exact=True).click()
-                expect(field).to_have_value(updated_user)
-                expect(error).not_to_be_visible()
-                field.fill(empty_draft)
-                save(empty_draft, 200)
-                expect(dialog).not_to_be_visible()
-                expect(page.locator(".page-title")).not_to_contain_text("使用者：")
-                assert snapshot_user() is None
-                assert "assigned_user" not in json.loads(persisted_settings())
-                page.get_by_role("button", name="配置", exact=True).click()
-                expect(field).to_have_value("")
+            with history.connect() as db:
+                db.execute(f"""CREATE TRIGGER fail_browser_assignment BEFORE INSERT ON machine_assignees
+                           WHEN NEW.person = {long_person['id']}
+                           BEGIN SELECT RAISE(ABORT, 'fixture failure'); END""")
+            checkbox(long_name).check()
+            save_assignments(503)
+            expect(picker).to_be_visible()
+            expect(checkbox(long_name)).to_be_checked()
+            expect(page.locator("#assignee-error")).to_have_text("保存失败，请稍后重试。")
+            expect(page.locator(".page-title .machine-assignees")).not_to_contain_text(long_name)
+            assert assignments() == [[literal_name], [literal_name]]
+            with history.connect() as db:
+                assert history.people_and_assignees()[1] == {
+                    first.history_key: (initial_person["id"],), second.history_key: (initial_person["id"],)
+                }
+                db.execute("DROP TRIGGER fail_browser_assignment")
+            save_assignments()
+            expect(picker).not_to_be_visible()
+            assert set(assignments()[0]) == {literal_name, long_name}
+            assert assignments()[1] == [literal_name]
+
+            config_button.click()
+            expect(page.locator("#machine-dialog textarea")).to_have_count(0)
+            page.locator("#machine-dialog input[name=alias]").fill("Renamed fixture")
+            settings = request(f"/api/machines/{first.id}/settings", "PUT", page.locator("#machine-save").click, 200)
+            assert "assigned_user" not in settings.request.post_data_json
+            expect(page.locator("#page-heading")).to_have_text("Renamed fixture")
+            assert set(assignments()[0]) == {literal_name, long_name}
+
+            def inspect_summary(summary, label, width):
+                expect(summary).to_be_visible()
+                for value in (label, literal_name, long_name):
+                    expect(summary).to_contain_text(value)
+                expect(summary).to_contain_text(long_name + ("和" if label == "使用者：" else " and ") + literal_name)
+                assert summary.locator("b").count() == 0
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                box = summary.evaluate("""el => ({
+                  right: el.getBoundingClientRect().right, width: el.clientWidth, scrollWidth: el.scrollWidth,
+                  height: el.clientHeight, scrollHeight: el.scrollHeight,
+                })""")
+                assert box["right"] <= width and box["scrollWidth"] <= box["width"], box
+                assert box["scrollHeight"] <= box["height"], box
+                return box
+
+            for locale, label in (("zh-CN", "使用者："), ("en", "Assignees:")):
+                page.locator("#locale-select").select_option(locale)
+                for width in (1440, 320):
+                    page.set_viewport_size({"width": width, "height": 900})
+                    detail = inspect_summary(page.locator(".page-title .machine-assignees"), label, width)
+                    controls = config_button.bounding_box(), assign_button.bounding_box()
+                    assert controls[0]["y"] == controls[1]["y"] and controls[0]["x"] < controls[1]["x"], controls
+                    if width == 320:
+                        page.screenshot(path=str(OUT / f"assignees-detail-{locale}.png"), full_page=True)
+                    page.locator("#breadcrumb [data-overview]").click()
+                    listing = inspect_summary(row.locator(".machine-assignees"), label, width)
+                    if width == 320:
+                        page.locator(".machine-scroll").screenshot(path=str(OUT / f"assignees-list-{locale}.png"))
+                    layout_results.append({"locale": locale, "width": width, "detail": detail, "list": listing})
+                    row.locator(".row-open").click()
+
+            assign_button.click()
+            expect(picker.get_by_role("heading", name="Assignees")).to_be_visible()
+            expect(checkbox(literal_name)).to_be_checked()
+            expect(checkbox(long_name)).to_be_checked()
+            checkbox(literal_name).uncheck()
+            picker.get_by_role("button", name="People directory").click()
+            expect(directory_dialog.get_by_role("heading", name="People directory")).to_be_visible()
+            expect(directory_dialog.get_by_text(long_name, exact=True)).to_be_visible()
+            directory_dialog.get_by_role("button", name="Close directory").click()
+            expect(checkbox(literal_name)).not_to_be_checked()
+            save_assignments()
+            expect(page.locator(".page-title .machine-assignees")).not_to_contain_text(literal_name)
+            assert assignments() == [[long_name], [literal_name]]
+            assign_button.click()
+            page.get_by_role("button", name="Clear selection").click()
+            save_assignments()
+            expect(page.locator(".page-title .machine-assignees")).to_have_count(0)
+            assert assignments() == [[], [literal_name]]
             assert not errors, errors
             context.close()
-    return {"rejected_statuses": rejected_statuses, "drafts_and_sqlite_preserved": True,
-            "trimmed_enter_save": True, "whitespace_and_explicit_clear": True}
+    return {"legacy_migration": True, "offline_assignment": True, "invalid_name_submissions": len(rejected),
+            "assignment_write_failure": 503, "linked_person_removal": 409, "layouts": layout_results,
+            "directory_rename_add_remove": True, "cancel_multi_select_deselect_clear": True}
 
 
 with sync_playwright() as p:
     browser = p.chromium.launch(**({"executable_path":args.browser} if args.browser else {}))
-    assigned_user_settings = check_assigned_user_settings(browser)
+    people_directory = check_people_directory(browser)
     page = browser.new_page(viewport={"width":1440,"height":1100}, device_scale_factor=1)
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
@@ -1163,8 +1271,8 @@ with sync_playwright() as p:
     expect(page.locator('#host-rows tr[data-machine-row="demo-1"]')).to_contain_text("使用者：张工")
     expect(page.locator('#host-rows tr[data-machine-row="demo-2"]')).not_to_contain_text("使用者：")
     page.locator('#locale-select').select_option('en')
-    expect(page.locator('#host-rows tr[data-machine-row="demo-1"]')).to_contain_text("Assigned user: 张工")
-    expect(page.locator('#host-rows tr[data-machine-row="demo-2"]')).not_to_contain_text("Assigned user:")
+    expect(page.locator('#host-rows tr[data-machine-row="demo-1"]')).to_contain_text("Assignees: 张工")
+    expect(page.locator('#host-rows tr[data-machine-row="demo-2"]')).not_to_contain_text("Assignees:")
     page.locator('#locale-select').select_option('zh-CN')
     expect(page.locator("#chart-summary")).to_contain_text("11 个有效时段")
     def assert_card_stack():
@@ -1276,14 +1384,11 @@ with sync_playwright() as p:
     page.locator("#trend-chart").press("ArrowLeft")
     expect(page.locator("#chart-announcement")).to_contain_text("GPU 利用率")
     page.get_by_role("button", name="配置", exact=True).click()
-    expect(page.locator('[name="assigned_user"]')).to_have_value("张工")
     page.locator('[name="alias"]').fill("合成训练节点")
-    page.locator('[name="assigned_user"]').fill("李工 <b>值班</b>")
     page.get_by_role("button", name="保存", exact=True).click()
     expect(page.locator("#machine-dialog")).not_to_be_visible()
     expect(page.locator("#page-heading")).to_contain_text("合成训练节点")
-    expect(page.locator(".page-title")).to_contain_text("使用者：李工 <b>值班</b>")
-    assert page.locator(".page-title b").count() == 0
+    expect(page.locator(".page-title")).to_contain_text("使用者：张工")
     page.get_by_role("button", name="移除节点", exact=True).click()
     expect(page.locator("#remove-cancel")).to_be_focused()
     page.keyboard.press("Escape")
@@ -1291,47 +1396,7 @@ with sync_playwright() as p:
     page.screenshot(path=str(OUT/"detail.png"), full_page=True)
     page.get_by_role("button", name="机器总览", exact=True).first.click()
     page.wait_for_function("!state.machine && state.history?.machines?.length === 3")
-    expect(page.locator('#host-rows tr[data-machine-row="demo-1"]')).to_contain_text("使用者：李工 <b>值班</b>")
-    assert page.locator('#host-rows tr[data-machine-row="demo-1"] b').count() == 0
-    page.get_by_role("button", name="查看 合成训练节点", exact=True).click()
-    page.get_by_role("button", name="配置", exact=True).click()
-    expect(page.locator('[name="assigned_user"]')).to_have_value("李工 <b>值班</b>")
-    page.locator('[name="assigned_user"]').fill("")
-    page.get_by_role("button", name="保存", exact=True).click()
-    expect(page.locator(".page-title")).not_to_contain_text("使用者：")
-    # A legal 80-character unbroken value must wrap fully on the narrow detail view.
-    long_user = "LongUser" * 10
-    page.get_by_role("button", name="配置", exact=True).click()
-    page.locator('[name="assigned_user"]').fill(long_user)
-    page.get_by_role("button", name="保存", exact=True).click()
-    expect(page.locator(".page-title")).to_contain_text("使用者：" + long_user)
-    long_user_results = []
-    for locale, label in (("zh-CN", "使用者："), ("en", "Assigned user: ")):
-        page.locator('#locale-select').select_option(locale)
-        page.set_viewport_size({"width":320,"height":900})
-        expect(page.locator(".page-title")).to_contain_text(label + long_user)
-        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), locale
-        subtitle = page.locator(".page-title p:not(.eyebrow)").evaluate("""el => {
-          const r = el.getBoundingClientRect();
-          return {right:r.right, height:r.height, scrollWidth:el.scrollWidth,
-                  clientWidth:el.clientWidth, scrollHeight:el.scrollHeight,
-                  clientHeight:el.clientHeight};
-        }""")
-        assert subtitle["right"] <= 320, (locale, subtitle)
-        assert subtitle["scrollWidth"] <= subtitle["clientWidth"], (locale, subtitle)
-        assert subtitle["scrollHeight"] <= subtitle["clientHeight"], (locale, subtitle)
-        long_user_results.append({"locale":locale, "width":320, "subtitle":subtitle})
-        page.screenshot(path=str(OUT/f"assigned-user-long-{locale}.png"), full_page=True)
-    page.set_viewport_size({"width":1440,"height":1100})
-    page.locator('#locale-select').select_option('zh-CN')
-    page.get_by_role("button", name="配置", exact=True).click()
-    expect(page.locator('[name="assigned_user"]')).to_have_value(long_user)
-    page.locator('[name="assigned_user"]').fill("")
-    page.get_by_role("button", name="保存", exact=True).click()
-    expect(page.locator(".page-title")).not_to_contain_text("使用者：")
-    page.get_by_role("button", name="机器总览", exact=True).first.click()
-    page.wait_for_function("!state.machine && state.history?.machines?.length === 3")
-    expect(page.locator('#host-rows tr[data-machine-row="demo-1"]')).not_to_contain_text("使用者：")
+    expect(page.locator('#host-rows tr[data-machine-row="demo-1"]')).to_contain_text("使用者：张工")
     assert history_queries[-1]["machine"] is None and history_queries[-1]["hours"] == 24, history_queries[-1]
     page.set_viewport_size({"width":390,"height":844})
     assert_card_stack()
@@ -1512,9 +1577,9 @@ with sync_playwright() as p:
     silhouettes = check_machine_silhouettes(browser)
     rail_identity_edges = check_rail_identity_edges(browser)
     print(json.dumps({"focus_layout":focus_layout,"result":"PASS", "browser":browser.version, "page_errors":errors,
-                      "mutations":len(mutations), "history_queries":len(history_queries), "screenshots":26, "locales":["zh-CN","en"], "dialog_locales":dialog_locales,
+                      "mutations":len(mutations), "history_queries":len(history_queries), "screenshots":28, "locales":["zh-CN","en"], "dialog_locales":dialog_locales,
                       "metric_layouts":layout_results, "focus_refreshes":focus_results,
-                      "assigned_user_long":long_user_results, "assigned_user_settings":assigned_user_settings,
+                      "people_directory":people_directory,
                       "unlimited_container":unlimited_container,"gpu_process_timing":gpu_process_timing,
                       "overview_regressions":overview_regressions,
                       "silhouettes":silhouettes, "rail_identity_edges":rail_identity_edges}, ensure_ascii=False))

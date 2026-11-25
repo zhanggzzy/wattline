@@ -82,6 +82,30 @@ class History:
         with self.connect(read=True) as db:
             return db.execute('SELECT machine,registration,settings FROM machine_settings').fetchall()
 
+    def people_and_assignees(self):
+        with self.connect(read=True) as db:
+            people = dict(db.execute('SELECT id,name FROM people'))
+            rows = db.execute('SELECT machine,person FROM machine_assignees ORDER BY machine,person')
+            assignees = {machine: tuple(person for _, person in entries)
+                         for machine, entries in groupby(rows, key=lambda row: row[0])}
+            return people, assignees
+
+    def save_person(self, person, name):
+        with self.connect() as db:
+            if person is None:
+                return db.execute('INSERT INTO people(name) VALUES (?)', (name,)).lastrowid
+            db.execute('UPDATE people SET name=? WHERE id=?', (name, person))
+            return person
+
+    def delete_person(self, person):
+        with self.connect() as db:
+            db.execute('DELETE FROM people WHERE id=?', (person,))
+
+    def save_assignees(self, identity, people):
+        with self.connect() as db:
+            db.execute('DELETE FROM machine_assignees WHERE machine=?', (identity,))
+            db.executemany('INSERT INTO machine_assignees VALUES (?,?)', ((identity, person) for person in people))
+
     def ssh_pins(self):
         with self.connect(read=True) as db:
             return dict(db.execute('SELECT machine,fingerprint FROM machine_ssh_pins'))
@@ -122,7 +146,8 @@ class History:
             db.execute('INSERT INTO pending_machine_removals VALUES (?)', (identity,))
             if from_config:
                 db.execute('INSERT OR IGNORE INTO removed_config_machines VALUES (?)', (identity,))
-            for table in ('machine_settings','machine_aliases','machine_ssh_pins','machine_order','host_ticks'):
+            for table in ('machine_settings','machine_aliases','machine_ssh_pins','machine_order',
+                          'machine_assignees','host_ticks'):
                 db.execute(f'DELETE FROM {table} WHERE machine=?', (identity,))
             catalog = db.execute('SELECT id FROM history_machines WHERE identity=?',(identity,)).fetchone()
             if catalog:

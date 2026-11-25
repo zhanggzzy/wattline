@@ -103,7 +103,8 @@ class Monitor:
         self.pending_removals = set()
         self.latest = {}
         self.aliases = {}
-        self.assigned_users = {}
+        self.people = {}
+        self.machine_assignees = {}
         self.ssh_pins = {}
         self.machine_order = {}
         self.scopes = {}
@@ -121,7 +122,6 @@ class Monitor:
         removed, pending = await self.write(self.history.removal_state)
         machines = {machine.id:machine for machine in self.config.machines if machine.history_key not in removed}
         identities = {machine.history_key:machine.id for machine in machines.values()}
-        self.assigned_users = {}
         for identity, registration, settings in await self.write(self.history.machine_settings):
             if registration is not None:
                 machine = Machine.model_validate_json(registration)
@@ -133,7 +133,7 @@ class Monitor:
                 id = identities[identity]
                 parsed = MachineSettings.model_validate_json(settings)
                 machines[id] = self.with_settings(machines[id], parsed)
-                self.set_assigned_user(identity, parsed.assigned_user)
+        people, assignees = await self.write(self.history.people_and_assignees)
         pins = await self.write(self.history.ssh_pins)
         order = await self.write(self.history.machine_order)
         host_keys = defaultdict(list)
@@ -146,6 +146,8 @@ class Monitor:
         if any(len(keys) > 1 and (None in keys or len(set(keys)) != len(keys)) for keys in host_keys.values()):
             raise ValueError('重复的 machine-id 缺少可区分的 SSH 主机密钥')
         self.aliases = aliases
+        self.people = people
+        self.machine_assignees = assignees
         self.ssh_pins = pins
         self.machine_order = order
         self.machines = machines
@@ -225,7 +227,7 @@ class Monitor:
             raise
         self.pending_removals.add(identity)
         self.machines.pop(machine.id)
-        for index in (self.ssh_pins,self.machine_order,self.aliases,self.assigned_users):
+        for index in (self.ssh_pins,self.machine_order,self.aliases,self.machine_assignees):
             index.pop(identity, None)
         for index in (self.latest,self.scopes,self.inventory,self.inventory_complete,self.last_seen,self.cpu_baseline):
             index.pop(machine.id, None)
@@ -277,11 +279,58 @@ class Monitor:
         else:
             self.aliases[identity] = alias
 
-    def set_assigned_user(self, identity, user):
-        if user is None:
-            self.assigned_users.pop(identity, None)
-        else:
-            self.assigned_users[identity] = user
+    def person_views(self, people):
+        return [{'id': person, 'name': self.people[person]}
+                for person in sorted(people, key=lambda person: self.people[person])]
+
+    async def save_person(self, name, person=None):
+        async with self.settings_lock:
+            if not self.registry_loaded:
+                raise OSError('机器配置暂不可读')
+            if person is not None and person not in self.people:
+                raise KeyError(person)
+            if any(other != person and name == existing for other, existing in self.people.items()):
+                raise CollectionError('conflict', 'person_name_taken')
+
+            async def save():
+                saved = await self.write(self.history.save_person, person, name)
+                self.people[saved] = name
+                return {'id': saved, 'name': name}
+
+            return await wait_for_work(asyncio.create_task(save()))
+
+    async def delete_person(self, person):
+        async with self.settings_lock:
+            if not self.registry_loaded:
+                raise OSError('机器配置暂不可读')
+            if person not in self.people:
+                raise KeyError(person)
+            if any(person in ids for ids in self.machine_assignees.values()):
+                raise CollectionError('conflict', 'person_in_use')
+
+            async def save():
+                await self.write(self.history.delete_person, person)
+                del self.people[person]
+
+            await wait_for_work(asyncio.create_task(save()))
+
+    async def configure_assignees(self, id, people):
+        async with self.settings_lock:
+            if not self.registry_loaded:
+                raise OSError('机器配置暂不可读')
+            machine = self.machines[id]
+            if any(person not in self.people for person in people):
+                raise CollectionError('conflict', 'person_missing')
+
+            async def save():
+                await self.write(self.history.save_assignees, machine.history_key, people)
+                if people:
+                    self.machine_assignees[machine.history_key] = people
+                else:
+                    self.machine_assignees.pop(machine.history_key, None)
+                return self.machine_view(machine, self.clock())
+
+            return await wait_for_work(asyncio.create_task(save()))
 
     @staticmethod
     def default_name(machine):
@@ -289,7 +338,7 @@ class Monitor:
 
     @staticmethod
     def with_settings(machine, settings):
-        values = settings.model_dump(exclude={'alias', 'assigned_user'})
+        values = settings.model_dump(exclude={'alias'})
         if 'ssh_connect_timeout_seconds' not in settings.model_fields_set:
             values.pop('ssh_connect_timeout_seconds')
         return machine.model_copy(update=values)
@@ -375,7 +424,7 @@ class Monitor:
                 machines = [*self.ordered_machines(), machine]
                 order = {node.history_key:index for index,node in enumerate(machines)}
             persisted = settings.model_copy(update={'ssh_connect_timeout_seconds':updated.ssh_connect_timeout_seconds})
-            stored = persisted.model_dump_json(exclude={'alias'} | ({'assigned_user'} if persisted.assigned_user is None else set()))
+            stored = persisted.model_dump_json(exclude={'alias'})
             await self.write(self.history.save_machine, identity, registration,
                              stored, settings.alias, pins or {}, order)
             if pins:
@@ -384,7 +433,6 @@ class Monitor:
                     if existing.history_key in pins:
                         await self.restart_sampler(existing)
             self.set_alias(identity, settings.alias)
-            self.set_assigned_user(identity, settings.assigned_user)
             if order is not None:
                 self.machine_order = order
             self.machines[machine.id] = updated
@@ -528,7 +576,7 @@ class Monitor:
         alias = self.aliases.get(machine.history_key)
         stale = round(self.stale_seconds(machine)*1000)
         view.update(id=machine.id, name=alias or default_name, alias=alias, default_name=default_name,
-                    assigned_user=self.assigned_users.get(machine.history_key),
+                    assigned_users=self.person_views(self.machine_assignees.get(machine.history_key, ())),
                     scope=self.scopes.get(machine.id), address=machine.display_address, mode=machine.mode,
                     require_gpu=machine.require_gpu or 'gpu' in machine.active_checks or bool(self.inventory.get(machine.id)),
                     expected_gpu_count=machine.expected_gpu_count, gpu_inventory_complete=self.inventory_complete.get(machine.id),
@@ -552,6 +600,7 @@ class Monitor:
                 'archive_ok':self.archive_ok, 'registry_loaded':self.registry_loaded,
                 'removal_pending':len(self.pending_removals),
                 'machine_history_hours':WARM_HOURS,
+                'people':self.person_views(self.people),
                 'machines':[self.machine_view(machine, now) for machine in self.ordered_machines()]}
 
     async def series(self, machine, gpu, metric, hours):

@@ -81,6 +81,8 @@
   .machine-table th:first-child, .machine-table td:first-child { padding-left: 15px; }
   .machine-table tbody tr:hover { background: #f6f8ff; }
   .machine-cell { display: flex; align-items: center; gap: 6px; }
+  .machine-identity { min-width: 0; }
+  .machine-identity .machine-assignees { max-width: 230px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
   .sort-handle { display: grid; place-items: center; flex: 0 0 26px; height: 30px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: #718781; cursor: grab; touch-action: none; }
   .sort-handle::before { content: ""; width: 8px; height: 12px; background: radial-gradient(circle, currentColor 1px, transparent 1.5px) 0 0 / 4px 4px; }
   .sort-handle:hover:enabled, .sort-handle:focus-visible { background: #eaf0ff; color: var(--accent-deep); }
@@ -186,6 +188,7 @@
 .device-details { margin-top: 15px; }
 .chart-error { color: var(--amber); padding: 0 15px 10px; font-size: 12px; }
 .title-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 9px 12px; }
+.machine-settings-actions { display: flex; gap: 8px; }
 .page-title h1 { overflow-wrap: anywhere; min-width: 0; }
 .page-title > div { min-width: 0; max-width: 100%; }
 .page-title p { overflow-wrap: anywhere; }
@@ -202,6 +205,14 @@
 .machine-dialog input[type=checkbox] { accent-color: var(--accent-deep); }
 .machine-dialog p { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .machine-dialog .form-error { color: var(--red); }
+#assignee-machine { font-weight: 650; }
+#assignee-options, .people-list { max-height: 35dvh; overflow: auto; }
+#assignee-options .check-label { padding-inline: 4px; overflow-wrap: anywhere; }
+.people-list { display: grid; gap: 6px; margin: 0; padding: 0 4px; list-style: none; }
+.people-list li { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px; padding-block: 6px; border-bottom: 1px solid var(--line); }
+.people-list li > span { flex: 1 1 9rem; min-width: 0; overflow-wrap: anywhere; }
+.people-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+#people-edit-fields .people-actions { margin-top: 8px; }
 .form-grid, .check-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 12px; }
 .form-grid .full-width { grid-column: 1 / -1; }
 .check-options legend { margin-bottom: 6px; }
@@ -284,6 +295,7 @@ dialog::backdrop { overflow: hidden; overscroll-behavior: contain; }
   .machine-table td[data-label]::before { content: attr(data-label); display: block; color: var(--muted); font-size: 12px; margin-bottom: 4px; }
   .machine-table .number-cell .meter { width: 100%; margin-top: 6px; }
   .machine-table .row-open strong, .machine-table .row-open small { max-width: none; white-space: normal; overflow-wrap: anywhere; }
+  .machine-identity .machine-assignees { max-width: none; }
   .machine-table .row-open > .machine-icon { display: inline-grid; }
   .machine-table .sort-handle { flex-basis: 32px; }
 }

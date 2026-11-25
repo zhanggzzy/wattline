@@ -28,26 +28,10 @@ class AliasUpdate(BaseModel):
 
 class MachineSettings(AliasUpdate):
     alias: str | None = Field(default=None, max_length=80)
-    assigned_user: str | None = Field(default=None, max_length=80)
     enabled: bool = True
     checks: tuple[Check, ...] = Field(default=DEFAULT_CHECKS, max_length=len(DEFAULT_CHECKS))
     interval_seconds: float = Field(default=10, ge=1, le=300)
     ssh_connect_timeout_seconds: int = Field(default=DEFAULT_SSH_CONNECT_TIMEOUT, ge=1, le=60)
-
-    @field_validator('assigned_user', mode='before')
-    @classmethod
-    def reject_assigned_user_control_characters(cls, value):
-        if isinstance(value, str) and any(
-            ord(char) < 32 or 0x7f <= ord(char) <= 0x9f or char in '\u2028\u2029'
-            for char in value
-        ):
-            raise ValueError('使用者须为单行文字')
-        return value
-
-    @field_validator('assigned_user')
-    @classmethod
-    def normalize_assigned_user(cls, value):
-        return value or None
 
     @field_validator('checks')
     @classmethod
@@ -75,6 +59,37 @@ class MachineRegistration(MachineSettings):
         if not valid_ssh_destination(value):
             raise ValueError('请输入 IP、主机名或已有 SSH 别名')
         return value
+
+
+def normalize_person_name(value: str) -> str:
+    if any(
+        ord(char) < 32 or 0x7f <= ord(char) <= 0x9f or char in '\u2028\u2029'
+        or 0xd800 <= ord(char) <= 0xdfff for char in value
+    ):
+        raise ValueError('使用者须为单行文字')
+    return value.strip()
+
+
+class PersonName(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    name: str = Field(min_length=1, max_length=80)
+
+    @field_validator('name', mode='before')
+    @classmethod
+    def normalize_name(cls, value):
+        return normalize_person_name(value) if isinstance(value, str) else value
+
+
+class MachineAssignees(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    person_ids: tuple[Annotated[int, Field(strict=True, gt=0, le=2**53-1)], ...]
+
+    @field_validator('person_ids')
+    @classmethod
+    def unique_ids(cls, ids):
+        if len(set(ids)) != len(ids):
+            raise ValueError('使用者不能重复')
+        return ids
 
 
 class MachineOrder(BaseModel):

@@ -13,7 +13,7 @@
 ## 3. Integration verification
 
 - [x] 3.1 Run the full suite, JavaScript and locale checks, the synthetic API browser check, OpenSpec 1.14.2 strict validation, and diff checks; record commands, outputs, base/implementation SHAs, coverage and limitations in [verification.md](verification.md), including the AN-106 and AN-110 regression evidence and the preserved AN-103 and AN-105 review records.
-- [ ] 3.2 Record AN-109's independent review of the AN-110 correction in [verification.md](verification.md), including the reviewed commit SHA, checks, and passing outcome before archive.
+- [x] 3.2 Record AN-109's independent review of the AN-110 correction in [verification.md](verification.md), including the reviewed commit SHA, checks, and passing outcome before archive.
 
 ## Workflow follow-up
 

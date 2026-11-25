@@ -12,7 +12,7 @@
 
 ## P2 · 设置弹窗可清空或覆盖应保留的登记
 
-[monitor.js:1093](../../../wattline/static/monitor.js#L1093) 在提交前对 `assigned_user` 执行 `.trim() || null`，删除首尾 U+2028 和 U+2029。后端 [config.py:37](../../../wattline/config.py#L37) 收到的值已经失去需要拒绝的字符，按合法清空或修改写入。弹窗关闭，详情显示写入后的状态。该行为违反 [输入约束](specs/machine-registry/spec.md#requirement-assigned-user-input-constraints) 对非法值和旧登记的保护。
+[monitor.js:1093](https://github.com/zhanggzzy/wattline/blob/027b796db9baef31938ea7c04051c1fde03dc6a8/wattline/static/monitor.js#L1093) 在提交前对 `assigned_user` 执行 `.trim() || null`，删除首尾 U+2028 和 U+2029。后端 [config.py:37](https://github.com/zhanggzzy/wattline/blob/027b796db9baef31938ea7c04051c1fde03dc6a8/wattline/config.py#L37) 收到的值已经失去需要拒绝的字符，按合法清空或修改写入。弹窗关闭，详情显示写入后的状态。该行为违反 [输入约束](specs/machine-registry/spec.md#requirement-assigned-user-input-constraints) 对非法值和旧登记的保护。
 
 复现使用 Chromium `158.0.8127.18`、README 检查的合成页面与路由、停用的合成节点 `demo-3` 和临时 SQLite。将浏览器的设置 PUT 转发给内存中的 FastAPI `TestClient`，以真实 API 响应完成浏览器请求。每次先经 API 写入「初始登记」，打开机器详情的配置弹窗，清空输入控件，再用 Playwright 的 `page.keyboard.insert_text(raw)` 插入待测值。读取控件值确认字符仍在，点击保存，记录截获的请求以及写入后的快照与 SQLite。
 

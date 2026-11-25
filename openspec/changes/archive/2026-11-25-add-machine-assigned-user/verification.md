@@ -99,7 +99,7 @@ README 的合成 API 浏览器检查使用现有 Chromium 缓存：
 
 2026-11-25，Reviewer-Codex 复审 `027b796db9baef31938ea7c04051c1fde03dc6a8`。原两项问题的直接 API 与 320px 中英文详情检查均通过。整体结论为**需修改**。机器设置弹窗会在提交前修剪 U+2028/U+2029，导致本应拒绝的输入清空或覆盖已有登记。完整复现、退出码和覆盖范围见 [AN-105 独立复审报告](review-an-105.md)，涉及 [任务](tasks.md) 1.2、2.1 和 3.1。
 
-- [ ] 机器设置弹窗提交非法分隔符时保留已有登记，验收见 AN-105 报告，待 Mika 协调返工与复审。
+- AN-105 提出的弹窗问题由 AN-110 修复，[AN-109 独立复审](review-an-109.md)验证通过。
 
 ## AN-110 第二轮返工验证
 
@@ -123,3 +123,29 @@ README 的合成 API 浏览器检查使用现有 Chromium 缓存：
 | `.venv/bin/python tools/browser_smoke.py --browser "$HOME/Library/Caches/ms-playwright/chromium_headless_shell-1254/chrome-headless-shell-mac-arm64/chrome-headless-shell" > artifacts/an-110-browser.json` | 0 | `PASS`，Chromium `158.0.8127.18`，`page_errors: []`，12 次 422，10 次原合成路由写请求、120 次历史查询。中英文 320px 详情副标题的 `scrollWidth = clientWidth = 288`，`scrollHeight = clientHeight = 90`。标准错误有同一 Starlette 弃用提示。 |
 | `OPENSPEC_TELEMETRY=0 npx --offline @fission-ai/openspec@1.14.2 validate add-machine-assigned-user --strict` | 0 | `Change 'add-machine-assigned-user' is valid`。 |
 | `git diff --check`、`git diff --cached --check`、`git diff --check 027b796..3e21358`、`git diff --check 9b698f7..3e21358` | 0 | 无输出。索引中的 `AGENTS.md` 无运行时标记，工作树注入保留。 |
+
+## AN-109 独立复审
+
+2026-11-25（Asia/Shanghai），Reviewer-DeepSeek（Multica 运行时配置模型 `deepseek/deepseek-flash`）复审实现提交 `3e213580cce063733f88fbfdf5efb6f0416db2aa` 与交接 HEAD `0bf965277a0f3ec915d64133a59934d49a3d7d0d`；远端 `main` 基线 `9b698f731b50c3eae6385cdbd23dd7a2bac1af40`。**结论为通过**，AN-105 的 P2 已修复，未发现新的阻塞或 P2。完整方法、用例与限制见 [AN-109 独立复审报告](review-an-109.md)。
+
+- 独立探针经 Chromium 158 的真实设置弹窗向同进程 FastAPI 提交，使用停用合成机器与临时 SQLite：10 个拒绝用例（单独 U+2028/U+2029、首部/尾部/内部、两种分隔符组合、80 字符后分隔符、81 字符、Enter 路径）逐次确认发送值未被改写、422、错误可见、弹窗与草稿保留、快照与 SQLite 原登记逐字节不变。
+- 成功路径：首尾普通空格经 Enter 保存后修剪持久化并回填；空串与纯空格清空后快照为 `null`、SQLite 无该键、重开为空；英文界面显示对应的单行 80 字符错误。
+- 控件语义：该 Chromium 的单行 input 粘贴 CR/LF 时丢弃或改写（`a\r\nb` → `a b`），textarea 规范为 LF；两者均保留 U+2028/U+2029。`design.md` 与 README 的说明与实际一致，移除 `maxlength` 避免把「80 字符 + 分隔符」截断为合法值。
+- 命令：`pytest` 36 passed；`node --check` 0；i18n `PASS ... 286 message keys`；README 浏览器检查 `PASS`，12 次 422、中英文 320px 无溢出；OpenSpec 1.14.2 strict valid；`git diff --check`（工作树、索引、`9b698f7..HEAD`）均为 0。
+- 未覆盖：Firefox/Safari/移动端实测，真实节点、SSH、GPU、用户 Docker 实例，部署级升级与回滚。审查者仅补充上述记录，代码与测试保持只读；未提交、未推送。
+
+## AN-102 主干交付检查与归档
+
+2026-11-25（Asia/Shanghai），Mika 核对 AN-109 独立复审结论及被审 HEAD `0bf965277a0f3ec915d64133a59934d49a3d7d0d`。源代码、测试及 README 与被审 HEAD 相同，远端 main 当时为 `9b698f731b50c3eae6385cdbd23dd7a2bac1af40`。AN-103 和 AN-105 报告的代码链接固定到各自被审版本。
+
+| 检查 | 退出码 | 实际结果 |
+| --- | --- | --- |
+| `.venv/bin/python -m pytest -q` | 0 | 36 passed, 1 warning in 0.83s，警告为 Starlette 的 httpx 弃用提示。 |
+| `node --check wattline/static/monitor.js` 和 `node tools/test_i18n.cjs` | 0 | 语法通过，286 个翻译键通过。 |
+| `.venv/bin/python tools/browser_smoke.py --browser "$HOME/Library/Caches/ms-playwright/chromium_headless_shell-1254/chrome-headless-shell-mac-arm64/chrome-headless-shell"` | 0 | Chromium 158.0.8127.18，12 次 422，草稿与 SQLite 原值保留，Enter 修剪保存、两种清空路径、两种语言的 320px 详情均通过，页面错误为空。 |
+| `OPENSPEC_TELEMETRY=0 npx --offline @fission-ai/openspec@1.14.2 validate add-machine-assigned-user --strict` | 0 | 变更有效，6/6 任务完成。 |
+| `OPENSPEC_TELEMETRY=0 npx --offline @fission-ai/openspec@1.14.2 validate --specs --strict` | 0 | 6 项规范全部通过。新主规范 machine-registry 的目的、四项要求及场景与已复审 delta 一致。 |
+| `OPENSPEC_TELEMETRY=0 npx --offline @fission-ai/openspec@1.14.2 archive add-machine-assigned-user --yes --skip-specs` | 0 | 主规范已先同步，CLI 将完整 change 归档为 `2026-11-25-add-machine-assigned-user`，活动 change 列表为空。 |
+| `git diff --check`、`git diff --cached --check`、`git diff --check origin/main..HEAD` | 0 | 无空白错误。 |
+
+本次交付核验使用 Chromium 和合成数据。Firefox、Safari、真实节点和用户实例的升级或回滚未验证。

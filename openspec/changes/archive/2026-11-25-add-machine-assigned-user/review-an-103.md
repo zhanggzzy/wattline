@@ -11,7 +11,7 @@
 
 ## 需修改项
 
-1. **P2 · 部分多行或含控制字符的值会覆盖已保存的登记。** [config.py:37](../../../wattline/config.py#L37) 在 Pydantic 去除首尾空白之后校验，并只拦截内部的 ASCII 控制字符。用 `TemporaryDirectory` 和 `TestClient` 在合成 SSH 节点上请求 `PUT /api/machines/review/settings`，请求体为 `{"assigned_user": value, "interval_seconds": 1}`。先保存 `初始值`，逐个试下列输入，并请求 `/api/snapshot` 读取该节点的 `assigned_user`。
+1. **P2 · 部分多行或含控制字符的值会覆盖已保存的登记。** [config.py:37](https://github.com/zhanggzzy/wattline/blob/c0da8a18faded8735dc9f0256c743c4bbc6c75a6/wattline/config.py#L37) 在 Pydantic 去除首尾空白之后校验，并只拦截内部的 ASCII 控制字符。用 `TemporaryDirectory` 和 `TestClient` 在合成 SSH 节点上请求 `PUT /api/machines/review/settings`，请求体为 `{"assigned_user": value, "interval_seconds": 1}`。先保存 `初始值`，逐个试下列输入，并请求 `/api/snapshot` 读取该节点的 `assigned_user`。
 
    | 输入（转义表示） | HTTP | 快照值 |
    | --- | --- | --- |
@@ -24,7 +24,7 @@
 
    规范要求拒绝这些值并保留已有登记。返工应在去除空白前校验控制字符和行分隔符，并验证非法值不会写入。现有 pytest 只覆盖了字符串中间的 ASCII 换行和超长输入。
 
-2. **P2 · 80 字符连续文本会让窄屏详情横向溢出。** [monitor.js:461](../../../wattline/static/monitor.js#L461) 把使用者插入详情副标题。[monitor.css:189](../../../wattline/static/monitor.css#L189) 只给主标题设置了 `overflow-wrap: anywhere`。使用 `tools/browser_smoke.py` 的合成路由，在 Chromium 中将视口设为 320 × 900，打开 `demo-3` 离线节点详情。在配置中保存 `'LongUser'.repeat(10)`，比较 `document.documentElement.scrollWidth`。中英文界面的文档宽均由 320 增至 472 像素，副标题文本右边缘也到 472 像素。返工应让副标题中的合法长值在窄屏完整换行，并补充详情页回归断言。原浏览器用例只用短使用者文本跑通了显示。
+2. **P2 · 80 字符连续文本会让窄屏详情横向溢出。** [monitor.js:461](https://github.com/zhanggzzy/wattline/blob/c0da8a18faded8735dc9f0256c743c4bbc6c75a6/wattline/static/monitor.js#L461) 把使用者插入详情副标题。[monitor.css:189](https://github.com/zhanggzzy/wattline/blob/c0da8a18faded8735dc9f0256c743c4bbc6c75a6/wattline/static/monitor.css#L189) 只给主标题设置了 `overflow-wrap: anywhere`。使用 `tools/browser_smoke.py` 的合成路由，在 Chromium 中将视口设为 320 × 900，打开 `demo-3` 离线节点详情。在配置中保存 `'LongUser'.repeat(10)`，比较 `document.documentElement.scrollWidth`。中英文界面的文档宽均由 320 增至 472 像素，副标题文本右边缘也到 472 像素。返工应让副标题中的合法长值在窄屏完整换行，并补充详情页回归断言。原浏览器用例只用短使用者文本跑通了显示。
 
 ## 独立执行结果
 

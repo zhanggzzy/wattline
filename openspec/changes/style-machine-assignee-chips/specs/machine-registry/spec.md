@@ -27,8 +27,8 @@ A registered machine SHALL support zero or more distinct people from the shared 
 - **THEN** the previous selection remains saved and visible
 
 #### Scenario: Names differing by spacing
-- **WHEN** the directory contains names that are identical except for consecutive internal spaces
-- **THEN** each picker chip keeps its literal text and the wider spacing remains visible, so the operator can tell the records apart
+- **WHEN** the directory contains names that are identical except for consecutive internal spaces, including at a width where the names wrap
+- **THEN** each picker chip keeps its literal text and accessible name, and the wider spacing remains visible
 
 ### Requirement: Assignment is displayed as advisory metadata
 
@@ -54,8 +54,12 @@ The ordinary expanded machine list SHALL show assigned people in a dedicated col
 - **WHEN** the list container is narrower than the seven-column table's full width
 - **THEN** the list renders labelled cards, keeps every metric field visible, and neither the list nor the page scrolls horizontally
 
+#### Scenario: Resizing with large metric values
+- **WHEN** window or navigation changes resize a list containing long machine names, multiple assignees, and large metric values across the layout boundary
+- **THEN** the table or labelled cards keep every metric value and memory usage explanation visible, and neither the list nor the page scrolls horizontally
+
 #### Scenario: Names differing by spacing
-- **WHEN** an assigned name contains consecutive internal spaces
+- **WHEN** an assigned name contains consecutive internal spaces, including at a width where the name wraps
 - **THEN** its list chip keeps the literal text and renders the extra spacing, distinguishing it from a similarly named person
 
 #### Scenario: Untrusted text

@@ -290,7 +290,7 @@ function overviewPage(hosts) {
         <div class="panel-head"><h2>${t('needs_attention_m051')}</h2><small>${t('machine_count',{count:issues.length})}</small></div>
         ${issues.length ? `<div class="issues">${issues.map(node => `<button type="button" class="issue" data-host="${escape(node.id)}">
           <span class="issue-mark ${escape(node.status)}" aria-hidden="true">${node.status === 'stale' ? '◷' : '!'}</span>
-          <span><strong>${escape(node.name)}</strong><small>${escape(reason(node))}</small></span>${status(node.status,machineStates[node.status])}
+          <span class="issue-copy"><strong>${escape(node.name)}</strong><small>${escape(reason(node))}</small></span>${status(node.status,machineStates[node.status])}
         </button>`).join('')}</div>` : `<p class="empty">${t('no_machines_need_attention')}</p>`}
       </section>
       ${chartPanel(null,null)}
@@ -316,10 +316,21 @@ function assigneeSummary(node) {
   return `<p class="machine-assignees">${escape(t('assignees_value',{names:list}))}</p>`;
 }
 
+function chipName(name) {
+  return name.split(/(\s+\S+)/u).map((part, index) => {
+    if (index % 2 === 0) return escape(part);
+    // A wrapped word keeps its spaces beside its first visible character.
+    const spaces = part.match(/^\s+/u)[0];
+    const [first] = splitGraphemes(part.slice(spaces.length));
+    const prefix = spaces + first;
+    return `<span class="chip-name-word"><span class="chip-name-prefix">${escape(prefix)}</span>${escape(part.slice(prefix.length))}</span>`;
+  }).join('');
+}
+
 function assigneeChips(node) {
   const names = node.assigned_users?.map(person => person.name);
   return names?.length
-    ? `<ul class="assignee-chips">${names.map(name => `<li class="person-chip">${escape(name)}</li>`).join('')}</ul>`
+    ? `<ul class="assignee-chips">${names.map(name => `<li class="person-chip">${chipName(name)}</li>`).join('')}</ul>`
     : `<span class="unassigned">${t('unassigned')}</span>`;
 }
 
@@ -1231,8 +1242,8 @@ function updateAssigneeCount() {
 function renderAssigneeOptions(selected) {
   const people = directoryPeople();
   assigneeOptions.innerHTML = people.length ? people.map(person =>
-    `<label class="assignee-chip"><input type="checkbox" value="${person.id}" ${selected.has(person.id) ? 'checked' : ''}>
-      <span class="assignee-chip-mark" aria-hidden="true"></span><span class="assignee-chip-name">${escape(person.name)}</span></label>`).join('') : `<p>${t('no_people')}</p>`;
+    `<label class="assignee-chip"><input type="checkbox" value="${person.id}" aria-label="${escape(person.name)}" ${selected.has(person.id) ? 'checked' : ''}>
+      <span class="assignee-chip-mark" aria-hidden="true"></span><span class="assignee-chip-name">${chipName(person.name)}</span></label>`).join('') : `<p>${t('no_people')}</p>`;
   updateAssigneeCount();
 }
 

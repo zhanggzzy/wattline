@@ -1409,25 +1409,34 @@ def check_people_directory(browser):
 
 
 def check_assignee_responsive(browser):
-    """AN-138: literal internal spacing and a card switch that prevents horizontal scrolling."""
+    """Keep long metrics and literal names visible across the list layout switch."""
     origin = "http://localhost"
     spaced_names = ("Ada Lovelace", "Ada  Lovelace")
-    layouts = []
+    long_name = "W" * 80
+    literal_name = '字面 " <b>名</b> & 姓'
+    names = (*spaced_names, long_name, literal_name)
+    layouts, boundaries, spacing = [], [], []
     with TemporaryDirectory() as directory:
-        data_dir = Path(directory)
-        hosts = (Machine(id="layout-a", name="Layout fixture Alpha", mode="ssh",
-                         ssh_alias="layout-a.invalid", expected_host_id="c" * 32),
-                 Machine(id="layout-b", name="Layout fixture Beta", mode="ssh",
-                         ssh_alias="layout-b.invalid", expected_host_id="d" * 32))
-        config = Config(data_dir=data_dir, machines=hosts)
-        monitor = Monitor(config)
+        hosts = (Machine(id="active", name="Machine" * 11 + "ABC", mode="ssh",
+                         ssh_alias="w" * 63 + ".invalid", expected_host_id="a" * 32),
+                 Machine(id="idle", name="Synthetic unassigned", mode="ssh",
+                         ssh_alias="idle.invalid", expected_host_id="b" * 32))
+        config = Config(data_dir=Path(directory), machines=hosts)
+        monitor = Monitor(config, clock=lambda: 1800000000000)
         monitor.start_sampler = lambda _machine: None
-        monitor.latest[hosts[0].id] = dict(status="offline", reason="synthetic offline", metrics=None)
-        app = create_app(config, monitor=monitor)
-        with TestClient(app, base_url=origin) as client:
-            person_ids = [client.post("/api/people", json={"name": name}).json()["id"]
-                          for name in spaced_names]
-            client.put(f"/api/machines/{hosts[0].id}/assignees",
+        monitor.latest["active"] = dict(
+            status="warning", observed_at=monitor.clock(),
+            metrics=dict(gpus=[], gpu_percent=76, gpu_power_w=123456789012, cpu_count=128,
+                         cpu_percent=100, load_average=[120, 91, 81], memory_percent=90,
+                         memory=dict(used_bytes=18000000 * 1024**3, total_bytes=20000000 * 1024**3)))
+        monitor.latest["idle"] = dict(status="offline", metrics=None)
+        with TestClient(create_app(config, monitor=monitor), base_url=origin) as client:
+            person_ids = []
+            for name in names:
+                response = client.post("/api/people", json={"name": name})
+                response.raise_for_status()
+                person_ids.append(response.json()["id"])
+            client.put("/api/machines/active/assignees",
                        json={"person_ids": person_ids}).raise_for_status()
 
             def forward(route):
@@ -1449,102 +1458,154 @@ def check_assignee_responsive(browser):
             page.route("**/*", forward)
             page.goto(origin)
             expect(page.locator("[data-machine-row]")).to_have_count(2)
-            page.locator("#locale-select").select_option("en")
-            table = page.locator(".machine-scroll")
-            row = page.locator(f'[data-machine-row="{hosts[0].id}"]')
+            region = page.locator(".machine-scroll")
+            row = page.locator('[data-machine-row="active"]')
+            expect(row.locator('[data-value="active-memory-used"]')).to_have_text("18000000.0 GiB")
             cell = row.locator(".assignee-cell")
             picker = page.locator("#assignee-dialog")
 
-            measure = """(elements, prefix) => elements
-                .filter(element => element.textContent.startsWith(prefix))
-                .map(element => {
-                  const range = document.createRange();
-                  range.selectNodeContents(element);
-                  return {text: element.textContent, width: range.getBoundingClientRect().width,
-                          whiteSpace: getComputedStyle(element).whiteSpace};
-                })"""
-
-            def literal_spacing(surface):
-                values = surface.evaluate_all(measure, "Ada")
-                assert sorted(value["text"] for value in values) == sorted(spaced_names), values
-                assert all(value["whiteSpace"] == "pre-wrap" for value in values), values
-                widths = {value["text"]: value["width"] for value in values}
-                assert widths[spaced_names[1]] > widths[spaced_names[0]] + 1, widths
-                return values
-
-            list_spacing = literal_spacing(cell.locator(".person-chip"))
-            row.locator(".row-open").click()
-            page.locator("[data-edit-assignees]").click()
-            expect(picker).to_be_visible()
-            picker_spacing = literal_spacing(picker.locator(".assignee-chip-name"))
-            page.locator("#assignee-cancel").click()
-            page.locator("#breadcrumb [data-overview]").click()
-
-            def card_mode():
-                return cell.evaluate('el => getComputedStyle(el, "::before").content !== "none"')
-
-            def fits():
-                box = table.evaluate("el => ({width: el.clientWidth, scrollWidth: el.scrollWidth})")
-                assert box["scrollWidth"] == box["width"], box
-                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-                return box
-
-            def check_width(locale, width):
-                page.locator("#locale-select").select_option(locale)
+            def resize(width):
                 page.set_viewport_size({"width": width, "height": 900})
-                card = card_mode()
-                assert card == (width != 1440), (locale, width, card)
-                box = fits()
-                metrics = row.locator(".number-cell")
-                assert metrics.count() == 4
-                labels = []
-                for index in range(4):
-                    metric = metrics.nth(index)
-                    assert metric.is_visible(), (locale, width, index)
-                    labels.append(metric.get_attribute("data-label"))
-                assert all(labels), labels
-                layouts.append({"locale": locale, "width": width, "card": card,
-                                "container": box["width"], "scrollWidth": box["scrollWidth"],
-                                "metric_labels": labels})
 
-            for width in (320, 700, 730, 950, 1024, 1440):
-                check_width("en", width)
-            for width in (320, 1440):
-                check_width("zh-CN", width)
-            page.locator("#locale-select").select_option("en")
-            page.set_viewport_size({"width": 1024, "height": 900})
-            page.locator(".machine-scroll").screenshot(path=str(OUT / "assignee-responsive-1024-en.png"))
-            page.set_viewport_size({"width": 320, "height": 900})
-            page.locator(".machine-scroll").screenshot(path=str(OUT / "assignee-responsive-320-en.png"))
+            def cards():
+                return page.locator(".machine-table thead").evaluate(
+                    'header => getComputedStyle(header).display === "none"')
 
-            page.set_viewport_size({"width": 1024, "height": 900})
-            assert card_mode()
-            page.set_viewport_size({"width": 1440, "height": 900})
-            assert not card_mode()
-            low, high = 1024, 1440
-            while high - low > 1:
-                middle = (low + high) // 2
-                page.set_viewport_size({"width": middle, "height": 900})
-                if card_mode():
-                    low = middle
-                else:
-                    high = middle
-            page.set_viewport_size({"width": low, "height": 900})
-            assert card_mode(), low
-            card_box = fits()
-            page.set_viewport_size({"width": high, "height": 900})
-            assert not card_mode(), high
-            table_box = fits()
-            assert table_box["width"] >= 769, table_box
-            page.locator(".machine-scroll").screenshot(path=str(OUT / "assignee-responsive-boundary-en.png"))
-            page.set_viewport_size({"width": 1440, "height": 900})
-            row.locator(".assignee-cell").screenshot(path=str(OUT / "assignee-chip-spacing.png"))
+            def check_layout(locale, rail, width):
+                resize(width)
+                box = region.evaluate("""region => {
+                  const table = region.querySelector('table');
+                  const card = getComputedStyle(table.tHead).display === 'none';
+                  const edge = region.getBoundingClientRect();
+                  const within = (rect, bounds) =>
+                    rect.left >= bounds.left - .5 && rect.right <= bounds.right + .5;
+                  const textRects = element => {
+                    const range = document.createRange();
+                    range.selectNodeContents(element);
+                    return [...range.getClientRects()];
+                  };
+                  const cells = [...table.querySelectorAll('tbody td')];
+                  return {card, container: region.clientWidth, scrollWidth: region.scrollWidth,
+                          pageWidth: document.documentElement.scrollWidth,
+                          overflowing: cells.filter(cell => {
+                            const bounds = cell.getBoundingClientRect();
+                            const wraps = card || !cell.querySelector('.row-open');
+                            return !within(bounds, edge) ||
+                              (wraps && textRects(cell).some(rect => !within(rect, bounds)));
+                          }).map(cell => cell.textContent.trim()),
+                          metrics: [...table.querySelectorAll('[data-machine-row="active"] .number-cell')]
+                            .map(cell => ({label: cell.dataset.label, text: cell.textContent.trim(),
+                                 labelled: getComputedStyle(cell, '::before').content !== 'none'}))};
+                }""")
+                result = {"locale": locale, "rail": rail, "width": width, **box}
+                assert box["scrollWidth"] == box["container"] and box["pageWidth"] <= width, result
+                assert not box["overflowing"], result
+                assert len(box["metrics"]) == 4, result
+                memory = "18000000.0 GiB used" if locale == "en" else "18000000.0 GiB 已用"
+                for metric, value in zip(box["metrics"], ("76%", "123456789012 W", "100%", memory)):
+                    assert value in metric["text"] and metric["label"], result
+                    assert metric["labelled"] == box["card"], result
+                return result
+
+            def check_names(surface, width=None, lines=None):
+                values = surface.evaluate_all(r"""(elements, width) => elements.map(element => {
+                  if (width !== null && element.textContent.startsWith('Ada')) element.style.width = width + 'px';
+                  const box = element.getBoundingClientRect();
+                  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+                  const range = document.createRange();
+                  const glyphs = [];
+                  let fits = true;
+                  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+                    for (let i = 0; i < node.length; i++) {
+                      if (/\s/u.test(node.data[i])) continue;
+                      range.setStart(node, i);
+                      range.setEnd(node, i + 1);
+                      const glyph = range.getBoundingClientRect();
+                      glyphs.push([Math.round((glyph.left - box.left) * 100) / 100,
+                                   Math.round((glyph.top - box.top) * 100) / 100]);
+                      fits &&= glyph.left >= box.left - .5 && glyph.right <= box.right + .5;
+                    }
+                  }
+                  return {name: element.textContent, glyphs, fits,
+                          lines: new Set(glyphs.map(([, y]) => y)).size};
+                })""", width)
+                assert set(value["name"] for value in values) == set(names), values
+                assert all(value["fits"] for value in values), values
+                mapping = {value["name"]: value for value in values}
+                first, second = (mapping[name] for name in spaced_names)
+                if width is not None:
+                    assert min(first["lines"], second["lines"]) >= 2, (first, second)
+                    if lines is not None:
+                        assert first["lines"] == second["lines"] == lines, (first, second)
+                    assert second["glyphs"][3][0] > first["glyphs"][3][0], (first, second)
+                assert first["glyphs"] != second["glyphs"], (first, second)
+                assert mapping[long_name]["lines"] > 1, mapping[long_name]
+                assert surface.locator("b").count() == 0
+                return {name: mapping[name] for name in spaced_names}
+
+            for rail in ("expanded", "collapsed"):
+                resize(1440)
+                if rail == "collapsed":
+                    page.locator("#rail-toggle").click()
+                    expect(page.locator("#rail-toggle")).to_have_attribute("aria-expanded", "false")
+                for locale, headers in (("en", ["Machine", "Status", "Assignees"]),
+                                        ("zh-CN", ["机器", "状态", "使用者"])):
+                    page.locator("#locale-select").select_option(locale)
+                    for width in (320, 700, 730, 950, 986, 1024, 1156, 1440):
+                        result = check_layout(locale, rail, width)
+                        layouts.append(result)
+                        if width in (320, 1440):
+                            assert result["card"] == (width == 320), result
+                    assert page.locator(".machine-table thead th").all_inner_texts()[:3] == headers
+                    low, high = 730, 1440
+                    while high - low > 1:
+                        middle = (low + high) // 2
+                        resize(middle)
+                        if cards():
+                            low = middle
+                        else:
+                            high = middle
+                    # Check each viewport on the way down and back up across the switch.
+                    widths = range(high + 12, low - 13, -1)
+                    for width in (*widths, *reversed(widths)):
+                        result = check_layout(locale, rail, width)
+                        assert result["card"] == (width <= low), result
+                    boundaries.append({"locale": locale, "rail": rail, "last_card": low, "first_table": high})
+
+                    resize(high)
+                    list_chips = cell.locator(".person-chip")
+                    list_spacing = check_names(list_chips)
+                    if locale == "en" and rail == "expanded":
+                        region.screenshot(path=str(OUT / "assignee-responsive-boundary-en.png"))
+                    # Keep the AN-137 two-line case even if future columns have more room.
+                    list_wrapped = check_names(list_chips, width=80, lines=2)
+                    if locale == "en" and rail == "expanded":
+                        cell.screenshot(path=str(OUT / "assignee-chip-spacing.png"))
+                    check_names(list_chips, width=70)
+                    row.locator(".row-open").click()
+                    edit = page.locator("[data-edit-assignees]")
+                    edit.click()
+                    expect(picker.locator("input:checked")).to_have_count(len(names))
+                    for name, person_id in zip(names, person_ids):
+                        checkbox = picker.locator(f'input[value="{person_id}"]')
+                        expect(checkbox).to_have_attribute("aria-label", name)
+                        expect(checkbox).to_have_accessible_name(name)
+                    picker_chips = picker.locator(".assignee-chip-name")
+                    picker_spacing = check_names(picker_chips)
+                    picker_wrapped = check_names(picker_chips, width=65, lines=2)
+                    if locale == "en" and rail == "expanded":
+                        picker.screenshot(path=str(OUT / "assignee-picker-wrapped-en.png"))
+                    check_names(picker_chips, width=56)
+                    page.locator("#assignee-cancel").click()
+                    expect(edit).to_be_focused()
+                    page.locator("#breadcrumb [data-overview]").click()
+                    spacing.append({"locale": locale, "rail": rail, "list": list_spacing,
+                                    "list_wrapped": list_wrapped, "picker": picker_spacing,
+                                    "picker_wrapped": picker_wrapped})
+
             assert not errors, errors
             context.close()
-    return {"list_spacing": list_spacing, "picker_spacing": picker_spacing, "layouts": layouts,
-            "switch": {"last_card_viewport": low, "card_container": card_box["width"],
-                       "first_table_viewport": high, "table_container": table_box["width"]}}
-
+    return {"spacing": spacing, "layouts": layouts, "boundaries": boundaries}
 
 with sync_playwright() as p:
     browser = p.chromium.launch(**({"executable_path":args.browser} if args.browser else {}))

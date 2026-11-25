@@ -4,7 +4,7 @@ A standalone workbench for monitoring Linux and Windows machines and their NVIDI
 
 - The background sampler collects machine health, CPU and memory, GPU utilization, VRAM, temperature and power. The GPU process view shows the account, workload evidence, start time and elapsed runtime at sampling when available.
 - Enroll machines from the overview, set per-machine checks and polling intervals, drag to reorder, and remove nodes with their monitoring data.
-- Assign people from a shared directory. The machine list shows each machine's assignees as wrapping chips in a dedicated column beside Status, with a localized unassigned value; details repeat the names.
+- Assign people from a shared directory. The machine list shows each machine's assignees as wrapping chips in a dedicated column beside Status, with a localized unassigned value and literal spacing; details repeat the names. When the list container is too narrow for all seven columns, the list becomes labelled cards instead of scrolling horizontally.
 - The dashboard reads 24 hours of raw history. Machine and GPU details show up to 7 days. Older samples are kept in local gzip archives.
 - Container SSH endpoints can report their own cgroup v2 CPU and memory usage alongside visible GPU metrics.
 

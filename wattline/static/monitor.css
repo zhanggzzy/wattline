@@ -84,7 +84,7 @@
   .machine-identity { min-width: 0; }
   .assignee-cell { min-width: 96px; }
   .assignee-chips { display: flex; flex-wrap: wrap; gap: 5px; margin: 0; padding: 0; list-style: none; }
-  .person-chip { max-width: 100%; padding: 2px 9px; border-radius: 999px; background: #eef2f9; color: #3f5470; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+  .person-chip { max-width: 100%; padding: 2px 9px; border-radius: 999px; background: #eef2f9; color: #3f5470; font-size: 12px; font-weight: 600; overflow-wrap: anywhere; white-space: pre-wrap; }
   .assignee-cell .unassigned { color: var(--muted); font-size: 12px; }
   .sort-handle { display: grid; place-items: center; flex: 0 0 26px; height: 30px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: #718781; cursor: grab; touch-action: none; }
   .sort-handle::before { content: ""; width: 8px; height: 12px; background: radial-gradient(circle, currentColor 1px, transparent 1.5px) 0 0 / 4px 4px; }
@@ -224,7 +224,7 @@
 .assignee-chip-mark { display: inline-grid; place-items: center; width: 16px; height: 16px; flex: 0 0 auto; font-size: 13px; font-weight: 800; line-height: 1; }
 .assignee-chip-mark::before { content: "+"; }
 .assignee-chip:has(input:checked) .assignee-chip-mark::before { content: "✓"; }
-.assignee-chip-name { min-width: 0; overflow-wrap: anywhere; }
+.assignee-chip-name { min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
 .people-list { display: grid; gap: 6px; margin: 0; padding: 0 4px; list-style: none; }
 .people-list li { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px; padding-block: 6px; border-bottom: 1px solid var(--line); }
 .people-list li > span { flex: 1 1 9rem; min-width: 0; overflow-wrap: anywhere; }
@@ -302,7 +302,7 @@ dialog::backdrop { overflow: hidden; overscroll-behavior: contain; }
 .machine-dialog { max-height: calc(100dvh - 32px); box-shadow: 0 24px 90px #101f3533; }
 .machine-dialog :is(input:not([type=checkbox]), textarea) { min-height: 44px; }
 .check-label { min-height: 40px; }
-@container (max-width: 620px) {
+@container (max-width: 830px) {
   .machine-table { min-width: 0; }
   .machine-table thead { display: none; }
   .machine-table, .machine-table tbody { display: block; }

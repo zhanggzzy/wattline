@@ -11,7 +11,7 @@
 | 官方原文（固定版本） | 本次实现 |
 | --- | --- |
 | [Responsive design](https://github.com/GoogleChrome/modern-web-guidance/blob/v1.0.1/skills/modern-web-guidance/guides/css/responsive-design.md) | Grid 布局、rem 与 viewport 组合的 clamp 标题；≤975px 时概览指标降为两列，为侧栏占用空间预留数字宽度；动态视口高度限制对话框，系统字体无需网络字体请求。 |
-| [Responsive tables](https://github.com/GoogleChrome/modern-web-guidance/blob/v1.0.1/skills/modern-web-guidance/guides/ui-atoms/responsive-table.md) | 机器列表按自身容器 620px 阈值变为带字段标签的卡片；保留 GPU、功耗、CPU、内存；使用者列紧随状态，以可换行胶囊显示并在空值时本地化；进程表提供可键盘聚焦且具名称的横向滚动区域。 |
+| [Responsive tables](https://github.com/GoogleChrome/modern-web-guidance/blob/v1.0.1/skills/modern-web-guidance/guides/ui-atoms/responsive-table.md) | 机器列表按自身容器 830px 阈值变为带字段标签的卡片，该阈值覆盖七列表格在长机器名下的实测宽度；保留 GPU、功耗、CPU、内存；使用者列紧随状态，以可换行胶囊显示并在空值时本地化，姓名保留连续空格以区分仅空格不同的人员；进程表提供可键盘聚焦且具名称的横向滚动区域。 |
 | [Accessibility](https://github.com/GoogleChrome/modern-web-guidance/blob/v1.0.1/skills/modern-web-guidance/guides/accessibility/accessibility.md) | 跳到主要内容链接、明显焦点、较大点击目标；使用者胶囊保留原生 checkbox 与 label、至少 44×44 CSS px 命中区、可见焦点环和选中计数，装饰勾号与加号不进入无障碍名称；状态同时使用文字与色彩；图表增加有效时段/最近值摘要及方向键读数播报；刷新重建后在原容器按控件类型和完整 dataset 恢复焦点，必要时滚入视口。 |
 | [Dialog](https://github.com/GoogleChrome/modern-web-guidance/blob/v1.0.1/skills/modern-web-guidance/guides/ui-components/dialog.md) | 延用原生 dialog/showModal，安全的取消默认焦点与 Escape；模态期间推迟结构重建，保持调用按钮供浏览器返回焦点；滚动链约束为渐进增强。 |
 

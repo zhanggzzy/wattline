@@ -40,3 +40,43 @@
 快照字段 `people` 与 `machines[].assigned_users`、`PUT /api/machines/{id}/assignees`、人员名单 API、权限校验、持久化和数据库 schema 不变，无迁移。详情页原「使用者」入口和摘要保留。
 
 验证范围为合成数据与 Chromium。Firefox、Safari、真实节点、真实历史库、用户实例和部署均未实测。AN-134 独立审查、Mika 的主干整合与远端 SHA 核对仍待进行；活动 change 与审查/整合任务保持未完成。
+
+## AN-138 返工验证
+
+2026-11-25（Asia/Shanghai），Executor-OMP 在 Wattline 固定开发目录完成 AN-134 审查的两项返工自测。被审基线仍为 `eae4fb43ab9b8ea9ce88282e202d260fd266c23e`（AN-134 审查 HEAD）；审查结论、实测值和证据包见 [`review-an-134.md`](review-an-134.md)。本轮只改静态前端、合成浏览器回归、文档和 change，登记 API、权限、SQLite 与配置不变，`AGENTS.md` 运行时注入继续未暂存。
+
+### 命令和结果
+
+| 命令 | 退出码 | 实际结果 |
+| --- | ---: | --- |
+| `.venv/bin/python -m pytest -q` | 0 | `44 passed, 1 warning in 0.84s`。警告仍为 Starlette `TestClient` 的 httpx 弃用提示。 |
+| `node --check wattline/static/monitor.js` | 0 | 无输出。 |
+| `node --check wattline/static/locales.js` | 0 | 无输出。 |
+| `node tools/test_i18n.cjs` | 0 | `PASS: 311 message keys, placeholder parity, references, interpolation, Intl, persistence, fallback, blocked storage` |
+| `.venv/bin/python tools/browser_smoke.py --browser "$HOME/Library/Caches/ms-playwright/chromium_headless_shell-1254/chrome-headless-shell-mac-arm64/chrome-headless-shell"` | 0 | `result: PASS`，Chromium `158.0.8127.18`，`page_errors: []`。新增 `assignee_responsive` 结果见下；原始 JSON 在忽略目录 `artifacts/an138-browser.json`。 |
+| `.venv/bin/python artifacts/an134-repro.py <同上 Chromium>` | 0 | 沿用 AN-134 复现脚本重跑全部交互与布局断言通过；`breakpoints` 显示 700/730/950/1024 均切卡片且 `scrollWidth == clientWidth`。输出在忽略目录 `artifacts/an138-repro.json`。 |
+| `OPENSPEC_TELEMETRY=0 npx --offline @fission-ai/openspec@1.14.2 validate style-machine-assignee-chips --strict` | 0 | `Change 'style-machine-assignee-chips' is valid` |
+| `OPENSPEC_TELEMETRY=0 npx --offline @fission-ai/openspec@1.14.2 validate --specs --strict` | 0 | `Totals: 7 passed, 0 failed (7 items)` |
+| `git diff --check`、`git diff --cached --check` | 0 / 0 | 无输出。 |
+
+### 两项问题的闭环
+
+1. **连续空格被折叠。** 列表 `.person-chip` 与弹窗 `.assignee-chip-name` 增加 `white-space: pre-wrap`，保留原有 `overflow-wrap: anywhere`。合成 API 建立两个 ID 不同的 `Ada Lovelace` 与 `Ada  Lovelace`；列表胶囊渲染宽度实测 `77.78125` 与 `80.96875` CSS px，弹窗为 `84.15625` 与 `87.484375`，`textContent` 分别为单空格和双空格原文，`white-space` 均为 `pre-wrap`。80 字符姓名在 1440 和 320 CSS px 下仍完整换行，没有加宽或截断（既有 `check_people_directory` 断言继续通过）。
+2. **中等宽度横向滚动。** 七列表格在英文短夹具下实测固有宽度 `769` CSS px，机器名与地址取 170 px 上限时实测 `827.578125`；容器查询阈值由 620 调为 830，使表格只在完整宽度能容纳时出现。真实页面容器与视口实测：
+
+| 视口 CSS px | 容器 CSS px | 布局 | 列表 `scrollWidth` / `clientWidth` | 四个指标字段 |
+| ---: | ---: | --- | --- | --- |
+| 320 | 286 | 卡片 | 286 / 286 | 可见，本地化标签 |
+| 700 | 656 | 卡片 | 656 / 656 | 可见 |
+| 730 | 684 | 卡片 | 684 / 684 | 可见 |
+| 950 | 723 | 卡片 | 723 / 723 | 可见 |
+| 1024 | 737 | 卡片 | 737 / 737 | 可见 |
+| 1440 | 1138 | 表格 | 1138 / 1138 | 可见 |
+
+中英文 320 和 1440 均无页面横向溢出（`documentElement.scrollWidth <= innerWidth`）。实际切换边界由 1024 到 1440 视口二分实测：最后一个卡片视口 1123（容器 830），第一个表格视口 1124（容器 831），两侧列表和页面都不横向滚动；表格侧容器 831 已超过长短名夹具的固有宽度上限 828。截图在忽略目录：`assignee-responsive-1024-en.png`、`assignee-responsive-320-en.png`、`assignee-responsive-boundary-en.png`、`assignee-chip-spacing.png`。
+
+### 回归范围与限制
+
+仓库合成 Chromium 回归新增独立 `check_assignee_responsive`，覆盖双空格姓名在列表与选择器的字面显示及渲染宽度差、320/700/730/950/1024/1440 中英文布局、卡片与表格两侧的 `scrollWidth`、页面无横向溢出、四个指标字段可见，以及二分得到的切换边界。既有人员名单回归继续覆盖列位、空值、字面安全、80 字符换行、选择计数、鼠标/空格、焦点、44 px 命中区、保存取消、失败草稿、禁用态和旧单人登记迁移。
+
+范围为 Chromium、合成节点、临时 SQLite；Firefox、Safari、真实屏幕阅读器、真实节点、用户实例与部署未实测。AN-137 独立复审、Mika 的规范同步/归档和远端 `main` 核对仍待进行，活动 change 保持未归档。

@@ -1408,9 +1408,148 @@ def check_people_directory(browser):
             "directory_rename_add_remove": True, "cancel_multi_select_deselect_clear": True}
 
 
+def check_assignee_responsive(browser):
+    """AN-138: literal internal spacing and a card switch that prevents horizontal scrolling."""
+    origin = "http://localhost"
+    spaced_names = ("Ada Lovelace", "Ada  Lovelace")
+    layouts = []
+    with TemporaryDirectory() as directory:
+        data_dir = Path(directory)
+        hosts = (Machine(id="layout-a", name="Layout fixture Alpha", mode="ssh",
+                         ssh_alias="layout-a.invalid", expected_host_id="c" * 32),
+                 Machine(id="layout-b", name="Layout fixture Beta", mode="ssh",
+                         ssh_alias="layout-b.invalid", expected_host_id="d" * 32))
+        config = Config(data_dir=data_dir, machines=hosts)
+        monitor = Monitor(config)
+        monitor.start_sampler = lambda _machine: None
+        monitor.latest[hosts[0].id] = dict(status="offline", reason="synthetic offline", metrics=None)
+        app = create_app(config, monitor=monitor)
+        with TestClient(app, base_url=origin) as client:
+            person_ids = [client.post("/api/people", json={"name": name}).json()["id"]
+                          for name in spaced_names]
+            client.put(f"/api/machines/{hosts[0].id}/assignees",
+                       json={"person_ids": person_ids}).raise_for_status()
+
+            def forward(route):
+                request = route.request
+                path = request.url.removeprefix(origin)
+                if not path.startswith("/"):
+                    return route.abort()
+                headers = {name: value for name, value in request.headers.items()
+                           if name in ("content-type", "sec-fetch-site")}
+                response = client.request(request.method, path, headers=headers,
+                                          content=request.post_data_buffer)
+                route.fulfill(status=response.status_code, body=response.content,
+                              content_type=response.headers.get("content-type"))
+
+            context = browser.new_context(viewport={"width": 1440, "height": 900})
+            page = context.new_page()
+            errors = []
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            page.route("**/*", forward)
+            page.goto(origin)
+            expect(page.locator("[data-machine-row]")).to_have_count(2)
+            page.locator("#locale-select").select_option("en")
+            table = page.locator(".machine-scroll")
+            row = page.locator(f'[data-machine-row="{hosts[0].id}"]')
+            cell = row.locator(".assignee-cell")
+            picker = page.locator("#assignee-dialog")
+
+            measure = """(elements, prefix) => elements
+                .filter(element => element.textContent.startsWith(prefix))
+                .map(element => {
+                  const range = document.createRange();
+                  range.selectNodeContents(element);
+                  return {text: element.textContent, width: range.getBoundingClientRect().width,
+                          whiteSpace: getComputedStyle(element).whiteSpace};
+                })"""
+
+            def literal_spacing(surface):
+                values = surface.evaluate_all(measure, "Ada")
+                assert sorted(value["text"] for value in values) == sorted(spaced_names), values
+                assert all(value["whiteSpace"] == "pre-wrap" for value in values), values
+                widths = {value["text"]: value["width"] for value in values}
+                assert widths[spaced_names[1]] > widths[spaced_names[0]] + 1, widths
+                return values
+
+            list_spacing = literal_spacing(cell.locator(".person-chip"))
+            row.locator(".row-open").click()
+            page.locator("[data-edit-assignees]").click()
+            expect(picker).to_be_visible()
+            picker_spacing = literal_spacing(picker.locator(".assignee-chip-name"))
+            page.locator("#assignee-cancel").click()
+            page.locator("#breadcrumb [data-overview]").click()
+
+            def card_mode():
+                return cell.evaluate('el => getComputedStyle(el, "::before").content !== "none"')
+
+            def fits():
+                box = table.evaluate("el => ({width: el.clientWidth, scrollWidth: el.scrollWidth})")
+                assert box["scrollWidth"] == box["width"], box
+                assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                return box
+
+            def check_width(locale, width):
+                page.locator("#locale-select").select_option(locale)
+                page.set_viewport_size({"width": width, "height": 900})
+                card = card_mode()
+                assert card == (width != 1440), (locale, width, card)
+                box = fits()
+                metrics = row.locator(".number-cell")
+                assert metrics.count() == 4
+                labels = []
+                for index in range(4):
+                    metric = metrics.nth(index)
+                    assert metric.is_visible(), (locale, width, index)
+                    labels.append(metric.get_attribute("data-label"))
+                assert all(labels), labels
+                layouts.append({"locale": locale, "width": width, "card": card,
+                                "container": box["width"], "scrollWidth": box["scrollWidth"],
+                                "metric_labels": labels})
+
+            for width in (320, 700, 730, 950, 1024, 1440):
+                check_width("en", width)
+            for width in (320, 1440):
+                check_width("zh-CN", width)
+            page.locator("#locale-select").select_option("en")
+            page.set_viewport_size({"width": 1024, "height": 900})
+            page.locator(".machine-scroll").screenshot(path=str(OUT / "assignee-responsive-1024-en.png"))
+            page.set_viewport_size({"width": 320, "height": 900})
+            page.locator(".machine-scroll").screenshot(path=str(OUT / "assignee-responsive-320-en.png"))
+
+            page.set_viewport_size({"width": 1024, "height": 900})
+            assert card_mode()
+            page.set_viewport_size({"width": 1440, "height": 900})
+            assert not card_mode()
+            low, high = 1024, 1440
+            while high - low > 1:
+                middle = (low + high) // 2
+                page.set_viewport_size({"width": middle, "height": 900})
+                if card_mode():
+                    low = middle
+                else:
+                    high = middle
+            page.set_viewport_size({"width": low, "height": 900})
+            assert card_mode(), low
+            card_box = fits()
+            page.set_viewport_size({"width": high, "height": 900})
+            assert not card_mode(), high
+            table_box = fits()
+            assert table_box["width"] >= 769, table_box
+            page.locator(".machine-scroll").screenshot(path=str(OUT / "assignee-responsive-boundary-en.png"))
+            page.set_viewport_size({"width": 1440, "height": 900})
+            row.locator(".assignee-cell").screenshot(path=str(OUT / "assignee-chip-spacing.png"))
+            assert not errors, errors
+            context.close()
+    return {"list_spacing": list_spacing, "picker_spacing": picker_spacing, "layouts": layouts,
+            "switch": {"last_card_viewport": low, "card_container": card_box["width"],
+                       "first_table_viewport": high, "table_container": table_box["width"]}}
+
+
 with sync_playwright() as p:
     browser = p.chromium.launch(**({"executable_path":args.browser} if args.browser else {}))
     people_directory = check_people_directory(browser)
+    assignee_responsive = check_assignee_responsive(browser)
     page = browser.new_page(viewport={"width":1440,"height":1100}, device_scale_factor=1)
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
@@ -1738,7 +1877,7 @@ with sync_playwright() as p:
     print(json.dumps({"focus_layout":focus_layout,"result":"PASS", "browser":browser.version, "page_errors":errors,
                       "mutations":len(mutations), "history_queries":len(history_queries), "screenshots":28, "locales":["zh-CN","en"], "dialog_locales":dialog_locales,
                       "metric_layouts":layout_results, "focus_refreshes":focus_results,
-                      "people_directory":people_directory,
+                      "people_directory":people_directory, "assignee_responsive":assignee_responsive,
                       "unlimited_container":unlimited_container,"gpu_process_timing":gpu_process_timing,
                       "windows_processes":windows_processes, "overview_regressions":overview_regressions,
                       "silhouettes":silhouettes, "rail_identity_edges":rail_identity_edges}, ensure_ascii=False))

@@ -53,6 +53,7 @@ python -m pip install -e '.[test,browser-test]'
 python -m playwright install chromium
 node tools/test_i18n.cjs
 python tools/browser_smoke.py
+python tools/resource_browser_smoke.py
 ~~~
 
 Screenshots are written to the ignored `artifacts/` directory. An existing
@@ -75,22 +76,39 @@ separate deployment session requested by the user.
 
 ## Dashboard workspace
 
-On a machine's detail page, choose **使用者 / Assignees** beside **配置 /
-Configure**. Select one or more people, then save. Clear the selection and save
-to leave the machine unassigned. Open **人员名单 / People directory** from the
-machine list or the assignee editor to add or rename people. Clear a person's
-machine associations before removing them from the directory. Assignments are
-operator notes. GPU process accounts, ownership evidence, and SSH login settings
-continue to use their existing sources.
+Choose **新增设备 / Add device** to register a CPU or GPU machine, a NAS, or a
+shared storage cluster. Storage may be registered before an adapter is
+available. Pending records show unavailable readings. Storage adapters are
+read-only collectors that report a stable logical identity, sample time,
+observation scope, capacity and health. An adapter may also report throughput,
+pools, members and verified logical children. The browser check injects a
+synthetic adapter. Vendor integrations require a separate adapter.
 
-Startup imports existing single assignees automatically, reusing one directory
-entry for each exact trimmed name. Before upgrading an existing instance, keep
-a consistent backup of its data directory. Reverting to the older binary also
-requires restoring that backup. Changes made after the backup stay in the
-upgraded database. API clients should read `machines[].assigned_users` and
-`people` from the snapshot and write `person_ids` to
-`PUT /api/machines/{id}/assignees`. This replaces the previous
-`assigned_user` field on the snapshot and settings API.
+Use **分组与人员 / Groups and people** to maintain rooms, clusters and the
+directory. A device can belong to one room and multiple clusters. Room and
+cluster pages link to each other and list their devices. Removing a group
+detaches its links and preserves device records and history.
+
+The overview shows online devices, visible GPUs and GPU power above persisted
+alerts. The power card reports current draw and rated power with separate
+coverage of visible GPUs. Rated power uses the GPU default power limit reported
+by NVIDIA and appears when the live sample includes it. Rooms and
+clusters offer a 24-hour chart based on current membership. Host and container
+CPU and memory observations are shown separately, with coverage for each
+metric. Open a device for its own trends. The alert center shows first and most
+recent observations, verified recovery and administrative closure.
+
+A room can name one owner. A device or cluster can specify one directory
+person, Shared, or no assignment. Existing multiple-assignee records remain
+visible and persist through unrelated edits. The machine assignment API still
+accepts `person_ids`. Clients using the new modes can also send `mode` with
+`person`, `shared`, or `unset`. Assignments are operator notes independent of
+GPU process ownership and SSH configuration.
+
+Startup applies the SQLite schema upgrade and retains existing registry, people,
+SSH identity and history keys. Keep a consistent pre-upgrade data backup.
+Restoring that backup is required for rollback to a binary using the previous
+schema version.
 
 Use the arrow beside Wattline to collapse navigation into a narrow
 machine-identity rail. Each machine keeps a monochrome model silhouette: B300 as

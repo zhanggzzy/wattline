@@ -14,7 +14,7 @@
   <aside class="rail">
     <div class="rail-inner">
       <div class="rail-brand"><div class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span class="brand-name">Wattline</span></div><button type="button" id="rail-toggle" class="rail-toggle" aria-controls="rail-nav" aria-expanded="true"></button></div>
-      <p class="brand-caption"><span data-i18n="compute_monitoring_workbench">算力监控工作台</span></p>
+      <p class="brand-caption"><span data-i18n="compute_resource_workbench">计算资源管理工作台</span></p>
       <nav aria-label="机器导航" data-i18n-aria-label="machine_navigation" id="rail-nav"></nav>
     </div>
   </aside>
@@ -38,6 +38,21 @@
     <h2 id="machine-dialog-title"><span data-i18n="add_machine">新增机器</span></h2>
     <p id="machine-target" class="mono" hidden></p>
     <fieldset id="machine-fields" aria-label="机器设置" data-i18n-aria-label="machine_settings_m174">
+      <label><span data-i18n="resource_kind">硬件类型</span><select name="hardware_kind">
+        <option value="" data-i18n="automatic_type">自动识别</option><option value="cpu">CPU</option>
+        <option value="gpu">GPU</option><option value="storage" data-i18n="storage_resource">存储</option>
+      </select></label>
+      <fieldset id="storage-fields" hidden disabled>
+        <div class="form-grid">
+          <label><span data-i18n="device_name">设备名称</span><input name="storage_name" type="text" maxlength="80" required></label>
+          <label><span data-i18n="storage_resource">存储</span><select name="storage_kind">
+            <option value="nas">NAS</option><option value="storage_cluster" data-i18n="storage_cluster">共享存储集群</option>
+          </select></label>
+          <label><span data-i18n="storage_adapter">采集适配器</span><select name="adapter"></select></label>
+        </div>
+        <label class="check-label"><input name="storage_enabled" type="checkbox" checked><span data-i18n="enable_background_monitoring">启用后台巡检</span></label>
+      </fieldset>
+      <fieldset id="compute-fields">
       <div id="machine-connection" class="form-grid">
         <label><span data-i18n="ip_or_hostname">IP 或主机名</span><input name="host" type="text" maxlength="128" placeholder="例如 jg04" data-i18n-placeholder="e_g_jg04" autocomplete="off" spellcheck="false" required></label>
         <label><span data-i18n="ssh_username">SSH 用户名 </span><small><span data-i18n="optional">可选</span></small><input name="ssh_user" type="text" maxlength="64" placeholder="按现有 SSH 配置" data-i18n-placeholder="use_existing_ssh_configuration" autocomplete="off" spellcheck="false"></label>
@@ -58,6 +73,9 @@
         <label class="check-label"><input name="checks" type="checkbox" value="memory"><span data-i18n="memory">内存</span></label>
         <label class="check-label"><input name="checks" type="checkbox" value="system"><span data-i18n="system_disk_and_uptime">系统盘与运行时长</span></label>
       </fieldset>
+      </fieldset>
+      <label id="registration-room" hidden><span data-i18n="rooms">机房</span><select name="room_id" disabled></select></label>
+      <label id="registration-user"><span data-i18n="assignees">使用人</span><select name="resource_user"></select></label>
     </fieldset>
     <p id="machine-error" class="form-error" role="alert" hidden></p>
     <div class="dialog-actions">
@@ -70,6 +88,12 @@
   <form id="assignee-form">
     <h2 id="assignee-title" data-i18n="assignees">使用者</h2>
     <p id="assignee-machine"></p>
+    <label id="assignee-mode-field"><span data-i18n="resource_user_mode">使用人</span><select id="assignee-mode">
+      <option value="unset" data-i18n="unassigned">未设置</option>
+      <option value="shared" data-i18n="shared_user">共享</option>
+      <option value="person" data-i18n="individual_user">指定人员</option>
+      <option value="legacy" data-i18n="legacy_users">原有多人</option>
+    </select></label>
     <div class="assignee-picker-head">
       <p data-i18n="choose_from_people_directory">从人员名单选择</p>
       <p id="assignee-count" role="status" aria-live="polite"></p>
@@ -89,6 +113,7 @@
 <dialog class="machine-dialog" id="people-dialog" aria-labelledby="people-title">
   <form id="people-form">
     <h2 id="people-title" data-i18n="people_directory">人员名单</h2>
+    <input id="people-search" type="search" class="search" data-i18n-aria-label="people_search" data-i18n-placeholder="people_search">
     <ul id="people-list" class="people-list"></ul>
     <p id="people-empty" data-i18n="no_people">名单中还没有人员。</p>
     <fieldset id="people-edit-fields">
@@ -119,8 +144,28 @@
   <div id="gpu-dialog-content"></div>
   <div class="dialog-actions gpu-dialog-actions"><button type="button" class="control primary-control" data-gpu-trends data-i18n="gpu_trends">查看此 GPU 趋势</button></div>
 </dialog>
+<dialog class="machine-dialog" id="group-dialog" aria-labelledby="group-dialog-title">
+  <form id="group-form">
+    <h2 id="group-dialog-title"></h2>
+    <fieldset id="group-fields">
+      <label><span data-i18n="group_name">名称</span><input name="group_name" maxlength="80" required></label>
+      <label id="group-location-field"><span data-i18n="room_location">位置</span><input name="location" maxlength="128"></label>
+      <label><span id="group-person-label"></span><select name="person"></select></label>
+      <fieldset id="group-members-field">
+        <legend data-i18n="group_members">成员</legend>
+        <input name="member_search" type="search" class="search" data-i18n-aria-label="group_member_search" data-i18n-placeholder="group_member_search">
+        <div id="group-member-options"></div>
+      </fieldset>
+    </fieldset>
+    <div id="group-delete-preview" hidden></div>
+    <p id="group-error" class="form-error" role="alert" hidden></p>
+    <div class="dialog-actions"><button id="group-cancel" type="button" class="control" data-i18n="cancel">取消</button>
+      <button id="group-save" type="submit" class="control primary-control" data-i18n="save">保存</button></div>
+  </form>
+</dialog>
 <script src="/static/locales.js" defer></script>
 <script src="/static/i18n.js" defer></script>
+<script src="/static/groups.js" defer></script>
 <script src="/static/monitor.js" defer></script>
 </body>
 </html>

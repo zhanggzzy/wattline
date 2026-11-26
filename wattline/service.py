@@ -12,7 +12,9 @@ from zoneinfo import ZoneInfo
 
 from .collector import CollectionError, Collector, cpu_percent
 from .config import DEFAULT_SSH_CONNECT_TIMEOUT, Machine, MachineSettings
-from .history import DAY_MS, GPU_FIELDS, History, HistoryInUse, WARM_HOURS, WARM_MS
+from .groups import compute_key, group_history_data, storage_key, summarize_resources
+from .history import DAY_MS, GPU_FIELDS, History, HistoryInUse, MAX_POINTS, WARM_HOURS, WARM_MS, downsample
+from .resources import StorageAdapter, StorageObservation
 
 
 log = logging.getLogger(__name__)
@@ -57,6 +59,10 @@ def metrics_from(data, percent):
     devices = []
     for index, raw in enumerate(data.get('gpus', [])):
         gpu = {key:raw[key] for key in GPU_FIELDS if key in raw}
+        # This hardware setting is used by the live overview. History keeps its existing field set.
+        default_limit = raw.get('default_power_limit_w')
+        if type(default_limit) in (int, float) and default_limit > 0 and math.isfinite(default_limit):
+            gpu['default_power_limit_w'] = default_limit
         gpu['index'] = index
         gpu['processes'] = [{key:proc[key] for key in PROCESS_FIELDS if key in proc}
                             for proc in raw.get('processes', [])]
@@ -80,7 +86,8 @@ def metrics_from(data, percent):
 
 
 class Monitor:
-    def __init__(self, config, collector=None, clock=milliseconds, sleep=asyncio.sleep, monotonic=None):
+    def __init__(self, config, collector=None, clock=milliseconds, sleep=asyncio.sleep, monotonic=None,
+                 *, storage_adapters: dict[str, StorageAdapter] | None = None):
         self.config = config
         self.archive_zone = ZoneInfo(config.archive_timezone)
         self.clock = clock
@@ -106,6 +113,17 @@ class Monitor:
         self.aliases = {}
         self.people = {}
         self.machine_assignees = {}
+        self.shared_users = set()
+        self.storage = {}
+        self.rooms = {}
+        self.clusters = {}
+        self.locations = {}
+        self.resource_order = {}
+        self.storage_adapters = dict(storage_adapters or {})
+        self.storage_latest = {}
+        self.storage_last_seen = {}
+        self.storage_samplers = {}
+        self.freshness_task = None
         self.ssh_pins = {}
         self.machine_order = {}
         self.scopes = {}
@@ -116,7 +134,8 @@ class Monitor:
 
     @property
     def tasks(self):
-        return [*self.samplers.values(), *(task for task in (self.archive_task,self.removal_task) if task)]
+        return [*self.samplers.values(), *self.storage_samplers.values(),
+                *(task for task in (self.archive_task,self.removal_task,self.freshness_task) if task)]
 
     async def load_registry(self):
         aliases = await self.write(self.history.prepare)
@@ -150,14 +169,20 @@ class Monitor:
         self.aliases = aliases
         self.people = people
         self.machine_assignees = assignees
+        self.shared_users, self.storage = await self.write(self.history.load_resources)
+        self.storage_last_seen = await self.write(self.history.storage_success_times, self.clock())
+        self.rooms, self.clusters, self.locations, self.resource_order = await self.write(self.history.load_groups)
         self.ssh_pins = pins
         self.machine_order = order
         self.machines = machines
+        await self.reconcile_alerts()
         self.pending_removals = pending
         self.schedule_removal_retry()
         self.registry_loaded = self.history_ok = True
         for machine in machines.values():
             self.start_sampler(machine)
+        for id in self.storage:
+            self.start_storage_sampler(id)
 
     async def start(self):
         try:
@@ -165,6 +190,7 @@ class Monitor:
         except (OSError, sqlite3.Error) as error:
             self.storage_failure(error)
         self.archive_task = asyncio.create_task(self.archive(), name='history:archive')
+        self.freshness_task = asyncio.create_task(self.check_freshness(), name='alerts:freshness')
 
     def start_sampler(self, machine):
         if machine.enabled:
@@ -223,12 +249,14 @@ class Monitor:
         from_config = any(node.history_key == identity for node in self.config.machines)
         await self.stop_sampler(machine.id)
         try:
-            await self.write(self.history.begin_machine_removal, identity, from_config)
+            await self.write(self.history.begin_machine_removal, identity, from_config, machine.id, self.clock())
         except (OSError, sqlite3.Error):
             self.start_sampler(machine)
             raise
         self.pending_removals.add(identity)
         self.machines.pop(machine.id)
+        self.forget_resource(compute_key(identity))
+        self.shared_users.discard(identity)
         for index in (self.ssh_pins,self.machine_order,self.aliases,self.machine_assignees):
             index.pop(identity, None)
         for index in (self.latest,self.scopes,self.inventory,self.inventory_complete,self.last_seen,self.cpu_baseline):
@@ -263,6 +291,11 @@ class Monitor:
                 raise OSError('机器配置暂不可读')
             if len(ids) != len(self.machines) or set(ids) != self.machines.keys():
                 raise CollectionError('conflict', '机器清单已变化，请刷新后重试排序')
+            if self.resource_order:
+                replacements = iter(ids)
+                combined = [next(replacements) if id in self.machines else id for id in self.ordered_resource_ids()]
+                await self.persist_resource_order(combined, self.resource_keys())
+                return {'machines':ids}
             order = {self.machines[id].history_key:index for index,id in enumerate(ids)}
 
             async def save():
@@ -307,8 +340,11 @@ class Monitor:
                 raise OSError('机器配置暂不可读')
             if person not in self.people:
                 raise KeyError(person)
-            if any(person in ids for ids in self.machine_assignees.values()):
-                raise CollectionError('conflict', 'person_in_use')
+            references = self.person_references(person)
+            if any(references.values()) or any(person in ids for ids in self.machine_assignees.values()):
+                error = CollectionError('conflict', 'person_in_use')
+                error.references = references
+                raise error
 
             async def save():
                 await self.write(self.history.delete_person, person)
@@ -316,23 +352,227 @@ class Monitor:
 
             await wait_for_work(asyncio.create_task(save()))
 
-    async def configure_assignees(self, id, people):
+    def user_view(self, key):
+        users = self.person_views(self.machine_assignees.get(key, ()))
+        return {'assigned_users': users, 'assignment_mode': 'shared' if key in self.shared_users else
+                'legacy' if len(users) > 1 else 'person' if users else 'unset'}
+
+    def validate_people(self, people):
+        if any(person not in self.people for person in people):
+            raise CollectionError('conflict', 'person_missing')
+
+    def set_users(self, key, people, shared):
+        if people:
+            self.machine_assignees[key] = people
+        else:
+            self.machine_assignees.pop(key, None)
+        if shared:
+            self.shared_users.add(key)
+        else:
+            self.shared_users.discard(key)
+
+    async def configure_assignees(self, id, people, shared=False, *, storage=False):
         async with self.settings_lock:
             if not self.registry_loaded:
                 raise OSError('机器配置暂不可读')
-            machine = self.machines[id]
-            if any(person not in self.people for person in people):
-                raise CollectionError('conflict', 'person_missing')
+            target = self.storage[id] if storage else self.machines[id]
+            key = id if storage else target.history_key
+            self.validate_people(people)
 
             async def save():
-                await self.write(self.history.save_assignees, machine.history_key, people)
-                if people:
-                    self.machine_assignees[machine.history_key] = people
-                else:
-                    self.machine_assignees.pop(machine.history_key, None)
-                return self.machine_view(machine, self.clock())
+                await self.write(self.history.save_assignees, key, people, shared)
+                self.set_users(key, people, shared)
+                return self.storage_view(id, self.clock()) if storage else self.machine_view(target, self.clock())
 
             return await wait_for_work(asyncio.create_task(save()))
+
+    async def configure_storage(self, settings, id=None):
+        async with self.settings_lock:
+            if not self.registry_loaded:
+                raise OSError('机器配置暂不可读')
+            previous = self.storage[id] if id is not None else None
+            id = id or 'storage-' + uuid.uuid4().hex
+            if settings.adapter is not None and settings.adapter not in self.storage_adapters and (
+                previous is None or settings.adapter != previous.adapter
+            ):
+                raise CollectionError('conflict', 'storage_adapter_unavailable')
+            people = () if settings.person_id is None else (settings.person_id,)
+            assignment = (people, settings.shared) if previous is None or {
+                'person_id','shared'
+            } & settings.model_fields_set else None
+            self.validate_people(people)
+            location = self.check_location(settings)
+            restart = previous is None or (previous.enabled, previous.adapter, previous.storage_kind) != (
+                settings.enabled, settings.adapter, settings.storage_kind)
+
+            async def save():
+                if restart:
+                    await self.stop_storage_sampler(id)
+                closure = None
+                if not settings.enabled or settings.adapter is None:
+                    closure = (self.clock(), 'disabled' if not settings.enabled else 'adapter_removed')
+                try:
+                    await self.write(self.history.save_storage, id, settings, assignment, closure, location)
+                except (OSError, sqlite3.Error):
+                    if restart and previous:
+                        self.start_storage_sampler(id)
+                    raise
+                self.storage[id] = settings
+                if location is not None:
+                    self.set_location(storage_key(id), location)
+                if assignment is not None:
+                    self.set_users(id, *assignment)
+                if restart:
+                    self.storage_latest.pop(id, None)
+                    self.start_storage_sampler(id)
+                return self.storage_view(id, self.clock())
+
+            return await wait_for_work(asyncio.create_task(save()))
+
+    async def remove_storage(self, id):
+        async with self.settings_lock:
+            if not self.registry_loaded:
+                raise OSError('机器配置暂不可读')
+            self.storage[id]
+
+            async def remove():
+                await self.stop_storage_sampler(id)
+                try:
+                    await self.write(self.history.remove_storage, id, self.clock())
+                except (OSError, sqlite3.Error):
+                    self.start_storage_sampler(id)
+                    raise
+                del self.storage[id]
+                self.forget_resource(storage_key(id))
+                self.set_users(id, (), False)
+                self.storage_latest.pop(id, None)
+                self.storage_last_seen.pop(id, None)
+                return {'id':id,'cleanup_pending':False}
+
+            return await wait_for_work(asyncio.create_task(remove()))
+
+    def start_storage_sampler(self, id):
+        settings = self.storage[id]
+        if settings.enabled and settings.adapter in self.storage_adapters:
+            self.storage_samplers[id] = asyncio.create_task(self.sample_storage(id), name='storage:'+id)
+
+    async def stop_storage_sampler(self, id):
+        task = self.storage_samplers.pop(id, None)
+        if task:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def sample_storage(self, id):
+        interval = self.config.interval_seconds
+        while True:
+            settings = self.storage[id]
+            at = self.clock()
+            observation = None
+            evidence = None
+            try:
+                async with self.slots:
+                    result = await asyncio.wait_for(self.storage_adapters[settings.adapter](id, settings),
+                                                    self.config.stale_seconds)
+                observation = StorageObservation.model_validate(result)
+                if not 0 <= self.clock()-observation.observed_at < self.config.stale_seconds*1000:
+                    observation = None
+                    raise ValueError('storage timestamp outside the collection interval')
+                if observation.health in ('failed','degraded') or any(
+                    pool.health in ('failed','degraded') for pool in observation.pools
+                ):
+                    evidence = 'storage_health'
+                status = 'warning' if evidence else 'normal'
+            except asyncio.TimeoutError:
+                status, evidence = 'offline', 'storage_timeout'
+            except (OSError, ValueError, TypeError):
+                status, evidence = 'unknown', 'storage_observation_unavailable'
+            if observation:
+                self.storage_last_seen[id] = observation.observed_at
+            cleared = {}
+            if observation:
+                cleared = {'offline': 'collection_resumed', 'collection': 'collection_resumed', 'stale': 'collection_resumed'}
+                if observation.health == 'healthy' and all(pool.health == 'healthy' for pool in observation.pools):
+                    cleared['storage_health'] = 'storage_health_confirmed'
+            rule = {'offline':'offline', 'unknown':'collection', 'warning':'storage_health'}.get(status)
+            event = (id, settings.storage_kind, settings.name, at,
+                     {rule: ('warning', evidence)} if rule else {}, cleared, self.storage_last_seen.get(id))
+            try:
+                await self.write(self.history.append_storage, id, at, status, observation, event)
+            except (OSError, sqlite3.Error) as error:
+                self.storage_failure(error)
+            self.storage_latest[id] = {'observed_at': observation.observed_at if observation else at, 'sample_at':at,
+                                       'status': status, 'reason': evidence,
+                                       'storage_observation': observation.model_dump() if observation else None}
+            await self.sleep(max(0, interval-(self.clock()-at)/1000))
+
+    def storage_view(self, id, now):
+        settings = self.storage[id]
+        result = dict(self.storage_latest.get(id, {}))
+        status = ('disabled' if not settings.enabled else
+                  'pending' if settings.adapter not in self.storage_adapters else result.get('status', 'waiting'))
+        stale = round(self.config.stale_seconds*1000)
+        if result.get('storage_observation') and now-result['observed_at'] >= stale:
+            status = 'stale' if status in ('normal', 'warning') else status
+        return {**result, **self.user_view(id), **self.group_links(storage_key(id)), 'id':id, 'name':settings.name, 'address':'',
+                'hardware_kind':settings.storage_kind, 'storage_kind':settings.storage_kind,
+                'enabled':settings.enabled, 'adapter':settings.adapter, 'status':status,
+                'last_success_at':self.storage_last_seen.get(id), 'metrics':None, 'devices':[],
+                'storage_observation':result.get('storage_observation') if status in ('normal','warning') else None}
+
+    async def reconcile_alerts(self):
+        active = {machine.id for machine in self.machines.values() if machine.enabled}
+        active.update(id for id, settings in self.storage.items() if settings.enabled and settings.adapter is not None)
+        await self.write(self.history.close_inactive_alerts, active, self.machines.keys() | self.storage.keys(), self.clock())
+
+    def hardware_kind(self, machine):
+        if machine.hardware_kind:
+            return machine.hardware_kind
+        if self.inventory.get(machine.id):
+            return 'gpu'
+        if not machine.require_gpu and 'gpu' not in machine.active_checks:
+            return 'cpu'
+        return 'unconfirmed'
+
+    def compute_alert(self, machine, snapshot):
+        status = snapshot['status']
+        kind = self.hardware_kind(machine)
+        name = self.aliases.get(machine.history_key) or self.default_name(machine)
+        at = snapshot['observed_at']
+        triggered = {}
+        cleared = {}
+        if status in ('offline','unknown','warning'):
+            rule = 'offline' if status == 'offline' else 'collection'
+            evidence = snapshot.get('reason') or ' · '.join(snapshot.get('warnings', ()))
+            triggered[rule] = ('critical' if status == 'offline' else 'warning', evidence)
+        if snapshot.get('metrics') is not None:
+            cleared = {'offline':'collection_resumed','stale':'collection_resumed'}
+            if status == 'normal':
+                cleared['collection'] = 'collection_resumed'
+        return machine.id, kind, name, at, triggered, cleared, self.last_seen.get(machine.id)
+
+    async def check_freshness(self):
+        while True:
+            await self.sleep(min(5, self.config.stale_seconds))
+            if not self.registry_loaded or not self.history_ok:
+                continue
+            async with self.settings_lock:
+                now = self.clock()
+                stale_targets = [self.machine_view(machine, now) for machine in self.machines.values()]
+                stale_targets.extend(self.storage_view(id, now) for id in self.storage)
+                try:
+                    for target in stale_targets:
+                        if target['status'] != 'stale':
+                            continue
+                        # The first stale observation is the time at which freshness expired.
+                        started = target['observed_at'] + target.get('stale_ms', round(self.config.stale_seconds*1000))
+                        event = (target['id'], target['hardware_kind'], target['name'], started,
+                                 {'stale': ('warning','sample_stale')}, {}, target['last_success_at'])
+                        id = target['id']
+                        key = self.machines[id].history_key if id in self.machines else id
+                        await self.write(self.history.record_stale_alert, key, id in self.storage,
+                                         target.get('sample_at', target['observed_at']), event)
+                except (OSError, sqlite3.Error) as error:
+                    self.storage_failure(error)
 
     @staticmethod
     def default_name(machine):
@@ -340,9 +580,13 @@ class Monitor:
 
     @staticmethod
     def with_settings(machine, settings):
-        values = settings.model_dump(exclude={'alias'})
+        values = settings.model_dump(exclude={'alias','room_id'})
         if 'ssh_connect_timeout_seconds' not in settings.model_fields_set:
             values.pop('ssh_connect_timeout_seconds')
+        if 'hardware_kind' not in settings.model_fields_set:
+            values.pop('hardware_kind')
+        if values.get('hardware_kind', machine.hardware_kind) == 'cpu':
+            values['checks'] = tuple(check for check in values['checks'] if check not in ('gpu','processes'))
         return machine.model_copy(update=values)
 
     def interval(self, machine):
@@ -402,11 +646,14 @@ class Monitor:
                 request.host, request.ssh_user, request.ssh_connect_timeout_seconds, **options)
         if request.target_os == 'windows' and not identity.ssh_host_key:
             raise CollectionError('unknown', '无法核实 Windows 节点的 ED25519 SSH 主机密钥')
-        values = request.model_dump(exclude={'host', 'ssh_user', 'target_os'}, exclude_unset=True)
+        values = request.model_dump(exclude={'host', 'ssh_user', 'target_os', 'shared', 'person_id'}, exclude_unset=True)
         values.setdefault('interval_seconds', self.config.interval_seconds)
         settings = MachineSettings.model_validate(values)
         async with self.settings_lock:
             self.check_registration(request.host, request.ssh_user)
+            people = () if request.person_id is None else (request.person_id,)
+            self.validate_people(people)
+            self.check_location(settings)
             history_id, pins = await self.resolve_collision(request, identity)
             machine = Machine(id=uuid.uuid4().hex, name=request.host[:80], mode='ssh', ssh_alias=request.host,
                               ssh_user=request.ssh_user, target_os=request.target_os,
@@ -416,13 +663,14 @@ class Monitor:
             if request.target_os == 'windows':
                 pins[machine.history_key] = identity.ssh_host_key
             registration = machine.model_dump_json(exclude={'target_os'} if machine.target_os == 'linux' else None)
-            return await self.save_settings(machine, settings, registration=registration, pins=pins)
+            return await self.save_settings(machine, settings, registration=registration, pins=pins,
+                                            assignment=(people, request.shared))
 
     async def configure(self, id, settings):
         async with self.settings_lock:
             return await self.save_settings(self.machines[id], settings)
 
-    async def save_settings(self, machine, settings, registration=None, pins=None):
+    async def save_settings(self, machine, settings, registration=None, pins=None, assignment=None):
         if not self.registry_loaded:
             raise OSError('机器配置暂不可读')
 
@@ -433,10 +681,27 @@ class Monitor:
             if registration:
                 machines = [*self.ordered_machines(), machine]
                 order = {node.history_key:index for index,node in enumerate(machines)}
-            persisted = settings.model_copy(update={'ssh_connect_timeout_seconds':updated.ssh_connect_timeout_seconds})
-            stored = persisted.model_dump_json(exclude={'alias'})
-            await self.write(self.history.save_machine, identity, registration,
-                             stored, settings.alias, pins or {}, order)
+            persisted = settings.model_copy(update={'ssh_connect_timeout_seconds':updated.ssh_connect_timeout_seconds,
+                                                    'hardware_kind':updated.hardware_kind})
+            stored = persisted.model_dump_json(exclude={'alias','room_id'})
+            location = self.check_location(settings)
+            restart = registration or (machine.enabled, machine.active_checks, self.interval(machine), machine.connect_timeout) != (
+                updated.enabled, updated.active_checks, self.interval(updated), updated.connect_timeout
+            )
+            if restart and not registration:
+                await self.stop_sampler(machine.id)
+            closure = (machine.id, self.clock(), 'disabled') if not updated.enabled else None
+            try:
+                await self.write(self.history.save_machine, identity, registration, stored, settings.alias,
+                                 pins or {}, order, assignment, closure, location)
+            except (OSError, sqlite3.Error):
+                if restart and not registration:
+                    self.start_sampler(machine)
+                raise
+            if assignment is not None:
+                self.set_users(identity, *assignment)
+            if location is not None:
+                self.set_location(compute_key(identity), location)
             if pins:
                 self.ssh_pins.update(pins)
                 for existing in self.machines.values():
@@ -446,9 +711,7 @@ class Monitor:
             if order is not None:
                 self.machine_order = order
             self.machines[machine.id] = updated
-            if registration or (machine.enabled, machine.active_checks, self.interval(machine), machine.connect_timeout) != (
-                updated.enabled, updated.active_checks, self.interval(updated), updated.connect_timeout
-            ):
+            if restart:
                 await self.restart_sampler(updated)
             return self.machine_view(updated, self.clock())
 
@@ -507,7 +770,8 @@ class Monitor:
             try:
                 if not self.history_ok:
                     await self.write(self.history.prepare)
-                await self.write(self.history.append, machine.history_key, epoch, snapshot)
+                await self.write(self.history.append, machine.history_key, epoch,
+                                 dict(snapshot, alert_event=self.compute_alert(machine, snapshot)))
                 self.history_ok = True
                 self.history_error_reported = False
             except (OSError, sqlite3.Error, HistoryInUse) as error:
@@ -589,11 +853,13 @@ class Monitor:
         alias = self.aliases.get(machine.history_key)
         stale = round(self.stale_seconds(machine)*1000)
         view.update(id=machine.id, name=alias or default_name, alias=alias, default_name=default_name,
-                    assigned_users=self.person_views(self.machine_assignees.get(machine.history_key, ())),
+                    **self.user_view(machine.history_key), **self.group_links(compute_key(machine.history_key)), hardware_kind=self.hardware_kind(machine),
+                    configured_hardware_kind=machine.hardware_kind,
                     scope=self.scopes.get(machine.id), address=machine.display_address,
                     mode=machine.mode, target_os=machine.target_os,
-                    require_gpu=machine.require_gpu or 'gpu' in machine.active_checks or bool(self.inventory.get(machine.id)),
-                    expected_gpu_count=machine.expected_gpu_count, gpu_inventory_complete=self.inventory_complete.get(machine.id),
+                    require_gpu=machine.hardware_kind != 'cpu' and
+                    (machine.require_gpu or 'gpu' in machine.active_checks or bool(self.inventory.get(machine.id))),
+                    expected_gpu_count=machine.expected_gpu_count if machine.hardware_kind != 'cpu' else None, gpu_inventory_complete=self.inventory_complete.get(machine.id),
                     last_success_at=self.last_seen.get(machine.id), devices=self.inventory.get(machine.id, []),
                     enabled=machine.enabled, checks=machine.active_checks, interval_seconds=self.interval(machine),
                     ssh_connect_timeout_seconds=machine.connect_timeout,
@@ -606,8 +872,160 @@ class Monitor:
             view.update(status='stale', reason='有效样本超过时限，等待新采样', metrics=None, warnings=[])
         return view
 
+    def resource_keys(self):
+        return {**{machine.id:compute_key(machine.history_key) for machine in self.ordered_machines()},
+                **{id:storage_key(id) for id in self.storage}}
+
+    def ordered_resource_ids(self):
+        keys = self.resource_keys()
+        return sorted(keys, key=lambda id:self.resource_order.get(keys[id], math.inf))
+
+    def group_links(self, key):
+        return {'room_id':self.locations.get(key),
+                'cluster_ids':[id for id, cluster in self.clusters.items() if key in cluster['keys']]}
+
+    def forget_resource(self, key):
+        self.locations.pop(key, None)
+        self.resource_order.pop(key, None)
+        for cluster in self.clusters.values():
+            cluster['keys'] = tuple(member for member in cluster['keys'] if member != key)
+
+    def check_location(self, settings):
+        if 'room_id' not in settings.model_fields_set:
+            return None
+        if settings.room_id is not None and settings.room_id not in self.rooms:
+            raise CollectionError('conflict', 'room_missing')
+        return settings
+
+    def set_location(self, key, location):
+        if location.room_id is None:
+            self.locations.pop(key, None)
+        else:
+            self.locations[key] = location.room_id
+
+    def group_views(self, views):
+        by_key = {key:views[id] for id,key in self.resource_keys().items() if id in views}
+        grouped = defaultdict(list)
+        for key, view in by_key.items():
+            if room := self.locations.get(key):
+                grouped[room].append(view)
+        rooms = []
+        for id, room in self.rooms.items():
+            members = grouped[id]
+            owner = self.people.get(room['owner_id'])
+            rooms.append({**room, 'owner':owner,'members':[node['id'] for node in members],
+                          'summary':summarize_resources(members)})
+        clusters = []
+        for id, cluster in self.clusters.items():
+            members = [by_key[key] for key in cluster['keys'] if key in by_key]
+            room_counts = defaultdict(int)
+            for node in members:
+                room_counts[node['room_id']] += 1
+            cluster_fields = {key:value for key,value in cluster.items() if key != 'keys'}
+            clusters.append({**cluster_fields,'shared':bool(cluster['shared']),'person':self.people.get(cluster['person_id']),
+                             'members':[node['id'] for node in members], 'summary':summarize_resources(members),
+                             'rooms':[{'id':room,'count':count} for room,count in room_counts.items()]})
+        return {'rooms':sorted(rooms,key=lambda group:group['name']),
+                'clusters':sorted(clusters,key=lambda group:group['name'])}
+
+    async def save_group(self, kind, body, id=None):
+        async with self.settings_lock:
+            if not self.registry_loaded:
+                raise OSError('registry_unavailable')
+            groups = self.rooms if kind == 'room' else self.clusters
+            if id is not None and id not in groups:
+                raise KeyError(id)
+            if any(other != id and group['name'] == body.name for other, group in groups.items()):
+                raise CollectionError('conflict','group_name_taken')
+            person = body.owner_id if kind == 'room' else body.person_id
+            if person is not None:
+                self.validate_people((person,))
+            id = id or uuid.uuid4().hex
+            if kind == 'room':
+                record = dict(id=id,name=body.name,location=body.location,owner_id=body.owner_id)
+                operation = self.history.save_room
+                args = (id,body)
+            else:
+                resources = self.resource_keys()
+                if any(member not in resources for member in body.members):
+                    raise CollectionError('conflict','group_member_missing')
+                members = tuple(resources[member] for member in body.members)
+                record = dict(id=id,name=body.name,person_id=body.person_id,shared=body.shared,keys=members)
+                operation = self.history.save_cluster
+                args = (id,body,members)
+
+            async def save():
+                await self.write(operation,*args)
+                groups[id] = record
+                return {'id':id}
+
+            return await wait_for_work(asyncio.create_task(save()))
+
+    async def delete_group(self, kind, id):
+        async with self.settings_lock:
+            if not self.registry_loaded:
+                raise OSError('registry_unavailable')
+            groups = self.rooms if kind == 'room' else self.clusters
+            if id not in groups:
+                raise KeyError(id)
+
+            async def delete():
+                await self.write(self.history.delete_group, kind, id)
+                del groups[id]
+                if kind == 'room':
+                    self.locations = {key:room for key,room in self.locations.items() if room != id}
+
+            await wait_for_work(asyncio.create_task(delete()))
+
+    async def place_resource(self, id, location):
+        async with self.settings_lock:
+            if not self.registry_loaded:
+                raise OSError('registry_unavailable')
+            self.check_location(location)
+            key = self.resource_keys()[id]
+
+            async def save():
+                await self.write(self.history.save_resource_location, key, location)
+                self.set_location(key,location)
+                return {'id':id,'room_id':location.room_id}
+
+            return await wait_for_work(asyncio.create_task(save()))
+
+    def person_references(self, person):
+        views = {machine.history_key:self.aliases.get(machine.history_key) or self.default_name(machine)
+                 for machine in self.machines.values()}
+        views.update({id:settings.name for id,settings in self.storage.items()})
+        return {'devices':[views[key] for key,ids in self.machine_assignees.items() if person in ids and key in views],
+                'rooms':[room['name'] for room in self.rooms.values() if room['owner_id'] == person],
+                'clusters':[cluster['name'] for cluster in self.clusters.values() if cluster['person_id'] == person]}
+
+    async def reorder_resources(self, ids):
+        async with self.settings_lock:
+            if not self.registry_loaded:
+                raise OSError('registry_unavailable')
+            keys = self.resource_keys()
+            if len(ids) != len(keys) or set(ids) != keys.keys():
+                raise CollectionError('conflict','resource_list_changed')
+            return await self.persist_resource_order(ids, keys)
+
+    async def persist_resource_order(self, ids, keys):
+        order = {keys[id]:index for index,id in enumerate(ids)}
+        machines = {self.machines[id].history_key:index
+                    for index,id in enumerate(id for id in ids if id in self.machines)}
+
+        async def save():
+            await self.write(self.history.save_resource_order, order, machines)
+            self.resource_order = order
+            self.machine_order = machines
+
+        await wait_for_work(asyncio.create_task(save()))
+        return {'resources':ids}
+
     def snapshot(self):
         now = self.clock()
+        machines = [self.machine_view(machine, now) for machine in self.ordered_machines()]
+        storage = [self.storage_view(id, now) for id in self.storage]
+        views = {node['id']:node for node in (*machines,*storage)}
         return {'server_time':now, 'period_ms':round(self.config.interval_seconds*1000),
                 'default_ssh_connect_timeout_seconds':DEFAULT_SSH_CONNECT_TIMEOUT,
                 'stale_ms':round(self.config.stale_seconds*1000), 'history_writable':self.history_ok,
@@ -615,7 +1033,67 @@ class Monitor:
                 'removal_pending':len(self.pending_removals),
                 'machine_history_hours':WARM_HOURS,
                 'people':self.person_views(self.people),
-                'machines':[self.machine_view(machine, now) for machine in self.ordered_machines()]}
+                'storage':storage, 'groups':self.group_views(views),
+                'resource_order':self.ordered_resource_ids(), 'summary':summarize_resources(views.values(), overview=True),
+                'storage_adapters':sorted(self.storage_adapters),
+                'machines':machines}
+
+    async def group_series(self, kind, selected, metric):
+        roster = self.rooms if kind == 'room' else self.clusters
+        if any(id not in roster for id in selected):
+            raise KeyError('group_missing')
+        ids = selected or tuple(sorted(roster, key=lambda id:roster[id]['name'])[:6])
+        now = self.clock()
+        start = now-DAY_MS
+        defaults = {
+            compute_key(machine.history_key):{'scope':self.scopes.get(machine.id) or 'host',
+                                              'expected_gpu_count':machine.expected_gpu_count if machine.hardware_kind != 'cpu' else None}
+            for machine in self.machines.values()
+        }
+        defaults.update({storage_key(id):{'storage_kind':settings.storage_kind,
+                                         'stale_ms':round(self.config.stale_seconds*1000)}
+                         for id,settings in self.storage.items()})
+        groups = []
+        keys = set()
+        for id in ids:
+            members = (key for key, room in self.locations.items() if room == id) if kind == 'room' else roster[id]['keys']
+            current = [key for key in members if key in defaults]
+            groups.append({'id':id,'name':roster[id]['name'],'keys':current})
+            keys.update(current)
+        async with self.readers:
+            def series():
+                ticks = self.history.group_ticks(keys, start, now) if keys else {}
+                return group_history_data(groups, defaults, ticks, start, now, metric)
+
+            return await asyncio.to_thread(series)
+
+    async def alert_events(self, active, limit, offset):
+        async with self.readers:
+            return await asyncio.to_thread(self.history.alert_events, active, limit, offset)
+
+    async def alert_event(self, id):
+        async with self.readers:
+            return await asyncio.to_thread(self.history.alert_event, id)
+
+    async def storage_series(self, id, hours, metric):
+        now = self.clock()
+        start = now-hours*3_600_000
+        bucket = max(round(self.config.interval_seconds*1000), math.ceil((now-start)/MAX_POINTS))
+        async with self.readers:
+            ticks = await asyncio.to_thread(self.history.storage_history, id, start, now)
+        stale = round(self.config.stale_seconds*1000)
+        rows = []
+        for tick in ticks:
+            observation = tick['observation'] or {}
+            capacity = observation.get('capacity')
+            if metric == 'storage':
+                value = 100*capacity['used_bytes']/capacity['total_bytes'] if capacity and capacity['total_bytes'] else None
+            else:
+                rate = observation.get(f"{metric.removeprefix('storage_')}_bytes_per_second")
+                value = rate/(1024**2) if rate is not None else None
+            rows.append((tick['observed_at'], observation.get('identity'), 'storage', value, None, stale))
+        return {'from':start,'to':now,'bucket_ms':bucket,'keys':[metric],
+                'points':downsample(rows, start, bucket, stale)}
 
     async def series(self, machine, gpu, metric, hours):
         enabled = [item for item in self.machines.values() if item.enabled]

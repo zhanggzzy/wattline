@@ -13,7 +13,7 @@ from wattline.app import create_app
 from wattline.collector import CollectionError, Collector, HostIdentity, cpu_percent
 from wattline.config import Config, Machine, MachineRegistration, MachineSettings
 from wattline.history import DAY_MS, WARM_HOURS, WARM_MS, History, HistoryInUse
-from wattline.history_schema import HOT_SCHEMA
+from wattline.history_schema import HOT_SCHEMA, SCHEMA_VERSION
 from wattline.service import ARCHIVE_ZONE, Monitor, archive_slots, metrics_from
 from wattline import host_probe
 
@@ -62,7 +62,9 @@ def test_monitor_probe_nvidia_power_and_host_fields(tmp_path, monkeypatch):
     xml = f"""<nvidia_smi_log><driver_version>580.173.02</driver_version>
         <gpu><uuid>{GPU}</uuid><utilization><gpu_util>0 %</gpu_util></utilization>
           <gpu_power_readings><average_power_draw>42.3 W</average_power_draw><instant_power_draw>43 W</instant_power_draw>
-            <current_power_limit>450 W</current_power_limit><max_power_limit>600 W</max_power_limit></gpu_power_readings>
+            <current_power_limit>450 W</current_power_limit><default_power_limit>500 W</default_power_limit>
+            <max_power_limit>600 W</max_power_limit></gpu_power_readings>
+          <module_power_readings><default_power_limit>1000 W</default_power_limit></module_power_readings>
           <fb_memory_usage><used>2048 MiB</used><total>98304 MiB</total></fb_memory_usage>
           <processes><process_info><pid>93</pid><used_memory>2048 MiB</used_memory></process_info></processes>
         </gpu><gpu><uuid>{OTHER_GPU}</uuid><power_readings><power_draw>35 W</power_draw>
@@ -77,6 +79,7 @@ def test_monitor_probe_nvidia_power_and_host_fields(tmp_path, monkeypatch):
     assert sample['scope'] == 'host'
     primary, legacy = sample['gpus']
     assert (primary['power_w'],primary['power_kind'],primary['power_limit_w']) == (42.3,'average',450)
+    assert primary['default_power_limit_w'] == 500
     assert primary['state'] == 'occupied' and primary['utilization_percent'] == 0
     gpu_only = host_probe.monitor(dict(config, checks=['gpu']))
     assert gpu_only['gpus'][0]['power_w'] == 42.3
@@ -86,6 +89,7 @@ def test_monitor_probe_nvidia_power_and_host_fields(tmp_path, monkeypatch):
     assert proc_info['user'] is None and proc_info['uid'] == 1050
     assert proc_info['workload'] == {'kind':'docker','container_id':'a'*64}
     assert (legacy['power_w'],legacy['power_limit_w'],legacy['state']) == (35,300,'unknown')
+    assert legacy['default_power_limit_w'] is None
     # The container can report a device PID through NVML with no trustworthy host ownership.
     cgroup = tmp_path/'cgroup'
     cgroup.mkdir()
@@ -702,6 +706,9 @@ def test_display_alias_migrates_and_persists_under_fixed_machine_identity(tmp_pa
 
 
 def set_legacy_registry_version(db, version):
+    for table in ('cluster_resources','resource_rooms','resource_order','clusters','rooms',
+                      'storage_ticks','storage_resources','alerts','shared_users'):
+        db.execute(f'DROP TABLE {table}')
     db.execute('DROP TABLE machine_assignees')
     db.execute('DROP TABLE people')
     db.execute(f'PRAGMA user_version={version}')
@@ -756,7 +763,7 @@ def test_assignees_migrate_legacy_names_once_and_retry_atomically(tmp_path):
         assert hosts_by_id['lab-0']['assigned_users'] == []
         assert hosts_by_id['new-public-id']['assigned_users'] == snapshot['people']
     with history.connect(read=True) as db:
-        assert db.execute('PRAGMA user_version').fetchone() == (8,)
+        assert db.execute('PRAGMA user_version').fetchone() == (SCHEMA_VERSION,)
         assert [json.loads(row[0]) for row in db.execute('SELECT settings FROM machine_settings')] == [old]*5
 
 

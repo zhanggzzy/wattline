@@ -18,12 +18,13 @@ const escape = value => String(value ?? '').replace(/[&<>"']/g, character =>
 let machineStates, gpuStates, workloads, descriptors, colors, powerModes;
 function localizeLabels() {
   machineStates = {normal:t('healthy'), warning:t('needs_attention'), offline:t('connection_failed'), stale:t('stale'),
-    unknown:t('unverified'), disabled:t('disabled'), waiting:t('awaiting_sample')};
+    unknown:t('unverified'), disabled:t('disabled'), waiting:t('awaiting_sample'), pending:t('storage_pending')};
   gpuStates = {occupied:t('in_use'), free:t('no_usage_seen'), unknown:t('usage_unknown')};
   workloads = {host:t('host_process'), docker:'Docker', kubernetes:'Pod', containerd:'containerd', 'cri-o':'CRI-O'};
   descriptors = {cpu:[t('cpu_usage'),'%'], memory:[t('memory_usage'),'%'], memory_used:[t('memory_used'),' GiB'], gpu:[t('gpu_utilization'),'%'],
-    power:[t('gpu_power'),' W'], vram:[t('vram_used'),' GiB'], temp:[t('gpu_temperature'),' °C']};
-  colors = {cpu:'#0b836a', memory:'#456ab4', memory_used:'#456ab4', gpu:'#506dc3', power:'#0b836a', temp:'#b16e23', vram:'#8b57a2'};
+    power:[t('gpu_power'),' W'], vram:[t('vram_used'),' GiB'], temp:[t('gpu_temperature'),' °C'],
+    storage:[t('storage_ratio'),'%'], storage_read:[t('storage_read'),' MiB/s'], storage_write:[t('storage_write'),' MiB/s']};
+  colors = {cpu:'#0b836a', memory:'#456ab4', memory_used:'#456ab4', gpu:'#506dc3', power:'#0b836a', temp:'#b16e23', vram:'#8b57a2', storage:'#0b836a', storage_read:'#456ab4', storage_write:'#8b57a2'};
   powerModes = {average:t('average_power'), instantaneous:t('instantaneous_power'), reported:t('driver_reported_power')};
 }
 localizeLabels();
@@ -60,6 +61,9 @@ const modelShapes = {
   pro6000: '<rect x="2.5" y="7" width="19" height="10" rx="1.5" stroke-width="1.8"/><path d="M5.5 10.5h13" stroke-width="1.5"/><path d="M7.5 17v3.5h7V17" stroke-width="1.5"/>',
   spark: '<rect x="6" y="6" width="12" height="12" rx="3.5" stroke-width="1.8"/><path d="M9 12h6" stroke-width="1.5"/><circle cx="15.5" cy="15.5" r="1.2" fill="currentColor" stroke="none"/>',
   rtx5090: '<rect x="2.5" y="7" width="19" height="10" rx="3" stroke-width="1.6"/><circle cx="8.5" cy="12" r="2.5" stroke-width="1.4"/><circle cx="15.5" cy="12" r="2.5" stroke-width="1.4"/>',
+  cpu: '<rect x="6" y="6" width="12" height="12" rx="2" stroke-width="1.8"/><path d="M9 3v3m6-3v3m-6 12v3m6-3v3M3 9h3m-3 6h3m12-6h3m-3 6h3" stroke-width="1.6"/>',
+  nas: '<rect x="5" y="3" width="14" height="18" rx="2" stroke-width="2"/><path d="M9 8h6m-6 4h6m-6 4h6" stroke-width="1.5"/>',
+  storage_cluster: '<rect x="3" y="5" width="8" height="14" rx="1.4" stroke-width="1.6"/><rect x="13" y="5" width="8" height="14" rx="1.4" stroke-width="1.6"/><path d="M6 10h2m-2 4h2m8-4h2m-2 4h2" stroke-width="1.4"/>',
   generic: '<rect x="4.5" y="3.5" width="15" height="7.5" rx="1.5" stroke-width="1.6"/><rect x="4.5" y="13" width="15" height="7.5" rx="1.5" stroke-width="1.6"/><circle cx="7.5" cy="7.25" r="0.9" fill="currentColor" stroke="none"/><circle cx="7.5" cy="16.75" r="0.9" fill="currentColor" stroke="none"/>',
 };
 function classifyModel(name) {
@@ -79,6 +83,7 @@ function machineModel(node) {
   }
   if (node?.expected_gpu_count != null && devices.length !== node.expected_gpu_count) complete = false;
   const kinds = new Set(names.map(classifyModel));
+  if (['cpu','nas','storage_cluster'].includes(node?.hardware_kind)) return {kind:node.hardware_kind,names:[]};
   const kind = complete && kinds.size === 1 && !kinds.has(null) ? [...kinds][0] : 'generic';
   return {kind, names};
 }
@@ -123,6 +128,10 @@ function machineIdentity(node, instanceSuffix) {
   return identity.join(' · ');
 }
 const state = {snapshot:null, received:0, syncFailed:false, machine:null, gpu:null, metric:'cpu',
+  tab:'room', manageTab:'room', group:null, trail:[], overviewScroll:0, routeReady:false, hiddenGroups:new Set(),
+  groupFilters:{room:{query:'',person:'',status:''},cluster:{query:'',person:'',status:''}}, groupMetric:'cpu',
+  deviceFilters:{query:'',kind:'',room:'',user:'',status:'all'}, detailFilters:{query:'',kind:'',room:'',user:'',status:'all'},
+  page:null, event:null, alerts:null, directAlert:null, alertError:false, alertLoading:false, alertQuery:'', alertFilter:'all', alertKind:'all',
   overviewMetric:'gpu', hours:24, filter:'all', query:'', history:null, historyError:false,
   focused:false, focusMetrics:[], histories:{}, historyErrors:{}};
 let layoutKey = '';
@@ -150,18 +159,27 @@ function nodes() {
   if (!state.snapshot) return [];
   const { server_time, stale_ms, machines } = state.snapshot;
   const now = server_time + performance.now() - state.received;
-  return machines.map(node => node.metrics && now - node.observed_at >= (node.stale_ms ?? stale_ms)
+  const resources = [...machines,...(state.snapshot.storage ?? [])];
+  if (state.snapshot.resource_order) {
+    const ranks = new Map(state.snapshot.resource_order.map((id,index) => [id,index]));
+    resources.sort((left,right) => (ranks.get(left.id) ?? Infinity) - (ranks.get(right.id) ?? Infinity));
+  }
+  return resources.map(node => node.metrics && now - node.observed_at >= (node.stale_ms ?? stale_ms)
     ? {...node, metrics:null, status:'stale', reason:t('valid_sample_expired_awaiting_a_new_sample'), warnings:[]} : node);
 }
 
 const getHost = () => nodes().find(node => node.id === state.machine);
 const getDevice = host => host?.devices.find(gpu => gpu.uuid === state.gpu);
-const currentDevice = (host, device) => host.metrics?.gpus.find(gpu => gpu.uuid === device.uuid);
+const currentDevice = (host, device) => host.metrics?.gpus?.find(gpu => gpu.uuid === device.uuid);
 const supported = (host, gpu) => gpu ? ['gpu','vram','power','temp']
-  : ['cpu','memory', ...(host?.scope === 'container' ? ['memory_used'] : []),
-    ...(host?.require_gpu ? ['gpu','power'] : [])];
+  : host?.storage_kind ? ['storage','storage_read','storage_write'] : ['cpu','memory', ...(host?.scope === 'container' ? ['memory_used'] : []),
+    ...(host?.require_gpu && host.hardware_kind !== 'cpu' ? ['gpu','power'] : [])];
 const reason = host => i18n.diagnostic(host.reason) || host.warnings?.map(i18n.diagnostic).join(' · ') || machineStates[host.status];
-const checks = host => host.checks ?? ['gpu','processes','cpu','memory','system'];
+const checks = host => host.storage_kind ? [] : host.hardware_kind === 'cpu'
+  ? (host.checks ?? ['cpu','memory','system']).filter(key => !['gpu','processes'].includes(key))
+  : host.checks ?? ['gpu','processes','cpu','memory','system'];
+const typedResources = () => Array.isArray(state.snapshot?.storage);
+const resourcePath = host => (host?.storage_kind ? '/api/storage/' : '/api/machines/')+encodeURIComponent(host.id);
 const configUnavailable = () => state.snapshot.registry_loaded === false;
 const unlimitedMemory = host => host?.scope === 'container' && host.metrics?.memory?.total_bytes === null;
 const windowsHost = host => host.target_os === 'windows';
@@ -189,8 +207,12 @@ const processShape = gpu => [gpu?.uuid, gpu?.state, gpu?.process_visibility,
 function navigation(hosts, host) {
   const nameCounts = countLabels(hosts.map(instanceNameKey));
   const suffixes = machineSuffixes(hosts, nameCounts);
-  byId('rail-nav').innerHTML = `<button class="rail-nav" type="button" data-overview aria-label="${t('overview')}" title="${t('overview')}" ${host ? '' : 'aria-current="page"'}>
+  byId('rail-nav').innerHTML = `<button class="rail-nav" type="button" data-overview aria-label="${t('overview')}" title="${t('overview')}" ${host || state.page ? '' : 'aria-current="page"'}>
       <span class="overview-icon" aria-hidden="true"></span><strong>${t('overview')}</strong></button>
+    ${typedResources() ? `<button type="button" class="rail-nav" data-alert-center aria-label="${t('alerts_center')}" ${state.page === 'alerts' ? 'aria-current="page"' : ''}>
+      <span aria-hidden="true">!</span><strong>${t('alerts_center')}</strong></button>` : ''}
+    ${groupedOverview() ? `<button type="button" class="rail-nav" data-workspace-manage aria-label="${t('group_management')}"
+      ${state.page === 'manage' ? 'aria-current="page"' : ''}><span aria-hidden="true">≡</span><strong>${t('group_management')}</strong></button>` : ''}
     <p class="rail-label">${t('machine')}</p>${hosts.map(node => {
       const suffix = suffixes.get(node.id);
       const identity = machineIdentity(node, nameCounts.get(instanceNameKey(node)) > 1 ? suffix : null);
@@ -199,9 +221,11 @@ function navigation(hosts, host) {
       ${machineGlyph(node)}<strong>${escape(node.name)}</strong>${suffix ? `<span class="machine-suffix" aria-hidden="true">${escape(suffix)}</span>` : ''}<span class="status-dot ${escape(node.status)}" aria-hidden="true"></span>
     </button>`;
     }).join('')}`;
-  byId('breadcrumb').innerHTML = host
+  byId('breadcrumb').innerHTML = state.page === 'alerts'
+    ? `<button type="button" data-overview class="crumb-button">${t('overview')}</button><span aria-hidden="true">›</span><strong>${t('alerts_center')}</strong>`
+    : groupBreadcrumb() ?? (host
     ? `<button type="button" data-overview class="crumb-button">${t('overview')}</button><span aria-hidden="true">›</span><strong>${escape(host.name)}</strong>`
-    : `<strong>${t('overview')}</strong>`;
+    : `<strong>${t('overview')}</strong>`);
 }
 
 function renderPage(force = false) {
@@ -209,13 +233,18 @@ function renderPage(force = false) {
   const hosts = nodes();
   const host = hosts.find(node => node.id === state.machine);
   const device = getDevice(host);
-  const shape = JSON.stringify([host?.id, device?.uuid, state.filter, state.syncFailed, state.snapshot?.registry_loaded,
+  const shape = JSON.stringify([state.page, state.tab, state.manageTab, state.group, host?.id,
+    ...['room','cluster'].map(kind => groupList(kind).map(group =>
+      [group.id,group.name,group.location,groupPerson(group,kind),group.members,group.rooms,
+        state.groupFilters[kind].status ? [group.summary.online,activeGroupAlerts(group)] : null,group.summary.container.devices])), device?.uuid, host?.storage_observation,
+    state.page === 'alerts' || !typedResources() ? null :
+      [state.snapshot.alerts?.total, state.snapshot.alerts?.events?.map(event => [event.id,event.resource,event.name,event.severity])], state.filter, state.syncFailed, state.snapshot?.registry_loaded,
     hosts.map(node => {
       const model = machineModel(node);
-      return [node.id, node.name, node.address, node.assigned_users, node.status, node.require_gpu, node.scope,
+      return [node.id, node.name, node.address, node.assigned_users, node.assignment_mode, node.room_id, node.cluster_ids, node.hardware_kind, node.status, node.require_gpu, node.scope,
         checks(node), reason(node), model.kind, model.names, node.target_os, node.gpu_inventory_complete];
     }),
-    host?.devices, host?.metrics?.gpus.map(processShape),
+    host?.devices, host?.metrics?.gpus?.map(processShape),
     host?.metrics?.driver_version, unlimitedMemory(host)]);
   if (!force && shape === layoutKey) return;
   layoutKey = shape;
@@ -224,7 +253,7 @@ function renderPage(force = false) {
   const focusContainerId = focused?.parentElement?.closest('[id]')?.id;
   const focusClass = focused?.className;
   const focusData = focused?.tagName === 'BUTTON' ? Object.entries(focused.dataset) : [];
-  const inputFocused = document.activeElement?.id === 'host-search';
+  const inputFocused = ['host-search','group-search','alert-search'].includes(focusId);
   const focusedSort = document.activeElement?.dataset.sortHost;
   const caret = inputFocused ? document.activeElement.selectionStart : null;
   for (const instance of charts) instance.observer.disconnect();
@@ -242,17 +271,18 @@ function renderPage(force = false) {
   }
   content.removeAttribute('aria-busy');
   document.body.classList.toggle('trends-focused', state.focused);
-  content.innerHTML = state.focused ? focusPage(host, device) : host ? hostPage(host, device) : overviewPage(hosts);
-  if (!host && !state.focused) {
-    byId('host-search').value = state.query;
-    drawRows(hosts);
-    if (inputFocused) {
-      byId('host-search').focus({preventScroll:true});
-      if (caret != null) byId('host-search').setSelectionRange(caret, caret);
-    } else if (focusedSort) {
+  const group = detailGroup();
+  content.innerHTML = state.focused ? focusPage(host, device) : state.page === 'alerts' ? alertCenter()
+    : state.page === 'manage' ? managementPage() : state.page === 'group' && group ? groupDetailPage(group,state.group.kind)
+    : host?.storage_kind ? storagePage(host) : host ? hostPage(host, device) : groupedOverview() ? workspaceOverview() : overviewPage(hosts);
+  if (byId('host-search') && !state.focused) {
+    byId('host-search').value = groupedOverview() ? deviceFilterState().query : state.query;
+    drawRows(membersForPanel(hosts));
+    if (focusedSort) {
       byId('host-rows').querySelector(`[data-sort-host="${CSS.escape(focusedSort)}"]`)?.focus({preventScroll:true});
     }
   }
+  if (state.page === 'alerts') paintAlerts();
   bindChart();
   // Snapshot refreshes may replace controls; keep keyboard users on the same action.
   if (focused && !focused.isConnected) {
@@ -264,6 +294,7 @@ function renderPage(force = false) {
       Object.keys(button.dataset).length === focusData.length &&
       focusData.every(([key,value]) => button.dataset[key] === value));
     replacement?.focus({preventScroll:true});
+    if (inputFocused && caret != null && replacement) replacement.setSelectionRange(caret,caret);
     if (replacement) {
       const rect = replacement.getBoundingClientRect();
       if (rect.top < 0 || rect.bottom > innerHeight || rect.left < 0 || rect.right > innerWidth) {
@@ -273,43 +304,66 @@ function renderPage(force = false) {
   }
 }
 
+function overviewCards() {
+  const workspace = groupedOverview();
+  const powerReading = (label, key, coverage) => `<div>
+    <p>${t(label)}</p><strong>${field(key)}</strong><span class="unit">W</span><small>${field(coverage)}</small>
+  </div>`;
+  return `<section class="metrics overview-metrics" aria-label="${t('current_sample_overview')}">
+    ${metricTile(t(workspace ? 'devices_online' : 'machines_online'),'online','','◉',
+      t(workspace ? 'online_registered' : 'includes_nodes_needing_attention'))}
+    ${metricTile(t('visible_gpus'),'visible',t('gpus'),'▤',workspace ? t('current_samples_only') : field('configured-gpu'))}
+    <article class="metric gpu-power-card">
+      <p class="metric-name"><span>${t('gpu_power')}</span><span aria-hidden="true">⌁</span></p>
+      <div class="gpu-power-readings">
+        ${powerReading('gpu_current_total_power','watts','power-count')}
+        ${powerReading('gpu_total_rated_power','rated-watts','rated-power-count')}
+      </div>
+      <small>${t('gpu_rated_power_basis')}</small>
+    </article>
+  </section>`;
+}
+
 function overviewPage(hosts) {
   const issues = hosts.filter(host => ['warning','offline','unknown','stale'].includes(host.status));
-  const filters = [['all',t('all')],['normal',t('healthy')],['warning',t('needs_attention')],['unavailable',t('unavailable')]];
   return `<section class="page-title"><div><p class="eyebrow">WATTLINE / OVERVIEW</p>${heading(t('compute_at_a_glance'))}
       <p>${t('current_machine_and_physical_gpu_status_with_trends_over_the_last')}</p></div>
-      <button type="button" class="control primary-control" data-add-machine ${configUnavailable() ? 'disabled' : ''}>${t('add_machine')}</button></section>
-    <section class="metrics" aria-label="${t('current_sample_overview')}">
-      ${metricTile(t('machines_online'),'online','', '◉',t('includes_nodes_needing_attention'))}
-      ${metricTile(t('visible_gpus'),'visible',t('gpus'),'▤', field('configured-gpu'))}
-      ${metricTile(t('visible_gpu_processes'),'processes',t('processes'),'≋',t('unique_pids_per_host'))}
-      ${metricTile(t('total_gpu_power'),'watts','W','⌁',field('power-count'))}
-    </section>
+      <button type="button" class="control primary-control" data-add-machine ${configUnavailable() ? 'disabled' : ''}>${t(typedResources() ? 'add_resource' : 'add_machine')}</button></section>
+    ${overviewCards()}
     <div class="overview-stack">
-      <section class="panel attention-panel">
+      ${typedResources() ? overviewAlerts(state.snapshot.alerts) : `<section class="panel attention-panel">
         <div class="panel-head"><h2>${t('needs_attention_m051')}</h2><small>${t('machine_count',{count:issues.length})}</small></div>
         ${issues.length ? `<div class="issues">${issues.map(node => `<button type="button" class="issue" data-host="${escape(node.id)}">
           <span class="issue-mark ${escape(node.status)}" aria-hidden="true">${node.status === 'stale' ? '◷' : '!'}</span>
           <span class="issue-copy"><strong>${escape(node.name)}</strong><small>${escape(reason(node))}</small></span>${status(node.status,machineStates[node.status])}
         </button>`).join('')}</div>` : `<p class="empty">${t('no_machines_need_attention')}</p>`}
-      </section>
+      </section>`}
       ${chartPanel(null,null)}
-      <section class="panel machine-panel">
-        <div class="panel-head"><h2>${t('machines')}</h2><small id="row-count"></small>
-          <button type="button" class="control" data-people-directory ${configUnavailable() ? 'disabled' : ''}>${t('people_directory')}</button></div>
-        <div class="tools"><div class="seg" role="group" aria-label="${t('filter_by_machine_status')}">
-          ${filters.map(([key,label]) => toggle(label, 'data-filter', key, state.filter === key)).join('')}
-          </div><input class="search" id="host-search" type="search" aria-label="${t('search_machines')}" placeholder="${t('search_name_or_address')}"></div>
-        <p id="order-message" class="order-message" role="status" ${orderMessage ? '' : 'hidden'}>${escape(orderMessage)}</p>
-        <div class="scroll machine-scroll" tabindex="0" role="region" aria-label="${t('machines')}"><table class="machine-table">
-          <thead><tr><th>${t('machine')}</th><th>${t('status')}</th><th>${t('assignees')}</th><th><span class="wide-label">${t('gpu_utilization')}</span><span class="compact-label" title="${t('average_gpu_utilization')}">GPU</span></th>
-          <th aria-label="${t('gpu_power')}"><span class="power-label">${t('gpu_power')}</span><span class="narrow-power-label">${t('power')}</span></th><th>CPU</th><th>${t('memory')}</th></tr></thead>
-          <tbody id="host-rows"></tbody></table></div>
-      </section>
+      ${machinePanel()}
     </div>`;
 }
 
+function machinePanel(detail = false) {
+  const filters = [['all',t('all')],['normal',t('healthy')],['warning',t('needs_attention')],['unavailable',t('unavailable')]];
+  const selectedStatus = groupedOverview() ? deviceFilterState().status : state.filter;
+  return `<section class="panel machine-panel">
+        <div class="panel-head"><h2>${t(detail ? 'group_members' : 'machines')}</h2><small id="row-count"></small>
+          <button type="button" class="control" data-people-directory ${configUnavailable() ? 'disabled' : ''}>${t('people_directory')}</button></div>
+        <div class="tools"><div class="seg" role="group" aria-label="${t('filter_by_machine_status')}">
+          ${filters.map(([key,label]) => toggle(label, 'data-filter', key, selectedStatus === key)).join('')}
+          </div><input class="search" id="host-search" type="search" aria-label="${t('search_machines')}" placeholder="${t('search_name_or_address')}"></div>
+        ${groupedOverview() ? deviceFilters() : ''}
+        <p id="order-message" class="order-message" role="status" ${orderMessage ? '' : 'hidden'}>${escape(orderMessage)}</p>
+        <div class="scroll machine-scroll" tabindex="0" role="region" aria-label="${t('machines')}"><table class="machine-table ${groupedOverview() ? 'resource-device-table' : ''}">
+          <thead><tr><th>${t('machine')}</th><th>${t('status')}</th><th>${t('assignees')}</th><th><span class="wide-label">${t('gpu_utilization')}</span><span class="compact-label" title="${t('average_gpu_utilization')}">GPU</span></th>
+          <th aria-label="${t('gpu_power')}"><span class="power-label">${t('gpu_power')}</span><span class="narrow-power-label">${t('power')}</span></th><th>CPU</th><th>${t('memory')}</th>
+          ${groupedOverview() ? `<th>${t('storage_capacity_short')}</th><th>${t('device_room_and_clusters')}</th>` : ''}</tr></thead>
+          <tbody id="host-rows"></tbody></table></div>
+      </section>`;
+}
+
 function assigneeSummary(node) {
+  if (node.assignment_mode === 'shared') return `<p class="machine-assignees">${t('shared_user')}</p>`;
   const names = node.assigned_users?.map(person => person.name);
   if (!names?.length) return '';
   const list = new Intl.ListFormat(i18n.locale).format(names);
@@ -328,6 +382,7 @@ function chipName(name) {
 }
 
 function assigneeChips(node) {
+  if (node.assignment_mode === 'shared') return `<span class="person-chip">${t('shared_user')}</span>`;
   const names = node.assigned_users?.map(person => person.name);
   return names?.length
     ? `<ul class="assignee-chips">${names.map(name => `<li class="person-chip">${chipName(name)}</li>`).join('')}</ul>`
@@ -335,9 +390,10 @@ function assigneeChips(node) {
 }
 
 function drawRows(hosts) {
-  const query = state.query.trim().toLowerCase();
-  const filtered = hosts.filter(node => (state.filter === 'all' || node.status === state.filter
-      || (state.filter === 'unavailable' && !['normal','warning'].includes(node.status)))
+  const filters = groupedOverview() ? deviceFilterState() : {query:state.query,status:state.filter};
+  const query = filters.query.trim().toLowerCase();
+  const filtered = hosts.filter(node => passesDeviceFilters(node) && (filters.status === 'all' || node.status === filters.status
+      || (filters.status === 'unavailable' && !['normal','warning'].includes(node.status)))
     && (node.name + ' ' + node.id + ' ' + node.address).toLowerCase().includes(query));
   byId('row-count').textContent = t('filtered_machine_count',{visible:filtered.length,total:hosts.length});
   const sortable = filtered.length > 1 && !configUnavailable();
@@ -345,9 +401,9 @@ function drawRows(hosts) {
     <td><div class="machine-cell">
       <button type="button" class="sort-handle" data-sort-host="${escape(node.id)}"
         aria-label="${t('reorder')} ${escape(node.name)}" title="${t('drag_to_reorder_or_use_up_and_down_arrow_keys')}"
-        aria-keyshortcuts="ArrowUp ArrowDown" ${sortable ? '' : 'disabled'}></button>
+        aria-keyshortcuts="ArrowUp ArrowDown" ${sortable && (groupedOverview() || !node.storage_kind) ? '' : 'disabled'}></button>
       <div class="machine-identity"><button type="button" class="row-open" data-host="${escape(node.id)}" aria-label="${t('view')} ${escape(node.name)}">
-      ${machineGlyph(node)}<span><strong>${escape(node.name)}</strong><small class="mono">${escape(node.address)}</small>
+      ${machineGlyph(node)}<span><strong>${escape(node.name)}</strong><small class="mono">${escape(node.address)}${node.hardware_kind ? ` · ${hardwareLabel(node.hardware_kind)}` : ''}</small>
       ${node.scope === 'container' ? `<small>${t('container_scope')}</small>` : ''}</span></button>
       </div></div></td>
     <td class="status-cell" data-label="${t('status')}">${status(node.status, machineStates[node.status])}</td>
@@ -355,7 +411,9 @@ function drawRows(hosts) {
     ${['gpu','power','cpu','memory'].map(key => `<td class="number-cell" data-label="${{gpu:t('gpu_utilization'),power:t('gpu_power'),cpu:'CPU',memory:t('memory')}[key]}">${field(node.id+'-'+key)}
       ${key === 'power' ? '' : meter(node.id+'-'+key, key === 'memory' ? 'memory' : '')}
       ${key === 'memory' ? `<small class="memory-used">· ${field(node.id+'-memory-used')}<span>${t('used')}</span></small>` : ''}</td>`).join('')}
-  </tr>`).join('') : `<tr><td colspan="7" class="empty">${hosts.length ? t('no_matching_machines_adjust_the_filter_or_search') : t('no_machines_yet_select_add_machine_to_start_monitoring')}</td></tr>`;
+    ${groupedOverview() ? `<td data-label="${t('storage_capacity_short')}">${field(node.id+'-storage')}</td>
+      <td data-label="${t('device_room_and_clusters')}">${deviceGroupLinks(node)}</td>` : ''}
+  </tr>`).join('') : `<tr><td colspan="${groupedOverview() ? 9 : 7}" class="empty">${hosts.length ? t('no_matching_machines_adjust_the_filter_or_search') : t('no_machines_yet_select_add_machine_to_start_monitoring')}</td></tr>`;
 }
 
 function showOrderMessage(message) {
@@ -369,7 +427,7 @@ function showOrderMessage(message) {
 
 async function moveMachine(from, target, after) {
   if (orderSaving || from === target) return;
-  const visible = [...byId('host-rows').querySelectorAll('[data-machine-row]')].map(row => row.dataset.machineRow);
+  const visible = [...byId('host-rows').querySelectorAll('[data-machine-row]:has([data-sort-host]:enabled)')].map(row => row.dataset.machineRow);
   const remaining = visible.filter(id => id !== from);
   const slot = remaining.indexOf(target);
   if (!visible.includes(from) || slot < 0) return;
@@ -378,19 +436,24 @@ async function moveMachine(from, target, after) {
 
   const moved = remaining.values();
   const visibleSet = new Set(visible);
-  const machines = state.snapshot.machines.map(node => visibleSet.has(node.id) ? moved.next().value : node.id);
+  const mixed = groupedOverview();
+  const all = mixed ? nodes() : state.snapshot.machines;
+  const ids = all.map(node => visibleSet.has(node.id) ? moved.next().value : node.id);
   orderSaving = true;
   showOrderMessage(t('saving_order'));
   try {
-    const response = await fetch('/api/machines/order', {
-      method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify({machines}),
+    const response = await fetch(mixed ? '/api/resources/order' : '/api/machines/order', {
+      method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(mixed ? {resources:ids} : {machines:ids}),
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(typeof result.detail === 'string'
       ? t('could_not_save_order_please_retry')+' '+i18n.diagnostic(result.detail) : t('could_not_save_order_please_retry'));
     snapshotRevision++;
-    const ranks = new Map(result.machines.map((id,index) => [id,index]));
-    state.snapshot.machines.sort((a,b) => (ranks.get(a.id) ?? ranks.size) - (ranks.get(b.id) ?? ranks.size));
+    if (mixed) state.snapshot.resource_order = result.resources;
+    else {
+      const ranks = new Map(result.machines.map((id,index) => [id,index]));
+      state.snapshot.machines.sort((a,b) => (ranks.get(a.id) ?? ranks.size) - (ranks.get(b.id) ?? ranks.size));
+    }
     showOrderMessage('');
   } catch (error) {
     showOrderMessage(error instanceof Error && error.name !== 'TypeError' ? error.message : t('could_not_save_order_please_retry'));
@@ -450,10 +513,11 @@ document.addEventListener('keydown', event => {
 });
 
 function chartControls(host, device) {
-  const available = host ? supported(host,device) : overviewMetrics;
+  const group = groupChartContext();
+  const available = host ? supported(host,device) : group ? groupMetrics : overviewMetrics;
   return `<div class="trend-controls"><div class="seg" role="group" aria-label="${t('trend_metric')}">
     ${available.map(key => toggle(descriptors[key][0], host || state.focused ? 'data-metric' : 'data-overview-metric', key,
-      state.focused ? state.focusMetrics.includes(key) : (host ? state.metric : state.overviewMetric) === key)).join('')}</div>
+      state.focused ? state.focusMetrics.includes(key) : (host ? state.metric : group ? state.groupMetric : state.overviewMetric) === key)).join('')}</div>
     ${host ? `<div class="seg" role="group" aria-label="${t('time_range')}">${[[1,t('1_hour')],[6,t('6_hours')],[24,t('24_hours')],[72,t('3_days')],[168,t('7_days')]]
       .filter(([hours]) => hours <= (state.snapshot?.machine_history_hours ?? 24))
       .map(([hours,label]) => toggle(label,'data-range',hours,state.hours===hours)).join('')}</div>` : ''}</div>`;
@@ -471,7 +535,7 @@ function chartPlot(host, key = null, index = 0) {
 }
 
 function chartPanel(host, device) {
-  return `<section class="panel chart-panel"><div class="panel-head"><div><h2>${host ? t('resource_trends') : t('last_24_hours')}</h2><small>${host ? device ? 'GPU '+device.index : host.scope === 'container' ? t('container_scope') : t('whole_machine') : t('overview_trend_scope')}</small></div>
+  return `<section class="panel chart-panel"><div class="panel-head"><div><h2>${host ? t('resource_trends') : t('last_24_hours')}</h2><small>${host ? device ? 'GPU '+device.index : host.scope === 'container' ? t('container_scope') : t('whole_machine') : t(groupChartContext() ? 'current_group_membership' : 'overview_trend_scope')}</small></div>
     <div class="title-actions">${device ? `<button type="button" class="control" data-all-gpus>${t('back_to_machine')}</button>` : ''}<button type="button" id="focus-trends" class="control" data-focus-trends>${t('focus_charts')}</button></div></div>
     ${chartControls(host,device)}${chartPlot(host)}
   </section>`;
@@ -480,7 +544,7 @@ function chartPanel(host, device) {
 function setTrendFocus(enabled) {
   if (enabled) {
     focusScroll = window.scrollY;
-    state.focusMetrics = [getHost() ? state.metric : state.overviewMetric];
+    state.focusMetrics = [getHost() ? state.metric : groupChartContext() ? state.groupMetric : state.overviewMetric];
   }
   state.focused = enabled;
   renderPage(true);
@@ -491,7 +555,7 @@ function setTrendFocus(enabled) {
 }
 
 function focusPage(host, device) {
-  return `<section class="focus-heading"><div><p class="eyebrow">WATTLINE / ${t('resource_trends')}</p>${heading(host?.name || t('overview'))}<p>${device ? 'GPU '+device.index+' · ' : ''}${t('choose_charts')}</p></div>
+  return `<section class="focus-heading"><div><p class="eyebrow">WATTLINE / ${t('resource_trends')}</p>${heading(host?.name || detailGroup()?.name || t('overview'))}<p>${device ? 'GPU '+device.index+' · ' : ''}${t('choose_charts')}</p></div>
     <button type="button" id="exit-trends" class="control" data-exit-focus>${t('return_to_dashboard')}</button></section>
     ${chartControls(host,device)}<div class="trend-stack" style="--chart-count:${state.focusMetrics.length}">
       ${state.focusMetrics.map((key,index) => `<div class="panel">${chartPlot(host,key,index)}</div>`).join('')}</div>`;
@@ -503,14 +567,15 @@ function hostPage(host, device) {
   const unlimited = unlimitedMemory(host);
   const active = checks(host);
   return `<section class="page-title"><div><p class="eyebrow">WATTLINE / NODE</p>${heading(host.name,statusBadge)}
-    <p><span class="mono">${escape(host.address)}</span> · ${host.mode==='ssh' ? 'SSH' : t('local')}
+    <p><span class="mono">${escape(host.address)}</span> ${host.hardware_kind ? ` · ${hardwareLabel(host.hardware_kind)}` : ''} · ${host.mode==='ssh' ? 'SSH' : t('local')}
     ${windowsHost(host) ? ' · Windows' : ''}${container ? t('container_scope_m077') : ''}${device ? ' · '+escape(device.name || 'NVIDIA GPU') : ''}</p>
-    ${assigneeSummary(host)}</div>
+    ${assigneeSummary(host)}${deviceGroupLinks(host)}</div>
     <div class="title-actions"><span class="time">${t('last_valid_sample')} ${field('host-time')}</span>
     <div class="machine-settings-actions">
     <button type="button" class="control" data-configure-machine ${configUnavailable() ? 'disabled' : ''}>${t('configure')}</button>
     <button type="button" class="control" data-edit-assignees ${configUnavailable() ? 'disabled' : ''}>${t('assignees')}</button></div>
     <button type="button" class="control danger-control" data-remove-machine ${configUnavailable() ? 'disabled' : ''}>${t('remove_node')}</button></div></section>
+    ${typedResources() ? deviceAlerts(host) : ''}
     ${container ? `<p class="message scope-note"><strong>${t('container_scope')}</strong> ${t('cpu_and_memory_describe_this_container_gpu_metrics_cover_visible_')}</p>` : ''}
     ${host.reason || host.warnings?.length ? '<p class="message">'+escape(reason(host))+'</p>' : ''}
     <section class="metrics" aria-label="${t('live_machine_resources')}" ${active.some(key => ['gpu','cpu','memory'].includes(key)) ? '' : 'hidden'}>
@@ -520,6 +585,8 @@ function hostPage(host, device) {
         device ? field('selected-gpu-limit') : container ? t('total_power_of_devices_visible_to_container') : t('calculated_when_device_power_modes_agree')) : ''}
       ${active.includes('cpu') ? metricTile(t('cpu_usage'),'card-cpu','%','◉',container ? t('share_of_container_cpu_capacity') : t('machine_logical_cpus')) : ''}
       ${active.includes('memory') ? metricTile(unlimited ? t('memory_used') : t('memory_usage'),'card-memory',unlimited ? 'GiB' : '%','▤',field('memory-detail')) : ''}
+      ${host.hardware_kind === 'cpu' ? metricTile(t('1_minute_load'),'load','','⌁',field('cpu-detail')) +
+        metricTile(t('system_disk_available'),'disk','','▥',field('uptime')) : ''}
     </section>
     ${host.metrics && (host.metrics.driver_version || active.some(key => key === 'cpu' || key === 'memory' || (!container && key === 'system'))) ? `<div class="panel facts" aria-label="${t('additional_resource_metrics')}">
       ${active.includes('cpu') ? `<span>${container ? t('container_cpu_capacity') : t('logical_cpus')} <strong>${field('cores')}</strong></span>` : ''}
@@ -527,7 +594,7 @@ function hostPage(host, device) {
       ${!container && active.includes('system') ? `<span>${t('system_disk_available')} <strong>${field('disk')}</strong></span><span>${t('uptime')} <strong>${field('uptime')}</strong></span>` : ''}
       ${active.includes('memory') && !unlimited ? `<span>${container ? t('memory_limit_headroom') : t('memory_available')} <strong>${field('available')}</strong></span>` : ''}
       ${host.metrics.driver_version ? `<span>${t('nvidia_driver')} <strong>`+escape(host.metrics.driver_version)+'</strong></span>' : ''}</div>` : ''}
-    <div class="column details-layout">${chartPanel(host,device)}${hardwareTable(host)}</div>`;
+    <div class="column details-layout">${chartPanel(host,device)}${host.hardware_kind === 'cpu' ? '' : hardwareTable(host)}</div>`;
 }
 
 function hardwareTable(host) {
@@ -658,6 +725,29 @@ function uptime(seconds) {
   return hours ? t('uptime_hours',{hours}) : t('uptime_minutes',{minutes:Math.floor(seconds/60)});
 }
 
+function overviewPowerFromSamples(sampled) {
+  const devices = new Map();
+  const observations = [...sampled].sort((a,b) => (b.observed_at ?? 0)-(a.observed_at ?? 0));
+  for (const host of observations) {
+    for (const gpu of host.metrics.gpus ?? []) {
+      if (typeof gpu.uuid !== 'string' || !gpu.uuid.startsWith('GPU-') || gpu.uuid.length <= 4) continue;
+      const id = gpu.uuid.toLowerCase();
+      if (!devices.has(id)) devices.set(id,{});
+      const reading = devices.get(id);
+      if (reading.current == null && Number.isFinite(gpu.power_w) && gpu.power_w >= 0) reading.current = gpu.power_w;
+      if (reading.rated == null && Number.isFinite(gpu.default_power_limit_w) && gpu.default_power_limit_w > 0) {
+        reading.rated = gpu.default_power_limit_w;
+      }
+    }
+  }
+  const readings = [...devices.values()];
+  const totals = key => {
+    const values = readings.map(reading => reading[key]).filter(Number.isFinite);
+    return {value:values.length ? values.reduce((sum,value) => sum+value,0) : null,valid:values.length};
+  };
+  return {visible_gpu:devices.size,gpu_power:totals('current'),gpu_rated_power:totals('rated')};
+}
+
 function paint() {
   const hosts = nodes();
   const host = hosts.find(node => node.id === state.machine);
@@ -690,7 +780,8 @@ function paint() {
     values['card-memory'] = unlimitedMemory(host) ? fmt(gib(memory.used_bytes),'',1) : fmt(metrics?.memory_percent);
     values['host-time'] = time(host.last_success_at);
     values['cores'] = fmt(metrics?.cpu_count,t('cores'),Number.isInteger(metrics?.cpu_count) ? 0 : 2);
-    values['load'] = fmt(metrics?.load_average[0],'',2);
+    values['load'] = fmt(metrics?.load_average?.[0],'',2);
+    values['cpu-detail'] = host.scope === 'container' ? t('container_scope') : values['cores'];
     const disk = metrics?.root_disk;
     values['disk'] = (disk?.volume ? disk.volume + ' · ' : '') + fmt(gib(disk?.available_bytes),' GiB',1);
     values['available'] = fmt(gib(memory?.available_bytes),' GiB',1);
@@ -738,19 +829,24 @@ function paint() {
     }
   } else {
     const sampled = hosts.filter(node => node.metrics);
-    const devices = sampled.flatMap(node => node.metrics.gpus);
-    const powers = devices.map(gpu => gpu.power_w).filter(Number.isFinite);
     const configured = hosts.filter(node => node.require_gpu);
-    values.online = sampled.length+' / '+hosts.length;
-    values.visible = devices.length;
+    const summary = state.snapshot?.summary;
+    const power = summary ?? overviewPowerFromSamples(sampled);
+    values.online = (summary?.online ?? sampled.length+hosts.filter(node => node.storage_observation).length)+
+      ' / '+(summary?.registered ?? hosts.length);
+    values.visible = power.visible_gpu;
     values['configured-gpu'] = configured.every(node => node.expected_gpu_count != null)
       ? t('configured_device_count',{count:configured.reduce((total,node) => total+node.expected_gpu_count,0)}) : t('current_samples_only');
-    const processSamples = sampled.filter(node => checks(node).includes('processes') && node.metrics.gpus.length);
-    values.processes = processSamples.length ? processSamples.reduce((total,node) => total+new Set(node.metrics.gpus.flatMap(gpu =>
-      gpu.processes.map(process => process.pid))).size, 0) : '—';
-    values.watts = powers.length ? i18n.number(Math.round(powers.reduce((sum,watts) => sum+watts,0))) : '—';
-    values['power-count'] = t('power_reading_count',{count:powers.length});
+    for (const [reading,key,coverage] of [[power.gpu_power,'watts','power-count'],
+      [power.gpu_rated_power,'rated-watts','rated-power-count']]) {
+      values[key] = Number.isFinite(reading?.value) ? i18n.number(reading.value,{maximumFractionDigits:1}) : '—';
+      values[coverage] = t('gpu_power_coverage',{valid:i18n.number(reading?.valid ?? 0),total:i18n.number(power.visible_gpu)});
+    }
     for (const node of hosts) {
+      if (node.storage_kind) {
+        values[node.id+'-storage'] = capacityLabel(node.storage_observation?.capacity);
+        continue;
+      }
       for (const [key, value] of Object.entries({gpu:node.metrics?.gpu_percent, power:node.metrics?.gpu_power_w,
         cpu:node.metrics?.cpu_percent, memory:node.metrics?.memory_percent})) {
         const id = node.id+'-'+key;
@@ -758,7 +854,11 @@ function paint() {
         scales[id] = value;
       }
       if (unlimitedMemory(node)) values[node.id+'-memory'] = fmt(gib(node.metrics.memory.used_bytes),' GiB',1);
-      else values[node.id+'-memory-used'] = fmt(gib(node.metrics?.memory?.used_bytes),' GiB',1);
+      else {
+        const memory = node.metrics?.memory;
+        values[node.id+'-memory-used'] = groupedOverview() && memory?.total_bytes != null && Number.isFinite(memory.used_bytes)
+          ? bytesLabel(memory.used_bytes)+' / '+bytesLabel(memory.total_bytes) : fmt(gib(memory?.used_bytes),' GiB',1);
+      }
     }
   }
 
@@ -772,6 +872,7 @@ function paint() {
       unit.hidden = value === '—';
     }
   }
+  if (groupedOverview()) paintGroups();
   for (const node of document.querySelectorAll('[data-meter]')) {
     const value = scales[node.dataset.meter];
     node.hidden = !Number.isFinite(value);
@@ -785,7 +886,7 @@ async function get(path, signal = AbortSignal.timeout(5000)) {
   return response.json();
 }
 
-const activeMetrics = () => state.focused ? state.focusMetrics : [state.machine ? state.metric : state.overviewMetric];
+const activeMetrics = () => state.focused ? state.focusMetrics : [state.machine ? state.metric : groupChartContext() ? state.groupMetric : state.overviewMetric];
 const historyHours = () => state.machine ? state.hours : 24;
 async function refreshHistory(reset = false) {
   if (reset) {
@@ -797,8 +898,10 @@ async function refreshHistory(reset = false) {
     for (const instance of charts) instance.pointer = instance.keyboardAt = null;
     drawChart();
   } else if (historyRequest) return;
-  if (!state.snapshot) return;
+  if (!state.snapshot || !charts.length) return;
   const host = getHost(), gpu = getDevice(host);
+  const group = groupChartContext();
+  if (group && !group.groups.length) return;
   const controller = new AbortController();
   historyRequest = controller;
   const metrics = [...activeMetrics()];
@@ -807,8 +910,14 @@ async function refreshHistory(reset = false) {
     if (host) params.set('machine',host.id);
     params.set('metric',metric);
     if (gpu) params.set('gpu',gpu.uuid);
+    if (group) {
+      params.delete('hours');
+      params.set('kind',group.kind);
+      for (const record of group.groups) params.append('group',record.id);
+    }
     try {
-      const history = await get('/api/history?'+params, AbortSignal.any([controller.signal,AbortSignal.timeout(5000)]));
+      const path = group ? '/api/group-history?' : host?.storage_kind ? resourcePath(host)+'/history?' : '/api/history?';
+      const history = await get(path+params, AbortSignal.any([controller.signal,AbortSignal.timeout(5000)]));
       if (historyRequest !== controller) return;
       state.histories[metric] = history;
       state.historyErrors[metric] = false;
@@ -836,7 +945,14 @@ async function refresh() {
   } catch {
     state.syncFailed = true;
   }
+  if (groupedOverview() && !state.routeReady) {
+    state.routeReady = true;
+    if (location.hash) restoreWorkspaceURL();
+  }
   if (state.machine && !getHost()) openHost(null);
+  if (state.page === 'group' && !detailGroup()) openHost(null);
+  if (state.page === 'alerts' && (state.alerts?.events.length ?? 0) <= 200 &&
+      performance.now()-(state.alertRefreshAt ?? 0) > 10000) void loadAlerts();
   const replaced = state.gpu && !getDevice(getHost());
   if (replaced) {
     state.gpu = null;
@@ -858,6 +974,15 @@ function countLabels(labels) {
 }
 
 function chartSeries(instance, history) {
+  if (groupChartContext()) {
+    const [,unit] = descriptors[instance.metric];
+    return (history?.series ?? []).map((item,index) => ({
+      key:instance.metric, id:item.group, hidden:state.hiddenGroups.has(item.group), unit,
+      label:item.name+(item.scope === 'storage' ? '' : ' · '+t(item.scope === 'container' ? 'container_scope' : 'host_scope_label')),
+      color:machineColors[index % machineColors.length],
+      dash:machineDashes[item.scope === 'container' ? 1+(index%3) : index%3],
+    }));
+  }
   if (!state.machine) {
     const hosts = nodes();
     const ids = history?.machines ?? hosts.filter(host => host.enabled).map(host => host.id);
@@ -914,7 +1039,7 @@ function bindChart() {
       drawChart(instance);
       const point = instance.points[instance.keyboardAt];
       byId('chart-announcement'+instance.suffix).textContent = point
-        ? tooltipTime.format(point.time)+' · '+chartSeries(instance,state.histories[instance.metric]).map((item,i) => item.label+' '+fmt(point.values[i],item.unit,1)).join(' · ') : '';
+        ? tooltipTime.format(point.time)+' · '+chartSeries(instance,state.histories[instance.metric]).flatMap((item,i) => item.hidden ? [] : [item.label+' '+chartReading(point,i,item,1)]).join(' · ') : '';
     });
     canvas.addEventListener('blur',() => {
       if (!canvas.isConnected) return;
@@ -929,7 +1054,7 @@ function bindChart() {
 function chartCeiling(series, points) {
   const metric = series[0];
   if (metric.unit === '%') return 100;
-  const max = Math.max(0,...points.flatMap(point => point.values.filter(Number.isFinite)));
+  const max = Math.max(0,...points.flatMap(point => point.values.filter((value,index) => !series[index]?.hidden && Number.isFinite(value))));
   const step = metric.key === 'power' ? max > 800 ? 400 : max > 180 ? 100 : 40 : metric.key === 'temp' ? 25 : 16;
   return Math.max(step, Math.ceil(max/step)*step);
 }
@@ -948,7 +1073,20 @@ function paintLegend(chart, series, bucket) {
   chart.legendKey = key;
   const legend = byId('chart-legend'+chart.suffix);
   const entries = series.map(item => {
-    const entry = document.createElement('span');
+    const entry = document.createElement(item.id ? 'button' : 'span');
+    if (item.id) {
+      entry.type = 'button';
+      entry.setAttribute('aria-pressed',String(!item.hidden));
+      entry.dataset.legendGroup = item.id;
+      entry.addEventListener('click',() => {
+        const ids = new Set(series.filter(other => !other.hidden).map(other => other.id));
+        if (!item.hidden && ids.size <= 1) return;
+        if (item.hidden) state.hiddenGroups.delete(item.id);
+        else state.hiddenGroups.add(item.id);
+        drawChart();
+        byId('chart-legend'+chart.suffix).querySelector(`[data-legend-group="${CSS.escape(item.id)}"]`)?.focus();
+      });
+    }
     entry.className = 'chart-legend-item';
     const swatch = document.createElement('canvas');
     swatch.className = 'legend-line';
@@ -970,7 +1108,8 @@ function paintLegend(chart, series, bucket) {
   if (series.length) {
     const note = document.createElement('span');
     note.className = 'chart-note';
-    note.textContent = (bucket ? fmt(bucket/1000,t('second_average'))+' · ' : '')+t('gaps_indicate_discontinuous_samples');
+    note.textContent = (groupChartContext() ? t('current_group_membership')+' · ' :
+      bucket ? fmt(bucket/1000,t('second_average'))+' · ' : '')+t('gaps_indicate_discontinuous_samples');
     entries.push(note);
   }
   legend.replaceChildren(...entries);
@@ -1000,28 +1139,31 @@ function drawChart(instance) {
   const hours = historyHours();
   const start = history?.from ?? end-hours*3600000;
   const points = (history?.points || []).map(point => ({...point, values:point.values.map((value,i) =>
-    history.keys[i] === 'vram' ? vram(value) : history.keys[i] === 'memory_used' ? gib(value) : value)}));
+    history.keys?.[i] === 'vram' ? vram(value) : history.keys?.[i] === 'memory_used' ? gib(value) : value)}));
   chart.points = points;
   const series = chartSeries(chart,history);
   paintLegend(chart,series,history?.bucket_ms);
   const data = byId('chart-data'+chart.suffix);
   // Build the accessible alternative only on demand, never on every pointer move.
+  const visible = series.map((item,index) => ({item,index})).filter(({item}) => !item.hidden);
   if (data.open && (chart.tableHistory !== history || chart.tableLegendKey !== chart.legendKey)) {
     chart.tableHistory = history;
     chart.tableLegendKey = chart.legendKey;
-    data.querySelector('.scroll').innerHTML = series.length ? `<table><caption>${series.map(item => escape(item.label)).join(' / ')}</caption>
-      <thead><tr><th scope="col">${t('sample_time')}</th>${series.map(item => `<th scope="col">${escape(item.label)} (${item.unit.trim()})</th>`).join('')}</tr></thead>
-      <tbody>${points.map(point => `<tr><th scope="row">${tooltipTime.format(point.time)}</th>${point.values.map((value,index) => `<td>${fmt(value,series[index].unit,1)}</td>`).join('')}</tr>`).join('')}</tbody></table>` : '';
+    data.querySelector('.scroll').innerHTML = visible.length ? `<table><caption>${visible.map(({item}) => escape(item.label)).join(' / ')}</caption>
+      <thead><tr><th scope="col">${t('sample_time')}</th>${visible.map(({item}) => `<th scope="col">${escape(item.label)} (${item.unit.trim()})</th>`).join('')}</tr></thead>
+      <tbody>${points.map(point => `<tr><th scope="row">${tooltipTime.format(point.time)}</th>${visible.map(({item,index}) => `<td>${chartReading(point,index,item,1)}</td>`).join('')}</tr>`).join('')}</tbody></table>` : '';
   }
   byId('chart-error'+chart.suffix).hidden = !historyError;
   const summary = byId('chart-summary'+chart.suffix);
   if (!series.length) {
-    summary.textContent = historyError ? t('could_not_load_history_retrying_automatically') : t('no_enabled_machines');
+    const group = groupChartContext();
+    summary.textContent = historyError ? t('could_not_load_history_retrying_automatically') :
+      t(group ? group.groups.length ? 'loading_historical_samples' : 'no_groups_for_chart' : 'no_enabled_machines');
     byId('chart-tip'+chart.suffix).hidden = true;
     ctx.font = '12px system-ui, sans-serif';
     ctx.fillStyle = '#526862';
     ctx.textAlign = 'center';
-    ctx.fillText(t('no_enabled_machines'),width/2,height/2);
+    ctx.fillText(summary.textContent,width/2,height/2);
     return;
   }
   const ceiling = chartCeiling(series,points);
@@ -1055,11 +1197,12 @@ function drawChart(instance) {
     ctx.textAlign = i === 0 ? 'left' : i === intervals ? 'right' : 'center';
     ctx.fillText(tickFormat.format(timestamp),x(timestamp),bottom+13);
   }
-  const valid = points.filter(point => point.values.some(Number.isFinite));
+  const valid = points.filter(point => visible.some(({index}) => Number.isFinite(point.values[index])));
   summary.textContent = historyError ? t('could_not_load_history_retrying_automatically')
     : !history ? t('loading_historical_samples') : !valid.length ? t('no_valid_samples_in_this_window')
     : state.machine ? t('history_summary',{count:i18n.number(valid.length),latest:series.map((item,i) =>
       item.label+' '+fmt(valid.at(-1).values[i],item.unit,1)).join(' / ')})
+    : groupChartContext() ? t('group_count',{count:new Set(visible.map(({item}) => item.id)).size})
     : t('overview_history_summary',{count:i18n.number(valid.length),machines:i18n.number(series.length)});
   if (!valid.length) {
     ctx.font = '12px system-ui, sans-serif';
@@ -1070,16 +1213,22 @@ function drawChart(instance) {
   paintTooltip(ctx,series,layout,width,chart);
 }
 
-function openHost(id) {
+function openHost(id, remember = true) {
+  if (id && !state.page && !state.machine) state.overviewScroll = window.scrollY;
+  if (id && state.page === 'group' && state.group) state.trail = [...state.trail,state.group].slice(-2);
+  if (!id || state.page !== 'group' && !state.machine) state.trail = [];
+  state.group = null;
+  if (remember) updateWorkspaceURL(id ? 'device' : 'overview',id);
   state.focused = false;
+  state.page = null;
   state.machine = id;
   state.gpu = null;
-  state.metric = 'cpu';
+  state.metric = getHost()?.storage_kind ? 'storage' : 'cpu';
   state.hours = 24;
   renderPage(true);
   paint();
   void refreshHistory(true);
-  window.scrollTo(0,0);
+  window.scrollTo(0,id ? 0 : state.overviewScroll);
   byId('page-heading')?.focus({preventScroll:true});
 }
 
@@ -1107,7 +1256,7 @@ function updateProcessCheck() {
 function openMachineDialog(host) {
   machineForm.reset();
   machineForm.dataset.machine = host?.id ?? '';
-  byId('machine-dialog-title').textContent = host ? t('machine_settings') : t('add_machine');
+  byId('machine-dialog-title').textContent = host ? t('machine_settings') : t(typedResources() ? 'add_resource' : 'add_machine');
   byId('machine-target').textContent = host?.address ?? '';
   byId('machine-target').hidden = !host;
   byId('machine-connection').hidden = !!host;
@@ -1122,12 +1271,44 @@ function openMachineDialog(host) {
   fields.ssh_connect_timeout_seconds.value = host?.ssh_connect_timeout_seconds ?? state.snapshot.default_ssh_connect_timeout_seconds;
   fields.enabled.checked = host?.enabled ?? true;
   for (const input of checkboxes) input.checked = !host || checks(host).includes(input.value);
+  fields.hardware_kind.value = host?.storage_kind ? 'storage' : host?.configured_hardware_kind ?? '';
+  fields.hardware_kind.querySelector('[value=storage]').hidden = !typedResources() || Boolean(host && !host.storage_kind);
+  fields.hardware_kind.disabled = !typedResources() || Boolean(host?.storage_kind);
+  fields.storage_name.value = host?.storage_kind ? host.name : '';
+  fields.storage_kind.value = host?.storage_kind ?? 'nas';
+  fields.storage_enabled.checked = host?.enabled ?? true;
+  const adapters = new Set([...(state.snapshot.storage_adapters ?? []), ...(host?.adapter ? [host.adapter] : [])]);
+  fields.adapter.innerHTML = `<option value="">${t('storage_pending')}</option>`+
+    [...adapters].map(id => `<option value="${escape(id)}">${escape(id)}</option>`).join('');
+  fields.adapter.value = host?.adapter ?? '';
+  const room = groupedOverview();
+  byId('registration-room').hidden = fields.room_id.disabled = !room;
+  fields.room_id.innerHTML = roomOptions(host?.room_id ?? (state.group?.kind === 'room' ? state.group.id : null));
+  byId('registration-user').hidden = Boolean(host) || !typedResources();
+  fields.resource_user.innerHTML = personOptions(true);
+  updateResourceForm();
   updateProcessCheck();
   machineError.hidden = true;
   machineDialog.showModal();
-  (host ? fields.alias : fields.host).focus();
+  (host?.storage_kind ? fields.storage_name : host ? fields.alias : fields.host).focus();
 }
 
+function personOptions(shared = false) {
+  return `<option value="">${t('unassigned')}</option>${shared ? `<option value="shared">${t('shared_user')}</option>` : ''}` +
+    directoryPeople().map(person => `<option value="${person.id}">${escape(person.name)}</option>`).join('');
+}
+
+function updateResourceForm() {
+  const {hardware_kind} = machineForm.elements;
+  const storage = hardware_kind.value === 'storage';
+  byId('storage-fields').hidden = byId('storage-fields').disabled = !storage;
+  byId('compute-fields').hidden = byId('compute-fields').disabled = storage;
+  gpuCheck.disabled = hardware_kind.value === 'cpu';
+  if (gpuCheck.disabled) gpuCheck.checked = false;
+  updateProcessCheck();
+}
+
+machineForm.elements.hardware_kind.addEventListener('change', updateResourceForm);
 gpuCheck.addEventListener('change', updateProcessCheck);
 machineCancel.addEventListener('click', () => machineDialog.close());
 machineDialog.addEventListener('cancel', event => {
@@ -1138,7 +1319,13 @@ machineForm.addEventListener('submit', async event => {
   if (machineSave.disabled) return;
   const id = machineForm.dataset.machine;
   const fields = new FormData(machineForm);
-  const settings = {
+  const storage = machineForm.elements.hardware_kind.value === 'storage';
+  const settings = storage ? {
+    name:fields.get('storage_name').trim(),
+    storage_kind:fields.get('storage_kind'),
+    adapter:fields.get('adapter') || null,
+    enabled:fields.has('storage_enabled'),
+  } : {
     alias:fields.get('alias').trim() || null,
     enabled:fields.has('enabled'),
     interval_seconds:Number(fields.get('interval_seconds')),
@@ -1147,35 +1334,45 @@ machineForm.addEventListener('submit', async event => {
   if (fields.has('ssh_connect_timeout_seconds')) {
     settings.ssh_connect_timeout_seconds = Number(fields.get('ssh_connect_timeout_seconds'));
   }
-  if (settings.enabled && !settings.checks.length) {
+  if (!storage && settings.enabled && !settings.checks.length) {
     machineError.textContent = t('select_at_least_one_check_when_monitoring_is_enabled');
     machineError.hidden = false;
     gpuCheck.focus();
     return;
   }
-  if (!id) {
+  if (fields.has('room_id')) settings.room_id = fields.get('room_id') || null;
+  if (!storage && fields.has('hardware_kind')) settings.hardware_kind = fields.get('hardware_kind') || null;
+  if (!id && typedResources()) {
+    const user = fields.get('resource_user');
+    settings.shared = user === 'shared';
+    settings.person_id = user && !settings.shared ? Number(user) : null;
+  }
+  if (!id && !storage) {
     settings.host = fields.get('host').trim();
     settings.ssh_user = fields.get('ssh_user').trim() || null;
     settings.target_os = fields.get('target_os');
   }
   machineSave.disabled = machineCancel.disabled = machineFields.disabled = true;
-  setButtonLabel(machineSave, id ? 'saving' : 'verifying_connection');
+  setButtonLabel(machineSave, id || storage ? 'saving' : 'verifying_connection');
   machineError.hidden = true;
   try {
-    const response = await fetch(id ? '/api/machines/'+encodeURIComponent(id)+'/settings' : '/api/machines', {
+    const path = storage ? id ? '/api/storage/'+encodeURIComponent(id) : '/api/storage'
+      : id ? '/api/machines/'+encodeURIComponent(id)+'/settings' : '/api/machines';
+    const response = await fetch(path, {
       method:id ? 'PUT' : 'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(settings),
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const detail = typeof result.detail === 'string' ? t('could_not_save_please_retry_later')+' '+i18n.diagnostic(result.detail)
+      const detail = typeof result.detail === 'string' ? t('could_not_save_please_retry_later')+' '+alertEvidence(result.detail)
         : response.status === 422 ? t('check_the_address_username_and_monitoring_settings') : t('could_not_save_please_retry_later');
       throw new Error(detail);
     }
     snapshotRevision++;
     machineDialog.close();
-    const index = state.snapshot.machines.findIndex(node => node.id === result.id);
-    if (index === -1) state.snapshot.machines.push(result);
-    else state.snapshot.machines[index] = result;
+    const resources = storage ? state.snapshot.storage : state.snapshot.machines;
+    const index = resources.findIndex(node => node.id === result.id);
+    if (index === -1) resources.push(result);
+    else resources[index] = result;
     if (!id) {
       openHost(result.id);
     } else {
@@ -1196,6 +1393,7 @@ machineForm.addEventListener('submit', async event => {
 const assigneeDialog = byId('assignee-dialog');
 const assigneeForm = byId('assignee-form');
 const assigneeOptions = byId('assignee-options');
+const assigneeMode = byId('assignee-mode');
 const assigneeSave = byId('assignee-save');
 const assigneeCancel = byId('assignee-cancel');
 const assigneeClear = byId('assignee-clear');
@@ -1221,6 +1419,12 @@ async function peopleRequest(path, method, body, invalidKey) {
   if (response.status === 204) return null;
   const result = await response.json();
   if (response.ok) return result;
+  if (result.detail?.references) {
+    const {devices,rooms,clusters} = result.detail.references;
+    const lists = [[t('machines'),devices],[t('rooms'),rooms],[t('clusters'),clusters]]
+      .filter(([,names]) => names.length).map(([label,names]) => label+' '+names.join(', '));
+    throw new Error(t('person_in_use')+' '+lists.join(' · '));
+  }
   const known = ['person_in_use', 'person_name_taken', 'person_missing', 'assignee_machine_missing'];
   const key = known.includes(result.detail) ? result.detail : response.status === 422 ? invalidKey : 'people_save_failed';
   throw new Error(t(key));
@@ -1244,13 +1448,30 @@ function renderAssigneeOptions(selected) {
   assigneeOptions.innerHTML = people.length ? people.map(person =>
     `<label class="assignee-chip"><input type="checkbox" value="${person.id}" aria-label="${escape(person.name)}" ${selected.has(person.id) ? 'checked' : ''}>
       <span class="assignee-chip-mark" aria-hidden="true"></span><span class="assignee-chip-name">${chipName(person.name)}</span></label>`).join('') : `<p>${t('no_people')}</p>`;
+  updateAssigneeMode();
+}
+
+function updateAssigneeMode() {
+  const typed = !byId('assignee-mode-field').hidden;
+  assigneeOptions.hidden = typed && !['person','legacy'].includes(assigneeMode.value);
+  assigneeClear.hidden = assigneeOptions.hidden;
   updateAssigneeCount();
 }
+
+assigneeMode.addEventListener('change', () => {
+  if (assigneeMode.value === 'person') {
+    for (const input of [...assigneeOptions.querySelectorAll('input:checked')].slice(1)) input.checked = false;
+  }
+  updateAssigneeMode();
+});
 
 function openAssigneeDialog(host) {
   assigneeForm.dataset.machine = host.id;
   byId('assignee-machine').textContent = host.name;
   assigneeError.hidden = true;
+  byId('assignee-mode-field').hidden = !host.assignment_mode;
+  assigneeMode.querySelector('[value=legacy]').hidden = host.assignment_mode !== 'legacy';
+  assigneeMode.value = host.assignment_mode ?? 'person';
   renderAssigneeOptions(new Set(host.assigned_users?.map(person => person.id)));
   assigneeDialog.showModal();
 }
@@ -1259,7 +1480,12 @@ assigneeClear.addEventListener('click', () => {
   for (const input of assigneeOptions.querySelectorAll('input:checked')) input.checked = false;
   updateAssigneeCount();
 });
-assigneeOptions.addEventListener('change', updateAssigneeCount);
+assigneeOptions.addEventListener('change', event => {
+  if (!byId('assignee-mode-field').hidden && assigneeMode.value === 'person' && event.target.checked) {
+    for (const input of assigneeOptions.querySelectorAll('input:checked')) if (input !== event.target) input.checked = false;
+  }
+  updateAssigneeCount();
+});
 assigneeCancel.addEventListener('click', () => assigneeDialog.close());
 assigneeManage.addEventListener('click', openPeopleDialog);
 assigneeDialog.addEventListener('cancel', event => {
@@ -1273,15 +1499,23 @@ assigneeForm.addEventListener('submit', async event => {
   event.preventDefault();
   if (assigneeSave.disabled) return;
   const id = assigneeForm.dataset.machine;
-  const personIds = [...selectedAssignees()];
+  const typed = !byId('assignee-mode-field').hidden;
+  const mode = typed ? assigneeMode.value : 'legacy';
+  const personIds = ['unset','shared'].includes(mode) ? [] : [...selectedAssignees()];
+  if (mode === 'person' && personIds.length !== 1) {
+    showPeopleError(assigneeError,new Error(t('invalid_assignees')));
+    return;
+  }
   assigneeSave.disabled = assigneeCancel.disabled = assigneeOptions.disabled = assigneeClear.disabled = assigneeManage.disabled = true;
   setButtonLabel(assigneeSave, 'saving');
   assigneeError.hidden = true;
   try {
-    const saved = await peopleRequest('/api/machines/'+encodeURIComponent(id)+'/assignees', 'PUT', {person_ids:personIds}, 'invalid_assignees');
+    const body = mode === 'legacy' ? {person_ids:personIds} : {person_ids:personIds,mode};
+    const saved = await peopleRequest(resourcePath(getHost())+'/assignees', 'PUT', body, 'invalid_assignees');
     snapshotRevision++;
-    const host = nodes().find(node => node.id === id);
-    if (host) host.assigned_users = saved.assigned_users;
+    const records = getHost()?.storage_kind ? state.snapshot.storage : state.snapshot.machines;
+    const host = records.find(node => node.id === id);
+    if (host) Object.assign(host,{assigned_users:saved.assigned_users,assignment_mode:saved.assignment_mode});
     assigneeDialog.close();
   } catch (error) {
     showPeopleError(assigneeError, error);
@@ -1292,8 +1526,10 @@ assigneeForm.addEventListener('submit', async event => {
 });
 
 function renderPeopleList() {
-  const people = directoryPeople();
+  const query = byId('people-search').value.trim().toLocaleLowerCase();
+  const people = directoryPeople().filter(person => person.name.toLocaleLowerCase().includes(query));
   byId('people-empty').hidden = people.length > 0;
+  byId('people-empty').textContent = t(query ? 'no_matching_people' : 'no_people');
   peopleList.innerHTML = people.map(person =>
     `<li><span>${escape(person.name)}</span><div class="people-actions">
       <button type="button" class="control" data-rename-person="${person.id}" aria-label="${escape(t('rename_person_named',{name:person.name}))}">${t('rename_person')}</button>
@@ -1310,6 +1546,7 @@ function editPerson(person = null) {
 }
 
 function openPeopleDialog() {
+  byId('people-search').value = '';
   editPerson();
   renderPeopleList();
   peopleDialog.showModal();
@@ -1322,7 +1559,8 @@ async function changePeople(person, {remove = false} = {}) {
   peopleError.hidden = true;
   setButtonLabel(peopleSave, 'saving');
   try {
-    const path = person === null ? '/api/people' : '/api/people/'+person;
+    const path = person === null ? '/api/people' : '/api/people/'+person+
+      (remove && groupedOverview() ? '?include_references=true' : '');
     const saved = await peopleRequest(path, remove ? 'DELETE' : person === null ? 'POST' : 'PUT',
       remove ? {} : {name:peopleName.value}, 'person_name_invalid');
     snapshotRevision++;
@@ -1330,8 +1568,12 @@ async function changePeople(person, {remove = false} = {}) {
     state.snapshot.people = saved ? [...others, saved] : others;
     if (saved && person !== null) {
       for (const host of nodes()) {
-        host.assigned_users = host.assigned_users.map(entry => entry.id === person ? saved : entry);
+        host.assigned_users = (host.assigned_users ?? []).map(entry => entry.id === person ? saved : entry);
       }
+    }
+    if (saved && person !== null && groupedOverview()) {
+      for (const room of groupList('room')) if (room.owner_id === person) room.owner = saved.name;
+      for (const cluster of groupList('cluster')) if (cluster.person_id === person) cluster.person = saved.name;
     }
     if (!remove || editingPerson === person) editPerson();
     renderPeopleList();
@@ -1346,6 +1588,7 @@ async function changePeople(person, {remove = false} = {}) {
   peopleName.focus();
 }
 
+byId('people-search').addEventListener('input',renderPeopleList);
 peopleList.addEventListener('click', event => {
   const button = event.target.closest('button');
   if (button?.hasAttribute('data-rename-person')) {
@@ -1408,13 +1651,14 @@ removeForm.addEventListener('submit', async event => {
   setButtonLabel(removeConfirm, 'removing');
   removeError.hidden = true;
   try {
-    const response = await fetch('/api/machines/'+encodeURIComponent(id), {
+    const response = await fetch(resourcePath(getHost()), {
       method:'DELETE', headers:{'Content-Type':'application/json'},body:JSON.stringify({confirm:true}),
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(typeof result.detail === 'string' ? t('could_not_remove_please_retry_later')+' '+i18n.diagnostic(result.detail) : t('could_not_remove_please_retry_later'));
     snapshotRevision++;
-    state.snapshot.machines = state.snapshot.machines.filter(node => node.id !== id);
+    const list = getHost()?.storage_kind ? 'storage' : 'machines';
+    state.snapshot[list] = state.snapshot[list].filter(node => node.id !== id);
     if (result.cleanup_pending) state.snapshot.removal_pending = Math.max(state.snapshot.removal_pending ?? 0,1);
     removeDialog.close();
     openHost(null);
@@ -1431,7 +1675,16 @@ document.addEventListener('click',event => {
   const button = event.target.closest('button');
   if (!button) return;
   const {host,gpu,filter,metric,range,overviewMetric} = button.dataset;
-  if (button.hasAttribute('data-overview')) openHost(null);
+  if (button.hasAttribute('data-alert-center')) openAlerts();
+  else if (button.hasAttribute('data-more-alerts')) void loadAlerts(true);
+  else if (button.dataset.event && state.page === 'alerts') {
+    state.event = Number(button.dataset.event);
+    updateWorkspaceURL('alerts',state.event);
+    paintAlerts();
+    byId('alert-rows')?.querySelector(`[data-event="${state.event}"]`)?.focus();
+  }
+  else if (button.dataset.event) openAlerts(Number(button.dataset.event));
+  else if (button.hasAttribute('data-overview')) openHost(null);
   else if (button.hasAttribute('data-add-machine')) openMachineDialog(null);
   else if (button.hasAttribute('data-configure-machine')) openMachineDialog(getHost());
   else if (button.hasAttribute('data-edit-assignees')) openAssigneeDialog(getHost());
@@ -1451,9 +1704,10 @@ document.addEventListener('click',event => {
   }
   else if (host) openHost(host);
   else if (filter) {
-    state.filter = filter;
+    if (groupedOverview()) deviceFilterState().status = filter;
+    else state.filter = filter;
     for (const node of document.querySelectorAll('[data-filter]')) node.setAttribute('aria-pressed',String(node.dataset.filter === filter));
-    drawRows(nodes());
+    drawRows(membersForPanel(nodes()));
     paint();
   } else if (gpu) openGpuDialog(gpu);
   else if (button.hasAttribute('data-all-gpus')) {
@@ -1464,7 +1718,8 @@ document.addEventListener('click',event => {
     void refreshHistory(true);
     byId('focus-trends')?.focus();
   } else if (overviewMetric) {
-    state.overviewMetric = overviewMetric;
+    if (groupChartContext()) state.groupMetric = overviewMetric;
+    else state.overviewMetric = overviewMetric;
     if (chart) chart.metric = overviewMetric;
     for (const node of document.querySelectorAll('[data-overview-metric]'))
       node.setAttribute('aria-pressed',String(node.dataset.overviewMetric === overviewMetric));
@@ -1492,9 +1747,15 @@ document.addEventListener('keydown',event => {
   }
 });
 document.addEventListener('input',event => {
+  if (event.target.id === 'alert-search') {
+    state.alertQuery = event.target.value;
+    state.event = null;
+    paintAlerts();
+  }
   if (event.target.id !== 'host-search') return;
-  state.query = event.target.value;
-  drawRows(nodes());
+  if (groupedOverview()) deviceFilterState().query = event.target.value;
+  else state.query = event.target.value;
+  drawRows(membersForPanel(nodes()));
   paint();
 });
 
@@ -1507,6 +1768,7 @@ function paintSeries(ctx, points, layout, series) {
   ctx.clip();
 
   series.forEach((metric, index) => {
+    if (metric.hidden) return;
     const segments = [];
     let segment = [];
     for (const point of points) {
@@ -1553,6 +1815,12 @@ function paintSeries(ctx, points, layout, series) {
   ctx.restore();
 }
 
+function chartReading(point,index,item,digits) {
+  const value = fmt(point.values[index],item.unit,digits);
+  const coverage = point.coverage?.[index];
+  return coverage ? value+' · '+t('live_coverage',{valid:coverage[0],total:coverage[1]}) : value;
+}
+
 function paintTooltip(ctx, series, layout, width, chart) {
   const tip = byId('chart-tip'+chart.suffix);
   const { points, pointer, keyboardAt } = chart;
@@ -1573,7 +1841,7 @@ function paintTooltip(ctx, series, layout, width, chart) {
   ctx.lineTo(position, bottom);
   ctx.stroke();
   for (const [index, value] of point.values.entries()) {
-    if (!Number.isFinite(value)) continue;
+    if (!Number.isFinite(value) || series[index].hidden) continue;
     ctx.fillStyle = series[index].color;
     ctx.beginPath();
     ctx.arc(position, y(value), 3.2, 0, 2 * Math.PI);
@@ -1582,16 +1850,204 @@ function paintTooltip(ctx, series, layout, width, chart) {
   tip.hidden = false;
   const timestamp = document.createElement('time');
   timestamp.textContent = tooltipTime.format(point.time);
-  const readings = series.map((metric,index) => {
+  const readings = series.flatMap((metric,index) => {
+    if (metric.hidden) return [];
     const reading = document.createElement('div');
-    reading.textContent = metric.label+' · '+fmt(point.values[index],metric.unit,metric.key === 'vram' ? 1 : 0);
-    return reading;
+    reading.textContent = metric.label+' · '+chartReading(point,index,metric,metric.key === 'vram' ? 1 : 0);
+    return [reading];
   });
   tip.replaceChildren(timestamp,...readings);
   const preferred = position + tip.offsetWidth + 10 < width ? position + 9 : position - tip.offsetWidth - 9;
   tip.style.left = clamp(preferred, 2, Math.max(2, width - tip.offsetWidth - 2)) + 'px';
   tip.style.top = '13px';
 }
+
+function hardwareLabel(kind) {
+  return {cpu:'CPU',gpu:'GPU',nas:'NAS',storage_cluster:t('storage_cluster'),unconfirmed:t('unconfirmed_hardware')}[kind] || '—';
+}
+
+function bytesLabel(bytes) {
+  return Number.isFinite(bytes) && bytes >= 1024**4 ? fmt(bytes/1024**4,' TiB',1) : fmt(gib(bytes),' GiB',1);
+}
+
+function capacityLabel(capacity) {
+  if (!capacity) return '—';
+  const ratio = capacity.total_bytes ? fmt(100*capacity.used_bytes/capacity.total_bytes,'%') : '—';
+  return bytesLabel(capacity.used_bytes)+' / '+bytesLabel(capacity.total_bytes)+' · '+ratio;
+}
+
+function basicTable(labels, rows) {
+  if (!rows.length) return '<p class="empty">—</p>';
+  return `<table class="resource-table"><thead><tr>${labels.map(label => `<th scope="col">${escape(label)}</th>`).join('')}</tr></thead>
+    <tbody>${rows.map(row => '<tr>'+row.map((value,index) => `<td data-label="${escape(labels[index])}">${value}</td>`).join('')+'</tr>').join('')}</tbody></table>`;
+}
+
+function resourceActions() {
+  const disabled = configUnavailable() ? 'disabled' : '';
+  return `<div class="title-actions"><button type="button" class="control" data-configure-machine ${disabled}>${t('configure')}</button>
+    <button type="button" class="control" data-edit-assignees ${disabled}>${t('assignees')}</button>
+    <button type="button" class="control danger-control" data-remove-machine ${disabled}>${t('remove_node')}</button></div>`;
+}
+
+function storagePage(host) {
+  const sample = host.storage_observation;
+  const health = value => value ? t(`storage_${value}`) : '—';
+  const pools = sample?.pools ?? [];
+  const members = sample?.members ?? [];
+  const cards = [
+    [t('storage_capacity'),capacityLabel(sample?.capacity),sample?.scope === 'unverified' ? t('storage_unverified') : ''],
+    [t('storage_health'),health(sample?.health),pools.length ? pools.filter(pool => pool.health === 'healthy').length+' / '+pools.length+' '+t('storage_pool') : ''],
+    [t('storage_read')+' / '+t('storage_write'),[sample?.read_bytes_per_second,sample?.write_bytes_per_second]
+      .map(value => fmt(Number.isFinite(value) ? value/1024**2 : null,' MiB/s',1)).join(' / '),''],
+    [t('storage_adapter'),host.adapter ?? '—',sample?.identity ?? ''],
+  ];
+  return `<section class="page-title"><div>${heading(host.name,status(host.status,machineStates[host.status]))}
+    <p>${hardwareLabel(host.storage_kind)} · ${t('last_valid_sample')} ${escape(time(host.last_success_at))}</p>${assigneeSummary(host)}${deviceGroupLinks(host)}</div>
+    ${resourceActions()}</section>
+    ${deviceAlerts(host)}
+    ${host.status === 'pending' ? `<p class="message scope-note">${t('storage_registered')}</p>` : ''}
+    <section class="metrics">${cards.map(([label,value,foot]) => `<article class="metric"><p class="metric-name">${label}</p><strong>${escape(value)}</strong><small>${escape(foot)}</small></article>`).join('')}</section>
+    <div class="column details-layout">
+    ${host.status === 'pending' && !host.last_success_at ? '' : chartPanel(host,null)}
+    <section class="panel resource-panel"><h2>${t('storage_pool')}</h2>${basicTable([t('device_name'),t('storage_health'),t('storage_capacity')],
+      pools.map(pool => [escape(pool.name),health(pool.health),capacityLabel(pool)]))}</section>
+    ${host.storage_kind === 'storage_cluster' ? `<section class="panel resource-panel"><h2>${t('storage_members')}</h2>${basicTable(
+      [t('device_name'),t('storage_health'),t('storage_capacity')],members.map(member => [escape(member.name+(member.role ? ' · '+member.role : '')),
+        health(member.health),bytesLabel(member.capacity_bytes)]))}</section>` : ''}</div>`;
+}
+
+function eventTime(value, utc = false) {
+  if (!Number.isFinite(value)) return '—';
+  const local = i18n.date(value,{dateStyle:'short',timeStyle:'medium'});
+  return utc ? local+' / '+new Date(value).toISOString() : local;
+}
+
+const alertName = event => t(`alert_rule_${event.rule}`);
+const alertEvidence = value => ['storage_health','storage_timeout','storage_observation_unavailable','sample_stale',
+  'collection_resumed','storage_health_confirmed','adapter_removed','removed','disabled'].includes(value)
+  ? t(value) : i18n.diagnostic(value);
+
+function eventButton(event, label, style = 'control') {
+  return `<button type="button" class="${style}" data-event="${event.id}">${escape(label)}</button>`;
+}
+
+function deviceButton(id, label = t('locate_device')) {
+  return nodes().some(node => node.id === id)
+    ? `<button type="button" class="control" data-host="${escape(id)}">${escape(label)}</button>` : '';
+}
+
+function overviewAlerts(alerts) {
+  const events = alerts?.events ?? [];
+  return `<section class="panel attention-panel"><div class="panel-head"><h2>${t('site_alerts')}</h2>
+    <small>${t('alert_active')} · ${alerts == null ? '—' : i18n.number(alerts.total)}</small><button type="button" class="control" data-alert-center>${t('alerts_all')}</button></div>
+    ${events.length ? `<div class="issues">${events.map(event => `<div class="issue resource-issue">
+      <span class="issue-mark ${event.severity === 'critical' ? 'offline' : 'warning'}" aria-hidden="true">!</span>
+      <span class="issue-copy"><strong>${escape(event.name)} · ${alertName(event)}</strong><small>${eventTime(event.first_at)}</small></span>
+      ${eventButton(event,t('see_evidence'))}${deviceButton(event.resource)}</div>`).join('')}</div>`
+      : `<p class="empty">${t(alerts ? 'no_machines_need_attention' : 'alerts_unavailable')}</p>`}</section>`;
+}
+
+function deviceAlerts(host) {
+  const alerts = (state.snapshot.alerts?.events ?? []).filter(event => event.resource === host.id && event.status === 'active');
+  return alerts.length ? `<div class="message resource-issue">${alerts.map(event => eventButton(event,alertName(event))).join('')}</div>` : '';
+}
+
+function alertCenter() {
+  return `<section class="page-title">${heading(t('alerts_center'))}</section>
+    <div class="alert-columns"><section class="panel resource-panel" aria-label="${t('alerts_all')}">
+      <div class="tools"><label>${t('status')} <select id="alert-status">${['all','active','resolved','closed'].map(key =>
+        `<option value="${key}" ${key === state.alertFilter ? 'selected' : ''}>${t(key === 'all' ? 'all' : `alert_${key}`)}</option>`).join('')}</select></label>
+      <label>${t('resource_kind')} <select id="alert-kind">${['all','cpu','gpu','nas','storage_cluster','unconfirmed'].map(key =>
+        `<option value="${key}" ${key === state.alertKind ? 'selected' : ''}>${key === 'all' ? t('all') : hardwareLabel(key)}</option>`).join('')}</select></label>
+      <input type="search" class="search" id="alert-search" aria-label="${t('alert_filter')}" placeholder="${t('alert_filter')}" value="${escape(state.alertQuery)}"></div>
+      <div id="alert-rows"></div></section><section class="panel resource-panel" id="alert-detail" aria-label="${t('alert_evidence')}"></section></div>`;
+}
+
+function paintAlerts() {
+  const rows = byId('alert-rows');
+  const detail = byId('alert-detail');
+  if (!rows || !detail) return;
+  const query = state.alertQuery.trim().toLocaleLowerCase();
+  const focus = document.activeElement?.closest('#alert-rows button, #alert-detail button');
+  const focusedEvent = focus?.dataset.event;
+  const focusedDevice = focus?.dataset.host;
+  const events = state.alerts?.events ?? [];
+  const matches = events.filter(event => (state.alertFilter === 'all' || state.alertFilter === event.status)
+    && (state.alertKind === 'all' || state.alertKind === event.kind)
+    && (event.name+' '+alertName(event)+' '+event.id).toLocaleLowerCase().includes(query));
+  rows.innerHTML = matches.length ? basicTable([t('status'),t('alert_evidence'),t('alert_first_at'),t('alert_recovered_at')],
+    matches.map(event => [t(`alert_${event.status}`),eventButton(event,event.name+' · '+alertName(event),'row-open'),
+      eventTime(event.first_at),eventTime(event.recovered_at)]))
+    : `<p class="empty" role="status">${t(state.alertError ? 'alerts_unavailable' : state.alerts ? 'alert_no_matches' : 'loading_historical_samples')}</p>`;
+  if (events.length < (state.alerts?.total ?? 0)) rows.insertAdjacentHTML('beforeend',
+    `<button type="button" class="control" data-more-alerts>${t('alert_load_more')}</button>`);
+  const selected = matches.find(event => event.id === state.event) ||
+    (state.directAlert?.id === state.event ? state.directAlert : null) || matches[0];
+  const device = selected && nodes().find(node => node.id === selected.resource);
+  detail.innerHTML = selected ? `<h2>${escape(selected.name)} · ${alertName(selected)}</h2>
+    <p>${t(`alert_${selected.status}`)} · #${selected.id}</p><dl class="event-facts">
+    ${[['alert_first_at','first_at'],['alert_last_at','last_at'],['alert_recovered_at','recovered_at'],
+      ['alert_closed_at','closed_at'],['last_valid_sample','last_success_at']].map(([label,key]) =>
+      `<dt>${t(label)}</dt><dd>${escape(eventTime(selected[key],true))}</dd>`).join('')}</dl>
+    <p class="message">${escape(alertEvidence(selected.evidence) || '—')}</p>
+    ${selected.recovery_evidence ? `<p>${escape(alertEvidence(selected.recovery_evidence))}</p>` : ''}
+    ${selected.closure_reason ? `<p>${escape(alertEvidence(selected.closure_reason))}</p>` : ''}
+    ${device ? deviceGroupLinks(device) : ''}
+    ${deviceButton(selected.resource)}` : '<p class="empty">—</p>';
+  if (focusedEvent) rows.querySelector(`[data-event="${CSS.escape(focusedEvent)}"]`)?.focus({preventScroll:true});
+  else if (focusedDevice) detail.querySelector(`[data-host="${CSS.escape(focusedDevice)}"]`)?.focus({preventScroll:true});
+}
+
+async function loadAlerts(more = false) {
+  if (state.alertLoading) return;
+  state.alertLoading = true;
+  state.alertRefreshAt = performance.now();
+  try {
+    const next = await get('/api/alerts?offset='+(more ? state.alerts.events.length : 0));
+    const entries = more ? [...state.alerts.events,...next.events] : next.events;
+    state.alerts = {total:next.total,events:[...new Map(entries.map(event => [event.id,event])).values()]};
+    const selected = state.event;
+    if (Number.isSafeInteger(selected) && selected > 0 && !entries.some(event => event.id === selected)) {
+      const direct = await get('/api/alerts/'+selected).catch(() => null);
+      if (state.event === selected) state.directAlert = direct;
+    } else state.directAlert = null;
+    state.alertError = false;
+  } catch {
+    state.alertError = true;
+  } finally {
+    state.alertLoading = false;
+    paintAlerts();
+  }
+}
+
+function openAlerts(id = null, remember = true) {
+  if (remember && !state.page && !state.machine) state.overviewScroll = window.scrollY;
+  if (remember) updateWorkspaceURL('alerts',id);
+  state.page = 'alerts';
+  state.group = null;
+  state.trail = [];
+  state.event = id;
+  state.directAlert = null;
+  if (id !== null) {
+    state.alertFilter = state.alertKind = 'all';
+    state.alertQuery = '';
+  }
+  state.machine = state.gpu = null;
+  state.focused = false;
+  renderPage(true);
+  void loadAlerts();
+  void refreshHistory(true);
+  window.scrollTo(0,0);
+  byId('page-heading')?.focus();
+}
+
+document.addEventListener('change', event => {
+  if (event.target.id === 'alert-status') state.alertFilter = event.target.value;
+  else if (event.target.id === 'alert-kind') state.alertKind = event.target.value;
+  else return;
+  state.event = null;
+  paintAlerts();
+});
 
 const localeSelect = byId('locale-select');
 for (const [value, entry] of Object.entries(i18n.registry)) {
@@ -1611,4 +2067,5 @@ localeSelect.addEventListener('change', () => {
   paint();
 });
 
+setupGroupUI();
 void refresh();

@@ -23,7 +23,7 @@ for (const entry of Object.values(api.registry)) {
     assert.deepEqual(placeholders(entry.messages[key]),placeholders(api.registry['zh-CN'].messages[key]),key);
   }
 }
-for (const file of ['monitor.js','index.html']) {
+for (const file of ['monitor.js','groups.js','index.html']) {
   const source=fs.readFileSync(path.join(root,file),'utf8');
   for (const match of source.matchAll(/\bt\('([^']+)'|data-i18n(?:-[\w-]+)?="([^"]+)"/g)) {
     assert.ok(baseline.includes(match[1] || match[2]),match[0]);

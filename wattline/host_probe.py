@@ -67,12 +67,14 @@ def gpu_measurements(gpu, uuid, warnings):
     power_limit = gpu_power(gpu, 'current_power_limit')
     if power_limit is None:
         power_limit = gpu_power(gpu, 'enforced_power_limit')
+    default_power_limit = gpu_power(gpu, 'default_power_limit')
     return {
         'uuid':uuid, 'name':gpu.findtext('product_name'), 'bus_id':gpu.findtext('pci/pci_bus_id'),
         'memory_used_mib':gpu_number(gpu, 'fb_memory_usage/used'),
         'memory_total_mib':gpu_number(gpu, 'fb_memory_usage/total'),
         'utilization_percent':gpu_number(gpu, 'utilization/gpu_util'),
         'temperature_c':temperature, 'power_w':watts, 'power_kind':power_kind, 'power_limit_w':power_limit,
+        'default_power_limit_w':default_power_limit or None,
     }
 
 

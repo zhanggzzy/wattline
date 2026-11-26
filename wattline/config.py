@@ -8,6 +8,8 @@ from .transport import DEFAULT_SSH_CONNECT_TIMEOUT, valid_ssh_destination
 
 
 Check = Literal['gpu', 'processes', 'cpu', 'memory', 'system']
+ComputeKind = Literal['cpu', 'gpu']
+PersonId = Annotated[int, Field(strict=True, gt=0, le=2**53-1)]
 TargetOS = Literal['linux', 'windows']
 DEFAULT_CHECKS = ('gpu', 'processes', 'cpu', 'memory', 'system')
 SSH_USER = r'^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,63}$'
@@ -30,9 +32,18 @@ class AliasUpdate(BaseModel):
 class MachineSettings(AliasUpdate):
     alias: str | None = Field(default=None, max_length=80)
     enabled: bool = True
+    hardware_kind: ComputeKind | None = None
+    room_id: MachineId | None = None
     checks: tuple[Check, ...] = Field(default=DEFAULT_CHECKS, max_length=len(DEFAULT_CHECKS))
     interval_seconds: float = Field(default=10, ge=1, le=300)
     ssh_connect_timeout_seconds: int = Field(default=DEFAULT_SSH_CONNECT_TIMEOUT, ge=1, le=60)
+
+    @model_validator(mode='before')
+    @classmethod
+    def default_cpu_checks(cls, values):
+        if isinstance(values, dict) and values.get('hardware_kind') == 'cpu' and 'checks' not in values:
+            return dict(values, checks=('cpu', 'memory', 'system'))
+        return values
 
     @field_validator('checks')
     @classmethod
@@ -45,6 +56,8 @@ class MachineSettings(AliasUpdate):
 
     @model_validator(mode='after')
     def validate_enabled_checks(self):
+        if self.hardware_kind == 'cpu' and ('gpu' in self.checks or 'processes' in self.checks):
+            raise ValueError('CPU 资源不能启用 GPU 巡检')
         if self.enabled and not self.checks:
             raise ValueError('启用巡检时至少选择一个巡检项目')
         return self
@@ -54,6 +67,14 @@ class MachineRegistration(MachineSettings):
     host: str = Field(min_length=1, max_length=128)
     ssh_user: str | None = Field(default=None, pattern=SSH_USER)
     target_os: TargetOS = 'linux'
+    person_id: PersonId | None = None
+    shared: bool = False
+
+    @model_validator(mode='after')
+    def assignment_mode(self):
+        if self.shared and self.person_id is not None:
+            raise ValueError('invalid_assignees')
+        return self
 
     @field_validator('host')
     @classmethod
@@ -84,7 +105,14 @@ class PersonName(BaseModel):
 
 class MachineAssignees(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    person_ids: tuple[Annotated[int, Field(strict=True, gt=0, le=2**53-1)], ...]
+    person_ids: tuple[PersonId, ...]
+    mode: Literal['person', 'shared', 'unset'] | None = None
+
+    @model_validator(mode='after')
+    def valid_mode(self):
+        if self.mode is not None and len(self.person_ids) != (1 if self.mode == 'person' else 0):
+            raise ValueError('invalid_assignees')
+        return self
 
     @field_validator('person_ids')
     @classmethod
@@ -119,6 +147,7 @@ class Machine(BaseModel):
     address: str | None = Field(default=None, min_length=1, max_length=128)
     mode: Literal['local', 'ssh']
     target_os: TargetOS = 'linux'
+    hardware_kind: ComputeKind | None = None
     ssh_alias: str | None = None
     ssh_user: str | None = Field(default=None, pattern=SSH_USER)
     expected_host_id: str = Field(pattern=r'^[a-f0-9]{32}$')
@@ -146,14 +175,16 @@ class Machine(BaseModel):
         if not self.require_gpu and self.expected_gpu_count:
             raise ValueError('纯 CPU 节点不配置预期卡数')
         if self.checks is not None:
-            MachineSettings(enabled=self.enabled, checks=self.checks)
+            MachineSettings(enabled=self.enabled, checks=self.checks, hardware_kind=self.hardware_kind)
         return self
 
     @property
     def active_checks(self):
         if self.checks is not None:
             return self.checks
-        return DEFAULT_CHECKS if self.require_gpu else ('cpu', 'memory', 'system')
+        if self.hardware_kind == 'gpu' or (self.hardware_kind != 'cpu' and self.require_gpu):
+            return DEFAULT_CHECKS
+        return ('cpu', 'memory', 'system')
 
     @property
     def display_address(self):

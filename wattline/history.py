@@ -6,8 +6,13 @@ import json
 import math
 import sqlite3
 
+from .groups import GROUP_BUCKET_MS, compute_key, storage_key, unlink_resource, write_room_link
 from .history_cold import export_cold, prune_cold, sync_directory
 from .history_schema import pack_batch, prepare_schema
+from .resources import (
+    ACTIVE, RETENTION_MS, StorageSettings, alert_view, close_alerts, storage_tick,
+    update_alerts, write_resource_users,
+)
 
 DAY_MS = 24 * 60 * 60 * 1000
 WARM_HOURS = 7 * 24
@@ -101,10 +106,92 @@ class History:
         with self.connect() as db:
             db.execute('DELETE FROM people WHERE id=?', (person,))
 
-    def save_assignees(self, identity, people):
+    def save_assignees(self, identity, people, shared=False):
         with self.connect() as db:
-            db.execute('DELETE FROM machine_assignees WHERE machine=?', (identity,))
-            db.executemany('INSERT INTO machine_assignees VALUES (?,?)', ((identity, person) for person in people))
+            write_resource_users(db, identity, people, shared)
+
+    def load_resources(self):
+        with self.connect(read=True) as db:
+            shared = {key for (key,) in db.execute('SELECT resource FROM shared_users')}
+            storage = {key: StorageSettings.model_validate_json(settings)
+                       for key, settings in db.execute('SELECT id,settings FROM storage_resources ORDER BY id')}
+        return shared, storage
+
+    def save_storage(self, id, settings, assignment, closure=None, location=None):
+        with self.connect() as db:
+            db.execute("""INSERT INTO storage_resources VALUES (?,?)
+                          ON CONFLICT(id) DO UPDATE SET settings=excluded.settings""",
+                       (id, settings.model_dump_json(exclude={'person_id', 'shared', 'room_id'})))
+            if assignment is not None:
+                write_resource_users(db, id, *assignment)
+            if closure:
+                close_alerts(db, id, *closure)
+            if location is not None:
+                write_room_link(db, storage_key(id), location)
+
+    def remove_storage(self, id, at):
+        with self.connect() as db:
+            write_resource_users(db, id, (), False)
+            unlink_resource(db, storage_key(id))
+            db.execute('DELETE FROM storage_resources WHERE id=?', (id,))
+            close_alerts(db, id, at, 'removed')
+
+    def append_storage(self, id, at, status, observation, event=None):
+        with self.connect() as db:
+            inserted = db.execute('INSERT OR IGNORE INTO storage_ticks VALUES (?,?,?,?)',
+                                  (id, at, status, observation.model_dump_json() if observation else None)).rowcount
+            if inserted and event:
+                update_alerts(db, *event)
+
+    def storage_success_times(self, now):
+        with self.connect(read=True) as db:
+            return dict(db.execute("""
+                SELECT s.id,(SELECT json_extract(t.observation,'$.observed_at')
+                    FROM storage_ticks t WHERE t.resource=s.id AND t.at<=? AND t.observation IS NOT NULL
+                    ORDER BY t.at DESC LIMIT 1)
+                FROM storage_resources s
+            """, (now,)))
+
+    def storage_history(self, id, start, now):
+        with self.connect(read=True) as db:
+            return storage_tick(db.execute("""SELECT at,status,observation FROM storage_ticks
+                WHERE resource=? AND at BETWEEN ? AND ? ORDER BY at""", (id, start, now)))
+
+    def alert_events(self, active=False, limit=200, offset=0):
+        with self.connect(read=True) as db:
+            db.row_factory = sqlite3.Row
+            where = f'WHERE {ACTIVE}' if active else ''
+            count = db.execute(f'SELECT count(*) FROM alerts {where}').fetchone()[0]
+            priority = "CASE severity WHEN 'critical' THEN 0 ELSE 1 END," if active else ''
+            rows = db.execute(f'SELECT * FROM alerts {where} ORDER BY {priority}last_at DESC,id DESC LIMIT ? OFFSET ?',
+                              (limit, offset))
+            result = {'total':count,'events':[alert_view(row) for row in rows]}
+            if active:
+                result['by_resource'] = dict(db.execute(f'SELECT resource,count(*) FROM alerts WHERE {ACTIVE} GROUP BY resource'))
+            return result
+
+    def alert_event(self, id):
+        with self.connect(read=True) as db:
+            db.row_factory = sqlite3.Row
+            row = db.execute('SELECT * FROM alerts WHERE id=?', (id,)).fetchone()
+            if row is None:
+                raise KeyError(id)
+            return alert_view(row)
+
+    def record_stale_alert(self, key, storage, observed_at, event):
+        with self.connect() as db:
+            if storage:
+                latest = db.execute('SELECT max(at) FROM storage_ticks WHERE resource=?', (key,)).fetchone()[0]
+            else:
+                latest = db.execute('SELECT max(at) FROM host_ticks WHERE machine=?', (key,)).fetchone()[0]
+            if latest is not None and latest <= observed_at:
+                update_alerts(db, *event)
+
+    def close_inactive_alerts(self, active_ids, registered_ids, at):
+        with self.connect() as db:
+            for (id,) in db.execute(f'SELECT DISTINCT resource FROM alerts WHERE {ACTIVE}').fetchall():
+                if id not in active_ids:
+                    close_alerts(db, id, at, 'disabled' if id in registered_ids else 'removed')
 
     def ssh_pins(self):
         with self.connect(read=True) as db:
@@ -123,7 +210,8 @@ class History:
         db.execute('DELETE FROM machine_order')
         db.executemany('INSERT INTO machine_order VALUES (?,?)', order.items())
 
-    def save_machine(self, identity, registration, settings, alias, new_pins, order=None):
+    def save_machine(self, identity, registration, settings, alias, new_pins, order=None,
+                     assignment=None, closure=None, location=None):
         with self.connect() as db:
             db.execute("""
                 INSERT INTO machine_settings(machine,registration,settings) VALUES (?,?,?)
@@ -133,6 +221,55 @@ class History:
             db.executemany('INSERT INTO machine_ssh_pins VALUES (?,?)', new_pins.items())
             if order is not None:
                 self.write_order(db, order)
+            if assignment is not None:
+                write_resource_users(db, identity, *assignment)
+            if closure:
+                close_alerts(db, *closure)
+            if location is not None:
+                write_room_link(db, compute_key(identity), location)
+
+    def load_groups(self):
+        with self.connect(read=True) as db:
+            db.row_factory = sqlite3.Row
+            rooms = {row['id']:dict(row) for row in db.execute(
+                'SELECT id,name,location,owner AS owner_id FROM rooms ORDER BY name')}
+            clusters = {row['id']:dict(row, keys=()) for row in db.execute(
+                'SELECT id,name,person AS person_id,shared FROM clusters ORDER BY name')}
+            members = db.execute('SELECT cluster,resource FROM cluster_resources ORDER BY cluster,resource')
+            for id, resources in groupby(members, key=lambda row:row['cluster']):
+                clusters[id]['keys'] = tuple(row['resource'] for row in resources)
+            locations = dict(db.execute('SELECT resource,room FROM resource_rooms'))
+            order = dict(db.execute('SELECT resource,position FROM resource_order'))
+        return rooms, clusters, locations, order
+
+    def save_room(self, id, room):
+        with self.connect() as db:
+            db.execute("""INSERT INTO rooms VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+                          name=excluded.name,location=excluded.location,owner=excluded.owner""",
+                       (id,room.name,room.location,room.owner_id))
+
+    def save_cluster(self, id, cluster, keys):
+        with self.connect() as db:
+            db.execute("""INSERT INTO clusters VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+                          name=excluded.name,person=excluded.person,shared=excluded.shared""",
+                       (id,cluster.name,cluster.person_id,cluster.shared))
+            db.execute('DELETE FROM cluster_resources WHERE cluster=?', (id,))
+            db.executemany('INSERT INTO cluster_resources VALUES (?,?)', ((id,key) for key in keys))
+
+    def delete_group(self, kind, id):
+        table = 'rooms' if kind == 'room' else 'clusters'
+        with self.connect() as db:
+            db.execute(f'DELETE FROM {table} WHERE id=?', (id,))
+
+    def save_resource_location(self, key, assignment):
+        with self.connect() as db:
+            write_room_link(db, key, assignment)
+
+    def save_resource_order(self, order, machines):
+        with self.connect() as db:
+            db.execute('DELETE FROM resource_order')
+            db.executemany('INSERT INTO resource_order VALUES (?,?)', order.items())
+            self.write_order(db, machines)
 
     def removal_state(self):
         with self.connect(read=True) as db:
@@ -140,9 +277,13 @@ class History:
             pending = {key for (key,) in db.execute('SELECT machine FROM pending_machine_removals')}
             return static, pending
 
-    def begin_machine_removal(self, identity, from_config):
+    def begin_machine_removal(self, identity, from_config, resource=None, at=None):
         with self.connect() as db:
             db.execute('PRAGMA secure_delete=ON')
+            db.execute('DELETE FROM shared_users WHERE resource=?', (identity,))
+            unlink_resource(db, compute_key(identity))
+            if resource is not None:
+                close_alerts(db, resource, at, 'removed')
             db.execute('INSERT INTO pending_machine_removals VALUES (?)', (identity,))
             if from_config:
                 db.execute('INSERT OR IGNORE INTO removed_config_machines VALUES (?)', (identity,))
@@ -211,10 +352,14 @@ class History:
                  json.dumps({key:gpu[key] for key in GPU_FIELDS if key in gpu}, allow_nan=False))
                 for gpu in devices
             ])
+            if event := snapshot.get('alert_event'):
+                update_alerts(db, *event)
 
     def begin_archive(self, due):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
+            db.execute('DELETE FROM alerts WHERE coalesce(recovered_at,closed_at)<?', (due-RETENTION_MS,))
+            db.execute('DELETE FROM storage_ticks WHERE at<?', (due-WARM_MS,))
             completed, running = db.execute(
                 'SELECT completed_at,running_at FROM history_maintenance WHERE id=1').fetchone()
             if running is not None:
@@ -353,6 +498,65 @@ class History:
             result.append({'time':start+index*bucket,'values':values,'breaks':breaks,
                            'valid':valid,'samples':samples})
         return result
+
+    def group_ticks(self, keys, start, now):
+        ticks = {}
+        slots = (now-start)//GROUP_BUCKET_MS
+        with self.connect(read=True) as db:
+            for key in keys:
+                kind, _, identity = key.partition(':')
+                by_slot = {}
+                if kind == 'storage':
+                    rows = db.execute("""
+                        SELECT at,status,observation FROM storage_ticks
+                        WHERE resource=? AND at IN (
+                            SELECT max(at) FROM storage_ticks WHERE resource=? AND at BETWEEN ? AND ?
+                            GROUP BY min((at-?)/?,?))
+                        ORDER BY at
+                        """, (identity,identity,start,now,start,GROUP_BUCKET_MS,slots-1))
+                    for row in storage_tick(rows):
+                        at = row['observed_at']
+                        by_slot[min((at-start)//GROUP_BUCKET_MS,slots-1)] = {
+                            'observed_at':at,'status':row['status'],'storage_observation':row['observation'],
+                        }
+                else:
+                    for warm in (True,False):
+                        for at, status, metrics, gpus in self.group_compute_ticks(db, identity, start, now, slots, warm):
+                            slot = min((at-start)//GROUP_BUCKET_MS,slots-1)
+                            if at < by_slot.get(slot, {}).get('observed_at', -1):
+                                continue
+                            parsed = json.loads(metrics)
+                            parsed['gpus'] = json.loads(gpus)
+                            by_slot[slot] = {'observed_at':at,'status':status,
+                                             'metrics':parsed if status in ('warning','normal') else None}
+                            if parsed.get('scope') in ('host','container'):
+                                by_slot[slot]['scope'] = parsed['scope']
+                ticks[key] = by_slot
+        return ticks
+
+    @staticmethod
+    def group_compute_ticks(db, identity, start, now, slots, warm):
+        # Select one host tick per slot before reading card observations.
+        if warm:
+            machine = db.execute('SELECT id FROM history_machines WHERE identity=?', (identity,)).fetchone()
+            if not machine:
+                return ()
+            identity = machine[0]
+            table = 'warm_host_ticks'
+            gpu_query = """SELECT json_group_array(json_object('uuid',d.uuid,'utilization_percent',g.utilization_percent,
+                               'power_w',g.power_w)) FROM warm_gpu_ticks g JOIN history_devices d ON d.id=g.device
+                           WHERE g.machine=h.machine AND g.at=h.at"""
+        else:
+            table = 'host_ticks'
+            gpu_query = """SELECT json_group_array(json(metrics)) FROM gpu_ticks g
+                           WHERE g.machine=h.machine AND g.at=h.at"""
+        return db.execute(f"""
+            SELECT h.at,h.status,h.metrics,({gpu_query})
+            FROM {table} h WHERE h.machine=? AND h.at IN (
+                SELECT max(at) FROM {table} WHERE machine=? AND at BETWEEN ? AND ?
+                GROUP BY min((at-?)/?,?))
+            ORDER BY h.at
+        """, (identity,identity,start,now,start,GROUP_BUCKET_MS,slots-1))
 
     def machine_series(self, machine, gpu, metric, start, now, bucket, stale, include_warm):
         with self.connect(read=True) as db:

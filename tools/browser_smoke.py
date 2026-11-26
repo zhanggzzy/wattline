@@ -250,7 +250,10 @@ def check_windows_processes(browser):
     page.route('**/*', handle)
     page.goto('http://wattline.test')
     page.locator('#locale-select').select_option('en')
-    expect(page.locator('[data-value=processes]')).to_have_text('14')
+    expect(page.locator('.overview-metrics > .metric')).to_have_count(3)
+    expect(page.locator('.overview-metrics [data-value=processes]')).to_have_count(0)
+    assert page.evaluate("""state.snapshot.machines.flatMap(machine =>
+      machine.metrics.gpus.flatMap(gpu => gpu.processes)).length""") == 14
     page.locator('[data-add-machine]').click()
     selector = page.get_by_label('Target operating system')
     expect(selector).to_have_value('linux')
@@ -1131,6 +1134,9 @@ def check_people_directory(browser):
             old = MachineSettings(enabled=host.enabled).model_dump(mode="json", exclude={"alias"})
             history.save_machine(host.history_key, None, json.dumps(dict(old, assigned_user=initial_name)), None, {})
         with history.connect() as db:
+            for table in ("cluster_resources","resource_rooms","resource_order","clusters","rooms",
+                          "storage_ticks","storage_resources","alerts","shared_users"):
+                db.execute(f"DROP TABLE {table}")
             db.execute("DROP TABLE machine_assignees")
             db.execute("DROP TABLE people")
             db.execute("PRAGMA user_version=7")
@@ -1157,6 +1163,17 @@ def check_people_directory(browser):
                            if name in ("content-type", "sec-fetch-site")}
                 response = client.request(request.method, path, headers=headers,
                                           content=request.post_data_buffer)
+                if path == "/api/snapshot":
+                    snapshot = response.json()
+                    snapshot.pop("storage", None)
+                    snapshot.pop("groups", None)
+                    for device in snapshot["machines"]:
+                        device.pop("assignment_mode", None)
+                    return route.fulfill(json=snapshot)
+                if path.endswith("/assignees") and response.is_success:
+                    updated = response.json()
+                    updated.pop("assignment_mode", None)
+                    return route.fulfill(json=updated)
                 route.fulfill(status=response.status_code, body=response.content,
                               content_type=response.headers.get("content-type"))
 
@@ -1448,6 +1465,10 @@ def check_assignee_responsive(browser):
                            if name in ("content-type", "sec-fetch-site")}
                 response = client.request(request.method, path, headers=headers,
                                           content=request.post_data_buffer)
+                if path == "/api/snapshot":
+                    snapshot = response.json()
+                    snapshot.pop("groups", None)
+                    return route.fulfill(json=snapshot)
                 route.fulfill(status=response.status_code, body=response.content,
                               content_type=response.headers.get("content-type"))
 
@@ -1744,21 +1765,25 @@ with sync_playwright() as p:
       }
       paint();
     }""")
-    expect(page.locator('.metric [data-value="watts"]')).to_have_text("2,468")
+    # Both live rows expose the same physical UUID in this fixture.
+    expect(page.locator('.metric [data-value="watts"]')).to_have_text("1,234")
+    expect(page.locator('.metric [data-value="rated-watts"]')).to_have_text("—")
     layout_results = []
     for width in layout_widths:
         page.set_viewport_size({"width":width,"height":1100})
         assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), width
-        tiles = page.locator(".metric").evaluate_all("""tiles => tiles.map(tile => {
+        tiles = page.locator(".overview-metrics > .metric").evaluate_all("""tiles => tiles.flatMap(tile => {
           const card = tile.getBoundingClientRect();
-          const value = tile.querySelector('strong .value');
-          const range = document.createRange();
-          range.selectNodeContents(value);
-          const text = range.getBoundingClientRect();
-          return {value: value.textContent, left: text.left, right: text.right,
-                  cardLeft: card.left, cardRight: card.right,
-                  fits: text.left >= card.left && text.right <= card.right};
+          return [...tile.querySelectorAll('strong .value')].map(value => {
+            const range = document.createRange();
+            range.selectNodeContents(value);
+            const text = range.getBoundingClientRect();
+            return {value: value.textContent, left: text.left, right: text.right,
+                    cardLeft: card.left, cardRight: card.right,
+                    fits: text.left >= card.left && text.right <= card.right};
+          });
         })""")
+        assert page.locator(".overview-metrics > .metric").count() == 3
         assert len(tiles) == 4 and all(tile["fits"] for tile in tiles), (width, tiles)
         layout_results.append({"width":width, "values_fit":True})
         if width in [731, 760]:

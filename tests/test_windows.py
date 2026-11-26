@@ -29,12 +29,15 @@ def nvidia(*devices, count=None):
     return {'xml':b64encode(xml.encode()).decode()}
 
 
-def card(uuid=GPU, utilization=27, rows=()):
+def card(uuid=GPU, utilization=27, rows=(), default_limit='N/A'):
     processes = ''.join(f'<process_info><pid>{pid}</pid><type>C+G</type><used_memory>{memory}</used_memory>'
                         r'<process_name>C:\Synthetic\example.exe</process_name></process_info>' for pid, memory in rows)
     return (f'<gpu><uuid>{uuid}</uuid><product_name>NVIDIA Fixture</product_name>'
             f'<utilization><gpu_util>{utilization} %</gpu_util></utilization>'
-            '<gpu_power_readings><instant_power_draw>42 W</instant_power_draw></gpu_power_readings>'
+            '<gpu_power_readings><instant_power_draw>42 W</instant_power_draw>'
+            f'<default_power_limit>{default_limit}</default_power_limit><enforced_power_limit>200 W</enforced_power_limit>'
+            '<max_power_limit>450 W</max_power_limit></gpu_power_readings>'
+            '<module_power_readings><default_power_limit>900 W</default_power_limit></module_power_readings>'
             '<fb_memory_usage><used>0 MiB</used><total>8192 MiB</total></fb_memory_usage>'
             f'<processes>{processes}</processes></gpu>')
 
@@ -120,7 +123,8 @@ def test_windows_multigroup_counter_coverage():
 
 
 def test_windows_gpu_partial_measurements_and_empty_inventory():
-    source = wire_sample(nvidia=nvidia(card(rows=[(pid, 'N/A') for pid in range(10,17)]), card(SECOND_GPU)),
+    source = wire_sample(nvidia=nvidia(card(rows=[(pid, 'N/A') for pid in range(10,17)], default_limit='250 W'),
+                                      card(SECOND_GPU)),
                          process_evidence={'10':{'started_at':95_000,'user':'测试域\\巡检','name':'训练.exe'},
                                            '11':{'started_at':101_000,'user':'fixture-reused'}},
                          gpu_observed_at=100_000)
@@ -131,6 +135,8 @@ def test_windows_gpu_partial_measurements_and_empty_inventory():
     assert full['state'] == 'occupied' and len(full['processes']) == 7
     assert full['process_visibility'] == 'partial'
     assert (full['power_w'], full['power_kind']) == (42, 'instantaneous')
+    assert (full['power_limit_w'], full['default_power_limit_w']) == (200, 250)
+    assert unseen['default_power_limit_w'] is None
     first, reused = full['processes'][:2]
     assert first['user'] == '测试域\\巡检' and first['elapsed_seconds'] == 5
     assert first['used_memory_mib'] is None and 'uid' not in first and 'workload' not in first

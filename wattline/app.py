@@ -4,17 +4,20 @@ import binascii
 import hmac
 from pathlib import Path
 import sqlite3
+from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Path as PathParameter, Query, Request, Response
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .collector import CollectionError
 from .config import (
-    AliasUpdate, MachineAssignees, MachineOrder, MachineRegistration, MachineRemoval, MachineSettings, PersonName,
+    AliasUpdate, MachineAssignees, MachineId, MachineOrder, MachineRegistration, MachineRemoval, MachineSettings, PersonName,
 )
+from .groups import ClusterSettings, ResourceLocation, ResourceOrder, RoomSettings
 from .history import GPU_METRICS, HOST_METRICS, OVERVIEW_METRICS, WARM_HOURS
+from .resources import StorageSettings
 from .service import Monitor
 
 
@@ -80,7 +83,12 @@ def create_app(config, *, monitor=None):
 
     @app.get('/api/snapshot')
     async def snapshot():
-        return service.snapshot()
+        snapshot = service.snapshot()
+        try:
+            snapshot['alerts'] = await service.alert_events(True, 3, 0)
+        except (OSError, sqlite3.Error):
+            snapshot['alerts'] = None
+        return snapshot
 
     async def store_person(body: PersonName, person: int | None = None):
         try:
@@ -101,20 +109,21 @@ def create_app(config, *, monitor=None):
         return await store_person(body, person)
 
     @app.delete('/api/people/{person}', status_code=204, dependencies=[Depends(same_origin_json)])
-    async def delete_person(person: int):
+    async def delete_person(person: int, include_references: bool = False):
         try:
             await service.delete_person(person)
         except KeyError as error:
             raise HTTPException(404, 'person_missing') from error
         except CollectionError as error:
-            raise HTTPException(409, str(error)) from error
+            detail = {'code':str(error), 'references':error.references} if include_references else str(error)
+            raise HTTPException(409, detail) from error
         except (OSError, sqlite3.Error) as error:
             raise HTTPException(503, 'people_save_failed') from error
 
     @app.put('/api/machines/{machine}/assignees', dependencies=[Depends(same_origin_json)])
     async def configure_assignees(machine: str, body: MachineAssignees):
         try:
-            return await service.configure_assignees(machine, body.person_ids)
+            return await service.configure_assignees(machine, body.person_ids, body.mode == 'shared')
         except KeyError as error:
             raise HTTPException(404, 'assignee_machine_missing') from error
         except CollectionError as error:
@@ -147,6 +156,8 @@ def create_app(config, *, monitor=None):
             return await service.configure(machine, body)
         except KeyError as error:
             raise HTTPException(404, '监控机器不存在') from error
+        except CollectionError as error:
+            raise HTTPException(409, str(error)) from error
         except (OSError, sqlite3.Error) as error:
             raise HTTPException(503, '机器设置暂时无法保存，请稍后重试') from error
 
@@ -170,6 +181,125 @@ def create_app(config, *, monitor=None):
         if result['cleanup_pending']:
             response.status_code = 202
         return result
+
+    async def save_storage(body, id=None):
+        try:
+            return await service.configure_storage(body, id)
+        except KeyError as error:
+            raise HTTPException(404, 'storage_missing') from error
+        except CollectionError as error:
+            raise HTTPException(409, str(error)) from error
+        except (OSError, sqlite3.Error) as error:
+            raise HTTPException(503, 'resource_save_failed') from error
+
+    @app.post('/api/storage', status_code=201, dependencies=[Depends(same_origin_json)])
+    async def add_storage(body: StorageSettings):
+        return await save_storage(body)
+
+    @app.put('/api/storage/{id}', dependencies=[Depends(same_origin_json)])
+    async def edit_storage(id: str, body: StorageSettings):
+        return await save_storage(body, id)
+
+    @app.put('/api/storage/{id}/assignees', dependencies=[Depends(same_origin_json)])
+    async def storage_assignees(id: str, body: MachineAssignees):
+        try:
+            return await service.configure_assignees(id, body.person_ids, body.mode == 'shared', storage=True)
+        except KeyError as error:
+            raise HTTPException(404, 'storage_missing') from error
+        except CollectionError as error:
+            raise HTTPException(409, str(error)) from error
+        except (OSError, sqlite3.Error) as error:
+            raise HTTPException(503, 'resource_save_failed') from error
+
+    @app.delete('/api/storage/{id}', dependencies=[Depends(same_origin_json)])
+    async def remove_storage(id: str, body: MachineRemoval):
+        try:
+            return await service.remove_storage(id)
+        except KeyError as error:
+            raise HTTPException(404, 'storage_missing') from error
+        except (OSError, sqlite3.Error) as error:
+            raise HTTPException(503, 'resource_save_failed') from error
+
+    @app.get('/api/storage/{id}/history')
+    async def storage_history(id: str, hours: int = Query(24, ge=1, le=WARM_HOURS),
+                              metric: Literal['storage', 'storage_read', 'storage_write'] = 'storage'):
+        if id not in service.storage:
+            raise HTTPException(404, 'storage_missing')
+        try:
+            return await service.storage_series(id, hours, metric)
+        except (OSError, sqlite3.Error) as error:
+            raise HTTPException(503, 'historical_metrics_unavailable') from error
+
+    @app.get('/api/alerts')
+    async def alerts(active: bool = False, limit: int = Query(200, ge=1, le=200),
+                     offset: int = Query(0, ge=0, le=2**31-1)):
+        try:
+            return await service.alert_events(active, limit, offset)
+        except (OSError, sqlite3.Error) as error:
+            raise HTTPException(503, 'alerts_unavailable') from error
+
+    @app.get('/api/alerts/{id}')
+    async def alert_event(id: Annotated[int, PathParameter(gt=0, le=2**53-1)]):
+        try:
+            return await service.alert_event(id)
+        except KeyError as error:
+            raise HTTPException(404, 'alert_missing') from error
+        except (OSError, sqlite3.Error) as error:
+            raise HTTPException(503, 'alerts_unavailable') from error
+
+    async def group_mutation(operation, *args):
+        try:
+            return await operation(*args)
+        except KeyError as error:
+            raise HTTPException(404, 'group_or_resource_missing') from error
+        except CollectionError as error:
+            raise HTTPException(409, str(error)) from error
+        except (OSError, sqlite3.Error) as error:
+            raise HTTPException(503, 'group_save_failed') from error
+
+    @app.post('/api/rooms', status_code=201, dependencies=[Depends(same_origin_json)])
+    async def add_room(body: RoomSettings):
+        return await group_mutation(service.save_group, 'room', body)
+
+    @app.put('/api/rooms/{id}', dependencies=[Depends(same_origin_json)])
+    async def edit_room(id: str, body: RoomSettings):
+        return await group_mutation(service.save_group, 'room', body, id)
+
+    @app.delete('/api/rooms/{id}', status_code=204, dependencies=[Depends(same_origin_json)])
+    async def remove_room(id: str, body: MachineRemoval):
+        await group_mutation(service.delete_group, 'room', id)
+
+    @app.post('/api/clusters', status_code=201, dependencies=[Depends(same_origin_json)])
+    async def add_cluster(body: ClusterSettings):
+        return await group_mutation(service.save_group, 'cluster', body)
+
+    @app.put('/api/clusters/{id}', dependencies=[Depends(same_origin_json)])
+    async def edit_cluster(id: str, body: ClusterSettings):
+        return await group_mutation(service.save_group, 'cluster', body, id)
+
+    @app.delete('/api/clusters/{id}', status_code=204, dependencies=[Depends(same_origin_json)])
+    async def remove_cluster(id: str, body: MachineRemoval):
+        await group_mutation(service.delete_group, 'cluster', id)
+
+    @app.put('/api/resources/order', dependencies=[Depends(same_origin_json)])
+    async def order_resources(body: ResourceOrder):
+        return await group_mutation(service.reorder_resources, body.resources)
+
+    @app.put('/api/resources/{id}/room', dependencies=[Depends(same_origin_json)])
+    async def place_resource(id: str, body: ResourceLocation):
+        return await group_mutation(service.place_resource, id, body)
+
+    @app.get('/api/group-history')
+    async def group_history(kind: Literal['room','cluster'],
+                            metric: Literal['cpu','memory_used','memory','gpu','power','storage'] = 'cpu',
+                            group: Annotated[list[MachineId] | None, Query(max_length=6)] = None):
+        selected = tuple(dict.fromkeys(group or ()))
+        try:
+            return await service.group_series(kind, selected, metric)
+        except KeyError as error:
+            raise HTTPException(404, 'group_missing') from error
+        except (OSError, sqlite3.Error) as error:
+            raise HTTPException(503, 'historical_metrics_unavailable') from error
 
     @app.get('/api/history')
     async def history(machine: str | None = Query(None, max_length=64),

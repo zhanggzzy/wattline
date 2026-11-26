@@ -64,7 +64,7 @@ Group charts SHALL provide weighted CPU use, memory used, memory percent, GPU ut
 
 #### Scenario: 24-hour aggregate trend
 - **WHEN** a group is charted
-- **THEN** five-minute buckets use the latest applicable observation per device, current membership and separate host/container scopes.
+- **THEN** five-minute buckets use the latest applicable observation per verified machine and current membership. The machine view uses host CPU and memory and deduplicated visible GPU readings. The API also retains scope-specific group queries.
 
 #### Scenario: Machine detail trend is unchanged
 - **WHEN** an operator opens a compute machine detail
@@ -165,3 +165,19 @@ The overview SHALL expose a localized Global configuration entry. Operators SHAL
 #### Scenario: Revert a global override
 - **WHEN** an operator clears the global setting
 - **THEN** the effective global value becomes 256 MiB from the built-in default and is reflected in subsequent samples that inherit it
+
+### Requirement: One monitoring unit per machine
+
+The overview SHALL count and list each verified machine once, and all machine-based trends SHALL resolve the same current machine membership. A single source observation supplies CPU and memory in machine details, preferring fresh host observations, with the measured scope labeled.
+
+#### Scenario: A host and its containers expose overlapping devices
+- **WHEN** multiple sources on the same machine report overlapping GPU UUIDs and resource values
+- **THEN** the online count and machine list include the machine once, and each visible GPU contributes at most once to summary values and coverage
+
+#### Scenario: Only containers can be observed
+- **WHEN** the machine has no fresh host readings and one or more containers report their own CPU and memory
+- **THEN** the machine counts once, the details name the selected container scope, and the group host CPU and memory coverage omit those readings
+
+#### Scenario: Linked source has prior history
+- **WHEN** recent history is requested for a grouped machine
+- **THEN** one series is returned per machine or selected GPU, secondary data is attributed only for the verified boot, and older per-source history remains readable from the machine details

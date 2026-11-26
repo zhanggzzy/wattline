@@ -13,7 +13,7 @@
 ## 3. Integration checks
 
 - [x] 3.1 Run repository, localization and browser checks, OpenSpec strict and Git diff checks. Record commands, results and limits in [verification.md](verification.md).
-- [ ] 3.2 Obtain independent review of the active change, actual implementation and verification.
+- [x] 3.2 Obtain independent review of the active change, actual implementation and verification.
 
 ## Workflow follow-up
 

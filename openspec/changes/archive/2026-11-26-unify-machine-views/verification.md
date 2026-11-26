@@ -28,3 +28,11 @@
 - 只有匹配的、已通过入口身份校验的 Linux 内核启动 UUID 会合并入口。启动 UUID 被容器隔离时，同机入口可能保持分开。宿主重启期间，已观察到不同启动 UUID 的入口会暂时独立呈现，直到共同证据恢复。
 - 机器视图的近期和冷归档趋势只纳入次要入口在当前已核实共同启动周期内的数据。更早样本从原入口的历史来源选择器访问。机房和集群中的 CPU 与内存使用宿主观测，覆盖分母按机器计。SQLite 从 v11 升级至 v12，原历史键和 gzip 格式可继续读取。旧版程序需使用升级前的一致备份回退。
 - 检查使用合成数据、临时 SQLite 和 Playwright Chromium。未覆盖真实 SSH、物理设备、真实容器运行时、生产数据或其他浏览器的运行情况。本记录为实施自测，独立审查任务仍待 AN-227 执行。
+
+## Independent review and integration
+
+Reviewer-DeepSeek (DeepSeek 4.1 Flash) independently reviewed commit `1e7847e5382e9dfddbc454c435b82baf6ba18ba7` on 2026-11-26 and passed it. AN-227 contains the full review. It reproduced 90 passing tests, both Chromium smoke checks, JavaScript syntax and localization checks, and strict OpenSpec validation. Additional synthetic checks covered GPU deduplication, host unavailability, v11-to-v12 migration, and retention of other sources when the primary source is removed.
+
+The machine row shows the primary source's assignee. Other source assignments remain available in source settings. The legacy scoped group-history API can omit a merged container's series, while the dashboard uses the machine view. Alerts for secondary sources still open the machine, but their detail can omit group links. The independent review classified these as non-blocking. Tests used synthetic data and did not cover real SSH, physical GPUs, production data or browsers other than Chromium.
+
+Mika synced the five specification deltas and archived this change on 2026-11-26. OpenSpec 1.14.2 strict validation passed for the change and all 12 main specs. A final integration run of `.venv/bin/python -m pytest -q` reported 90 passed with one existing Starlette/httpx deprecation warning.

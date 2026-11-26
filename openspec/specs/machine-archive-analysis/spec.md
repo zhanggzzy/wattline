@@ -45,3 +45,11 @@
 #### Scenario: Cleanup overlaps active work
 - **WHEN** 正在解压或读取图表期间存在回收或归档维护操作
 - **THEN** 活动作业的资源保持可用，归档发布和机器移除持续遵循既有的归档一致性要求
+
+### Requirement: Archive analysis follows machine identity
+
+Archive analysis SHALL resolve registered sources to the same machine as recent trends. Existing gzip format and per-source archive analysis SHALL remain readable.
+
+#### Scenario: Archive contains overlapping linked sources
+- **WHEN** archived records include the same machine's sources, earlier unverified boots and an unrelated endpoint
+- **THEN** the machine analysis selects readings from its canonical source and secondary samples from the verified common boot, shows one plotted value per bucket, and the source selector can still display earlier records under their original history key

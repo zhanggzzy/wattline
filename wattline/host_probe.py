@@ -164,7 +164,7 @@ def host_users(proc):
     return users
 
 
-def monitor_gpus(config, proc, warnings, *, host_processes=True, warn_on_unknown=True):
+def monitor_gpus(config, proc, warnings, *, host_processes=True):
     inventory = {'gpus': [], 'driver_version': None, 'gpu_inventory_complete': False}
     if not config.get('require_gpu', True):
         return inventory
@@ -240,8 +240,6 @@ def monitor_gpus(config, proc, warnings, *, host_processes=True, warn_on_unknown
         warnings.append('部分 GPU 进程不可完整枚举，可能处于 MIG 模式')
     if host_processes and any(not process.get('workload') or 'uid' not in process for gpu in gpus.values() for process in gpu['processes']):
         warnings.append('部分进程归属未核实，可能缺少宿主读取权限或进程已退出')
-    if processes_enabled and warn_on_unknown and any(gpu['state'] == 'unknown' for gpu in gpus.values()):
-        warnings.append('部分 GPU 占用状态无法核实')
     if any(gpu['utilization_percent'] is None or gpu['power_w'] is None for gpu in gpus.values()):
         warnings.append('部分 GPU 的利用率或实时功耗缺失')
     return {'gpus':list(gpus.values()), 'driver_version':root.findtext('driver_version'),
@@ -418,8 +416,7 @@ def monitor(config):
                 warnings.append(label+'低于 5%')
     gpu_config = dict(config, require_gpu='gpu' in checks and config.get('require_gpu', True),
                       monitor_processes='processes' in checks)
-    inventory = monitor_gpus(gpu_config, proc, warnings, host_processes=not container_endpoint,
-                             warn_on_unknown=not container_resources)
+    inventory = monitor_gpus(gpu_config, proc, warnings, host_processes=not container_endpoint)
     return {'host_id':host_id, 'boot_id':boot_id, 'source_observed_at':source_observed_at,
             **metrics, **inventory, 'root_disk':root_disk, 'warnings':warnings,
             'scope':'container' if container_endpoint else 'host'}

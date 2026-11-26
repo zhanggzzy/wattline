@@ -111,8 +111,6 @@ def nvidia_metrics(data, options, warnings):
                 and (expected is None or len(devices) == expected))
     if not complete:
         warnings.append('GPU 清单与配置不符或不可见，无法核实空闲状态')
-    if inspect and any(gpu['state'] == 'unknown' for gpu in result['gpus']):
-        warnings.append('部分 GPU 占用状态无法核实')
     if any(gpu['utilization_percent'] is None or gpu['power_w'] is None for gpu in result['gpus']):
         warnings.append('部分 GPU 的利用率或实时功耗缺失')
     result.update(gpu_inventory_complete=complete, driver_version=root.findtext('driver_version'))

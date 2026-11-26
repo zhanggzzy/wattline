@@ -274,6 +274,9 @@ def check_windows_processes(browser):
     expect(hardware).to_contain_text('No verifiable GPU process records available')
     expect(hardware).to_contain_text('Usage unknown')
     expect(hardware).to_contain_text('In use')
+    page.locator('#locale-select').select_option('zh-CN')
+    expect(hardware).to_contain_text('占用未确认')
+    page.locator('#locale-select').select_option('en')
     page.get_by_role('button',name='View GPU 0',exact=True).click()
     dialog = page.locator('#gpu-dialog')
     expect(dialog.locator('.process-table .mono')).to_have_text(expected)
@@ -423,6 +426,7 @@ def check_focus_layout(browser):
     expect(page.locator('.hardware-table tbody tr')).to_have_count(2)
     expect(page.locator('.hardware-table tbody tr').first).to_contain_text('PID 120')
     expect(page.locator('.hardware-table tbody tr').first).to_contain_text('demo-user')
+    expect(page.locator('.hardware-table tbody tr').nth(1)).to_contain_text('空闲')
     expect(page.locator('.hardware-table tbody tr').nth(1)).to_contain_text('未发现 GPU 进程')
     page.screenshot(path=str(OUT/'an48-desktop.png'),full_page=True)
     for width in [320,390,640,731,975,1440]:

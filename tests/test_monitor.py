@@ -276,6 +276,134 @@ async def eventual(condition):
             await asyncio.sleep(.005)
 
 
+async def run_monitor_iteration(monitor, loop, *args):
+    original_sleep = monitor.sleep
+    slept = False
+
+    async def stop_after_iteration(_delay):
+        nonlocal slept
+        if slept:
+            raise asyncio.CancelledError
+        slept = True
+
+    monitor.sleep = stop_after_iteration
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await loop(*args)
+    finally:
+        monitor.sleep = original_sleep
+
+
+@pytest.mark.parametrize(('fault', 'status', 'evidence'), [
+    ('failure', 'unknown', '宿主身份或启动身份无法核实'),
+    ('timeout', 'offline', '采集超过单机时限'),
+    ('expiry', 'stale', 'sample_stale'),
+])
+async def test_collection_alerts_are_independent_of_gpu_occupancy(tmp_path, fault, status, evidence):
+    host = machine(interval_seconds=10)
+    config = Config(data_dir=tmp_path, machines=(host,), interval_seconds=1,
+                    stale_seconds=3, timeout_seconds=.1, gpu_timeout_seconds=.05)
+    clock = ManualTime()
+    sample = data()
+    sample['gpus'][0].update(state='free', processes=[])
+    sample['gpus'].append(dict(sample['gpus'][0], uuid=OTHER_GPU, state='unknown',
+                               process_visibility='partial'))
+    sample['warnings'] = ['部分 GPU 的利用率或实时功耗缺失']
+    response = 'valid'
+
+    async def collect(_):
+        if response == 'timeout':
+            await asyncio.Event().wait()
+        return dict(sample, host_id=None) if response == 'failure' else sample
+
+    monitor = Monitor(config, collect, clock.clock)
+    monitor.history.prepare()
+    monitor.registry_loaded = True
+    try:
+        await run_monitor_iteration(monitor, monitor.run, host)
+        view, = monitor.snapshot()['machines']
+        assert [gpu['state'] for gpu in view['metrics']['gpus']] == ['free', 'unknown']
+        assert view['status'] == 'warning'
+        assert (await monitor.alert_events(True, 10, 0))['events'] == []
+
+        if fault == 'expiry':
+            clock.advance(view['stale_ms']/1000-.001)
+            await run_monitor_iteration(monitor, monitor.check_freshness)
+            assert (await monitor.alert_events(True, 10, 0))['events'] == []
+            clock.advance(.001)
+            await run_monitor_iteration(monitor, monitor.check_freshness)
+        else:
+            response = fault
+            clock.advance(1)
+            await run_monitor_iteration(monitor, monitor.run, host)
+
+        assert monitor.snapshot()['machines'][0]['status'] == status
+        event, = (await monitor.alert_events(True, 10, 0))['events']
+        assert (event['rule'], event['evidence'], event['first_at']) == ('collection', evidence, clock.clock())
+        assert event['last_success_at'] == view['observed_at']
+
+        response = 'valid'
+        clock.advance(1)
+        await run_monitor_iteration(monitor, monitor.run, host)
+        assert (await monitor.alert_events(True, 10, 0))['events'] == []
+        recovered = await monitor.alert_event(event['id'])
+        assert recovered['recovered_at'] == clock.clock()
+        assert recovered['recovery_evidence'] == 'collection_resumed'
+        assert monitor.snapshot()['machines'][0]['metrics']['gpus'][1]['state'] == 'unknown'
+    finally:
+        monitor.history.close()
+
+
+async def test_collection_recovery_respects_sample_timing(tmp_path):
+    host = machine()
+    config = Config(data_dir=tmp_path, machines=(host,))
+    clock = ManualTime()
+    response = 'valid'
+
+    async def collect(_):
+        if response == 'crosses_previous_expiry':
+            clock.advance(.001)
+            await run_monitor_iteration(monitor, monitor.check_freshness)
+        if response == 'already_expired':
+            clock.advance(monitor.stale_seconds(host))
+        return dict(data(), host_id=None) if response == 'failure' else data()
+
+    monitor = Monitor(config, collect, clock.clock)
+    monitor.history.prepare()
+    monitor.registry_loaded = True
+    try:
+        await run_monitor_iteration(monitor, monitor.run, host)
+        clock.advance(monitor.stale_seconds(host)-.001)
+        response = 'crosses_previous_expiry'
+        await run_monitor_iteration(monitor, monitor.run, host)
+        expiry, = (await monitor.alert_events(False, 10, 0))['events']
+        assert expiry['evidence'] == 'sample_stale'
+        assert expiry['recovered_at'] == clock.clock() == expiry['first_at']
+        assert monitor.latest[host.id]['observed_at'] < expiry['first_at']
+
+        response = 'failure'
+        clock.advance(2)
+        await run_monitor_iteration(monitor, monitor.run, host)
+        fault, = (await monitor.alert_events(True, 10, 0))['events']
+
+        # A late write of a superseded sample can have a later receipt time.
+        response = 'valid'
+        clock.advance(-1)
+        older = await monitor.observe(host)
+        clock.advance(2)
+        older['received_at'] = clock.clock()
+        await monitor.write(monitor.history.append, host.history_key, monitor.epoch,
+                            dict(older, alert_event=monitor.compute_alert(host, older)))
+        assert (await monitor.alert_events(True, 10, 0))['events'] == [fault]
+
+        response = 'already_expired'
+        await run_monitor_iteration(monitor, monitor.run, host)
+        active, = (await monitor.alert_events(True, 10, 0))['events']
+        assert (active['id'], active['evidence'], active['recovered_at']) == (fault['id'], 'sample_stale', None)
+    finally:
+        monitor.history.close()
+
+
 async def test_container_cpu_uses_remote_elapsed_time_and_resets_on_group_change(tmp_path):
     host = machine()
     clock = ManualTime()

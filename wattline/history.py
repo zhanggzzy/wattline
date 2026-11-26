@@ -353,7 +353,9 @@ class History:
                 for gpu in devices
             ])
             if event := snapshot.get('alert_event'):
-                update_alerts(db, *event)
+                latest = db.execute('SELECT max(at) FROM host_ticks WHERE machine=?', (machine,)).fetchone()[0]
+                if latest == snapshot['observed_at']:
+                    update_alerts(db, *event)
 
     def begin_archive(self, due):
         with self.connect() as db:

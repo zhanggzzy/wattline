@@ -143,6 +143,7 @@ def test_windows_gpu_partial_measurements_and_empty_inventory():
     assert 'user' not in reused and 'started_at' not in reused
     assert reused['name'] == 'example.exe'
     assert unseen['state'] == 'unknown' and unseen['process_visibility'] == 'partial'
+    assert metrics['warnings'] == []
     disabled = windows.metrics(source, {'checks':['gpu']})['gpus'][0]
     assert disabled['processes'] == [] and disabled['state'] == 'unknown'
     for query in (nvidia(), {'empty':True}):
@@ -209,8 +210,18 @@ async def test_windows_sampling_history_reboot_identity_and_inventory(tmp_path):
         assert partial['status'] == 'warning' and not partial['metrics']['gpu_inventory_complete']
         assert monitor.history.inventory(HOST, now, True)[1:] == ([], 'host', False)
         gpu_only = machine.model_copy(update={'checks':('gpu',)})
+        now += 5000
         result = await monitor.observe(gpu_only)
-        assert result['status'] == 'warning' and result['metrics']['gpus'] == []
+        assert result['status'] == 'unknown' and result['metrics'] is None
+        assert monitor.inventory_complete[machine.id] is False
+        _, _, _, _, triggered, cleared, last_success = monitor.compute_alert(gpu_only, result)
+        assert set(triggered) == {'collection'} and not cleared and last_success == partial['observed_at']
+
+        sample = wire_sample(nvidia=nvidia())
+        now += 5000
+        verified_empty = await monitor.observe(gpu_only)
+        assert verified_empty['metrics']['gpu_inventory_empty'] is True
+        assert monitor.compute_alert(gpu_only, verified_empty)[5]['collection'] == 'collection_resumed'
     finally:
         monitor.history.close()
 

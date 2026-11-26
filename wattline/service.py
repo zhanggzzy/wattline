@@ -534,20 +534,20 @@ class Monitor:
         return 'unconfirmed'
 
     def compute_alert(self, machine, snapshot):
-        status = snapshot['status']
         kind = self.hardware_kind(machine)
         name = self.aliases.get(machine.history_key) or self.default_name(machine)
-        at = snapshot['observed_at']
+        at = snapshot['received_at']
+        expires_at = snapshot['observed_at'] + snapshot.get('stale_ms', round(self.config.stale_seconds*1000))
         triggered = {}
         cleared = {}
-        if status in ('offline','unknown','warning'):
-            rule = 'offline' if status == 'offline' else 'collection'
-            evidence = snapshot.get('reason') or ' · '.join(snapshot.get('warnings', ()))
-            triggered[rule] = ('critical' if status == 'offline' else 'warning', evidence)
-        if snapshot.get('metrics') is not None:
-            cleared = {'offline':'collection_resumed','stale':'collection_resumed'}
-            if status == 'normal':
-                cleared['collection'] = 'collection_resumed'
+        if snapshot['metrics'] is None:
+            severity = 'critical' if snapshot['status'] == 'offline' else 'warning'
+            triggered['collection'] = (severity, snapshot['reason'])
+        elif at >= expires_at:
+            at = expires_at
+            triggered['collection'] = ('warning', 'sample_stale')
+        else:
+            cleared = dict.fromkeys(('collection', 'offline', 'stale'), 'collection_resumed')
         return machine.id, kind, name, at, triggered, cleared, self.last_seen.get(machine.id)
 
     async def check_freshness(self):
@@ -565,11 +565,13 @@ class Monitor:
                             continue
                         # The first stale observation is the time at which freshness expired.
                         started = target['observed_at'] + target.get('stale_ms', round(self.config.stale_seconds*1000))
-                        event = (target['id'], target['hardware_kind'], target['name'], started,
-                                 {'stale': ('warning','sample_stale')}, {}, target['last_success_at'])
                         id = target['id']
-                        key = self.machines[id].history_key if id in self.machines else id
-                        await self.write(self.history.record_stale_alert, key, id in self.storage,
+                        storage = id in self.storage
+                        key = id if storage else self.machines[id].history_key
+                        rule = 'stale' if storage else 'collection'
+                        event = (id, target['hardware_kind'], target['name'], started,
+                                 {rule: ('warning','sample_stale')}, {}, target['last_success_at'])
+                        await self.write(self.history.record_stale_alert, key, storage,
                                          target.get('sample_at', target['observed_at']), event)
                 except (OSError, sqlite3.Error) as error:
                     self.storage_failure(error)
@@ -803,9 +805,10 @@ class Monitor:
                 raise CollectionError('unknown', '宿主身份或启动身份无法核实')
             self.scopes[machine.id] = 'container' if data.get('scope') == 'container' else 'host'
             if not any(data.get(field) is not None for field in ('cpu_count','memory','uptime_seconds','root_disk')) and not (
-                data.get('load_average') or data.get('gpus')
-                or (machine.target_os == 'windows' and 'gpu_inventory_complete' in data)
+                data.get('load_average') or data.get('gpus') or data.get('gpu_inventory_empty')
             ):
+                if machine.target_os == 'windows' and 'gpu_inventory_complete' in data:
+                    self.set_inventory(machine, [], complete=False)
                 raise CollectionError('unknown', '；'.join(data.get('warnings', [])) or '已选巡检项目暂无可读指标')
             boot, counters = data['boot_id'], data.get('cpu_ticks')
             container_cpu = data.get('container_cpu')

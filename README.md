@@ -6,7 +6,7 @@ A standalone workbench for monitoring Linux and Windows machines and their NVIDI
 - Enroll machines from the overview, set per-machine checks and polling intervals, drag to reorder, and remove nodes with their monitoring data.
 - Assign people from a shared directory. The machine list shows each machine's assignees as wrapping chips in a dedicated column beside Status, with a localized unassigned value and literal spacing; details repeat the names. When the list container is too narrow for all seven columns, the list becomes labelled cards instead of scrolling horizontally.
 - The dashboard reads 24 hours of raw history. Machine and GPU details show up to 7 days. Older samples are kept in local gzip archives.
-- Container SSH endpoints can report their own cgroup v2 CPU and memory usage alongside visible GPU metrics.
+- Verified Linux endpoints that share the same kernel boot appear once as a machine. Its details list the monitoring sources, including container identifiers when available. Container SSH endpoints can report their own cgroup v2 CPU and memory usage alongside visible GPU metrics.
 
 ## Quick start
 
@@ -93,9 +93,12 @@ The overview shows online devices, visible GPUs and GPU power above persisted
 alerts. The power card reports current draw and rated power with separate
 coverage of visible GPUs. Rated power uses the GPU default power limit reported
 by NVIDIA and appears when the live sample includes it. Rooms and
-clusters offer a 24-hour chart based on current membership. Host and container
-CPU and memory observations are shown separately, with coverage for each
-metric. Open a device for its own trends. The alert center shows first and most
+clusters offer a 24-hour chart based on current machine membership. Group CPU
+and memory use host readings and report machine coverage. GPU totals use unique
+visible devices. A machine with only fresh container readings shows the
+container scope in its details. Use the history source selector in a machine
+with several endpoints to see an original endpoint's recent or archived
+readings. The alert center shows first and most
 recent observations, verified recovery and administrative closure.
 
 A room can name one owner. A device or cluster can specify one directory

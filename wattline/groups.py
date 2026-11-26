@@ -6,6 +6,7 @@ import math
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .config import IdleMemoryTolerance, MachineId, PersonId, normalize_person_name
+from .machine_views import preferred_observation
 
 GROUP_SCHEMA = (
     """CREATE TABLE rooms (
@@ -130,13 +131,21 @@ def expected_unseen_gpus(rows):
                for row in rows)
 
 
+def machine_gpu_readings(rows):
+    sources = [source for row in rows for source in row.get('_gpu_sources', (row,))]
+    gpus = visible_gpu_readings(sources)
+    unseen = sum(max(0, row['expected_gpu_count'] - len(visible_gpu_readings(row.get('_gpu_sources', (row,)))))
+                 for row in rows if row.get('expected_gpu_count'))
+    return gpus, len(gpus)+unseen
+
+
 def gpu_power_total(gpus, field, total):
     watts = [gpu[field] for gpu in gpus.values() if field in gpu]
     return metric(sum(watts) if watts else None,len(watts),total)
 
 
-def aggregate_scope(rows, fallback_scope, scope):
-    eligible = [row for row in rows if row.get('scope', fallback_scope) == scope]
+def aggregate_scope(rows, scope):
+    eligible = [row for row in rows if row.get('scope') == scope]
     seen = [row for row in eligible if row.get('metrics') is not None]
     cpu = []
     used_values = []
@@ -210,27 +219,35 @@ def aggregate_storage(rows):
 def summarize_resources(rows, *, overview=False):
     storage = [row for row in rows if row.get('storage_kind')]
     compute = [dict(row,scope=row.get('scope') or 'host') for row in rows if not row.get('storage_kind')]
-    scopes = {scope:aggregate_scope(compute,'host',scope) for scope in ('host','container')}
-    gpus = visible_gpu_readings(compute)
-    result = {**scopes, 'storage':aggregate_storage(storage), 'visible_gpu':len(gpus),
-              'gpu_power':gpu_power_total(gpus,'power_w',len(gpus)+expected_unseen_gpus(compute)),
+    scopes = {scope:aggregate_scope(compute,scope) for scope in ('host','container')}
+    gpus, gpu_total = machine_gpu_readings(compute)
+    gpu_values = [gpu['utilization_percent'] for gpu in gpus.values() if 'utilization_percent' in gpu]
+    power = gpu_power_total(gpus,'power_w',gpu_total)
+    machine = dict(scopes['host'], devices=len(compute), power=power,
+                   gpu=metric(sum(gpu_values)/len(gpu_values) if gpu_values else None,len(gpu_values),gpu_total))
+    for key in ('cpu', 'memory', 'memory_used'):
+        machine[key] = dict(machine[key], total=len(compute))
+    result = {**scopes, 'machine':machine, 'storage':aggregate_storage(storage), 'visible_gpu':len(gpus),
+              'gpu_power':power,
               'online':sum(row.get('status') in ('normal','warning') for row in rows), 'registered':len(rows)}
     if overview:
         result['gpu_rated_power'] = gpu_power_total(gpus,'default_power_limit_w',len(gpus))
     return result
 
 
-def group_history_data(groups, defaults, ticks, start, now, selected_metric):
+def group_history_data(groups, defaults, ticks, start, now, selected_metric, sources, *, machine_view=False):
     """Build fixed slots using the latest stored observation in each slot."""
     slots = (now-start)//GROUP_BUCKET_MS
     series = []
     groups_by_resource = defaultdict(set)
     for index, group in enumerate(groups):
-        scopes = ('storage',) if selected_metric == 'storage' else ('host','container')
+        scopes = ('storage',) if selected_metric == 'storage' else ('machine',) if machine_view else ('host','container')
         for scope in scopes:
             if scope == 'container' and not any(
-                defaults[key].get('scope') == scope or any(row.get('scope') == scope for row in ticks.get(key, {}).values())
+                defaults[source].get('scope') == scope or
+                any(row.get('scope') == scope for row in ticks.get(source, {}).values())
                 for key in group['keys']
+                for source in sources[key]
             ):
                 continue
             series.append({'group':group['id'],'name':group['name'],'scope':scope,'index':index})
@@ -241,13 +258,14 @@ def group_history_data(groups, defaults, ticks, start, now, selected_metric):
         point_at = start+(slot+1)*GROUP_BUCKET_MS
         rows = [[] for _ in groups]
         for key, memberships in groups_by_resource.items():
-            sample = ticks.get(key, {}).get(slot)
-            row = {**defaults[key], **(sample or {})}
-            if sample:
-                # In a completed bucket an earlier reading is still an observation in that bucket.
-                # Do not use an already stale value from an adapter response.
-                if row.get('storage_observation') and row['observed_at']-row['storage_observation']['observed_at'] >= row['stale_ms']:
-                    row['storage_observation'] = None
+            candidates = [{**defaults[source], **ticks.get(source, {}).get(slot, {})} for source in sources[key]]
+            row = dict(preferred_observation(candidates))
+            if len(candidates) > 1:
+                row['_gpu_sources'] = candidates
+                row['expected_gpu_count'] = max(item.get('expected_gpu_count') or 0 for item in candidates)
+            # Do not use an already stale value from an adapter response.
+            if row.get('storage_observation') and row['observed_at']-row['storage_observation']['observed_at'] >= row['stale_ms']:
+                row['storage_observation'] = None
             for index in memberships:
                 rows[index].append(row)
         summaries = [summarize_resources(group) for group in rows]

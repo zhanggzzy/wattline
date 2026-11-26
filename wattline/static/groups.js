@@ -11,7 +11,12 @@ const detailGroup = () => state.group && groupRecord(state.group.kind,state.grou
 const roomName = id => groupRecord('room',id)?.name || t('no_room');
 const groupPerson = (group,kind) => kind === 'room' ? group.owner : group.shared ? t('shared_user') : group.person;
 const groupCounts = () => state.snapshot?.alerts?.by_resource ?? {};
-const activeGroupAlerts = group => group.members.reduce((count,id) => count+(groupCounts()[id] ?? 0),0);
+const activeGroupAlerts = group => {
+  const counts = groupCounts();
+  const hosts = nodes();
+  return group.members.flatMap(id => machineForId(id,hosts)?.sources?.map(source => source.id) ?? [id])
+    .reduce((count,id) => count+(counts[id] ?? 0),0);
+};
 
 const configurationValue = value => i18n.number(value, {maximumSignificantDigits:17}) + ' MiB';
 
@@ -162,7 +167,8 @@ function paintGroups() {
   for (const [node,group] of rows) {
     if (!group) continue;
     const summary = group.summary;
-    const scope = summary[node.dataset.readingScope];
+    const scope = summary[node.dataset.readingScope] ??
+      (node.dataset.readingScope === 'machine' ? summary.host : null);
     let text = '—';
     switch (node.dataset.groupReading) {
       case 'online': text = summary.online+' / '+summary.registered; break;
@@ -180,14 +186,13 @@ function summaryTable(kind,groups) {
   const clusters = kind === 'cluster';
   const labels = [groupLabel(kind),t(clusters ? 'resource_user_mode' : 'room_owner')];
   if (clusters) labels.push(t('rooms'));
-  labels.push(t('online_registered'),t('host_cpu'),t('host_memory'),t('container_cpu'),t('container_memory'),
+  labels.push(t('online_registered'),t('host_cpu'),t('host_memory'),
     t('gpu_utilization')+' / '+t('gpu_power'),t('storage_resource'),t('site_alerts'));
   return basicTable(labels,groups.map(group => {
     const row = [groupButton(kind,group.id,group.name),escape(groupPerson(group,kind) || t('unassigned'))];
     if (clusters) row.push(i18n.number(group.rooms.filter(room => room.id).length));
-    return [...row,summaryCell(group,kind,'online'),summaryCell(group,kind,'cpu','host'),summaryCell(group,kind,'memory','host'),
-      summaryCell(group,kind,'cpu','container'),summaryCell(group,kind,'memory','container'),
-      `${t('host_scope_label')} ${summaryCell(group,kind,'gpu','host')}<br>${t('container_scope')} ${summaryCell(group,kind,'gpu','container')}`,
+    return [...row,summaryCell(group,kind,'online'),summaryCell(group,kind,'cpu','machine'),summaryCell(group,kind,'memory','machine'),
+      summaryCell(group,kind,'gpu','machine'),
       summaryCell(group,kind,'storage'),summaryCell(group,kind,'alerts')];
   }));
 }
@@ -230,7 +235,7 @@ function groupDetailPage(group,kind) {
   }) : group.rooms.map(item => [
     item.id ? groupButton('room',item.id,roomName(item.id)) : escape(t('no_room')),i18n.number(item.count),
   ]);
-  const cards = [[t('online_registered'),'online',''],[t('host_cpu'),'cpu','host'],[t('host_memory'),'memory','host'],[t('storage_resource'),'storage','']];
+  const cards = [[t('online_registered'),'online',''],[t('host_cpu'),'cpu','machine'],[t('host_memory'),'memory','machine'],[t('storage_resource'),'storage','']];
   return `<section class="page-title"><div>${heading(group.name)}
     <p>${groupLabel(kind)} · ${t(room ? 'room_owner' : 'resource_user_mode')} · ${escape(groupPerson(group,kind) || t('unassigned'))}
       ${group.location ? ' · '+escape(group.location) : ''}</p></div>
@@ -238,8 +243,6 @@ function groupDetailPage(group,kind) {
     ${room ? `<button type="button" class="control primary-control" data-add-machine>${t('add_resource')}</button>` : ''}</div></section>
     <section class="metrics">${cards.map(([label,key,scope]) => `<article class="metric"><p class="metric-name">${label}</p>
       <strong>${summaryCell(group,kind,key,scope)}</strong></article>`).join('')}</section>
-    ${group.summary.container.devices ? `<p class="message scope-note">${t('container_cpu')} ${summaryCell(group,kind,'cpu','container')} ·
-      ${t('container_memory')} ${summaryCell(group,kind,'memory','container')}</p>` : ''}
     <div class="column details-layout">
     <section class="panel resource-panel"><h2>${t(room ? 'related_clusters' : 'related_rooms')}</h2>
       ${basicTable([groupLabel(room ? 'cluster' : 'room'),t('group_members')],links)}</section>
@@ -319,7 +322,7 @@ function restoreWorkspaceURL() {
   const [kind,part] = location.hash.slice(1).split('/');
   let id;
   try { id = part ? decodeURIComponent(part) : null; } catch { return; }
-  if (kind === 'device' && nodes().some(node => node.id === id)) openHost(id,false);
+  if (kind === 'device' && machineForId(id)) openHost(id,false);
   else if ((kind === 'room' || kind === 'cluster') && groupRecord(kind,id)) setGroupPage(kind,id,false);
   else if (kind === 'alerts') openAlerts(id ? Number(id) : null,false);
   else if (kind === 'manage') openManagement(false);

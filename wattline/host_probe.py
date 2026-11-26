@@ -424,8 +424,15 @@ def monitor(config):
     gpu_config = dict(config, require_gpu='gpu' in checks and config.get('require_gpu', True),
                       monitor_processes='processes' in checks)
     inventory = monitor_gpus(gpu_config, proc, warnings, host_processes=not container_endpoint)
+    container = {}
+    if container_endpoint:
+        try:
+            container = process_workload((proc/'1/cgroup').read_text()) or {}
+        except OSError:
+            pass
     return {'host_id':host_id, 'boot_id':boot_id, 'source_observed_at':source_observed_at,
             **metrics, **inventory, 'root_disk':root_disk, 'warnings':warnings,
+            'container_id':container.get('container_id'),
             'scope':'container' if container_endpoint else 'host'}
 
 

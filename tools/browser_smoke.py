@@ -1203,7 +1203,7 @@ def check_people_directory(browser):
             old = MachineSettings(enabled=host.enabled).model_dump(mode="json", exclude={"alias"}, exclude_unset=True)
             history.save_machine(host.history_key, None, json.dumps(dict(old, assigned_user=initial_name)), None, {})
         with history.connect() as db:
-            for table in ("global_configuration","cluster_resources","resource_rooms","resource_order","clusters","rooms",
+            for table in ("machine_observations","global_configuration","cluster_resources","resource_rooms","resource_order","clusters","rooms",
                           "storage_ticks","storage_resources","alerts","shared_users"):
                 db.execute(f"DROP TABLE {table}")
             db.execute("DROP TABLE machine_assignees")
@@ -1238,6 +1238,7 @@ def check_people_directory(browser):
                     snapshot.pop("groups", None)
                     for device in snapshot["machines"]:
                         device.pop("assignment_mode", None)
+                        device.pop("sources", None)
                     return route.fulfill(json=snapshot)
                 if path.endswith("/assignees") and response.is_success:
                     updated = response.json()

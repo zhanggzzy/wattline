@@ -195,6 +195,7 @@ def test_layered_configuration_keeps_legacy_values_and_group_writes_atomic(tmp_p
             db.execute('ALTER TABLE rooms DROP COLUMN idle_memory_tolerance_mib')
             db.execute('ALTER TABLE clusters DROP COLUMN idle_memory_tolerance_mib')
             db.execute('DROP TABLE global_configuration')
+            db.execute('DROP TABLE machine_observations')
             db.execute("INSERT INTO rooms(id,name) VALUES ('east','East'), ('west','West')")
             db.execute("INSERT INTO clusters(id,name,shared) VALUES ('across','Across',0)")
             db.execute('INSERT INTO resource_rooms(resource,room) VALUES (?,?),(?,?)',

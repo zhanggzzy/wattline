@@ -10,6 +10,7 @@ from playwright.sync_api import expect, sync_playwright
 
 from wattline.app import create_app
 from wattline.config import Config, Machine
+from wattline.machine_views import SourceObservation
 from wattline.service import Monitor, metrics_from
 
 ORIGIN = 'http://localhost'
@@ -97,6 +98,70 @@ def check_overview_power(browser):
             expect(power.locator('[data-value=rated-watts]')).to_have_text('—')
             expect(power.locator('[data-value=rated-power-count]')).to_have_text('0/4 张可见 GPU 有读数')
             expect(power.locator('[data-value=watts]')).to_have_text('200')
+            assert not errors, errors
+            page.close()
+
+
+def check_machine_sources(browser):
+    with TemporaryDirectory() as directory:
+        ids = ('fixture-host','fixture-container-one','fixture-container-two','fixture-other')
+        hosts = tuple(Machine(id=id, expected_host_id=key*32, mode='ssh', ssh_alias=id)
+                      for id,key in zip(ids,'abcd'))
+        config = Config(data_dir=Path(directory), machines=hosts)
+        now = int(time.time()*1000)
+        monitor = Monitor(config, clock=lambda:now)
+        monitor.start_sampler = lambda _source: None
+        monitor.history.prepare()
+        for index, source in enumerate(hosts):
+            container = index in (1,2)
+            scope = 'container' if container else 'host'
+            boot = ('11111111-1111-4111-8111-111111111111' if index < 3
+                    else '22222222-2222-4222-8222-222222222222')
+            at = now-1000+index
+            metrics = metrics_from({
+                'scope':scope, 'cpu_count':2 if container else 8,
+                'memory':{'used_bytes':1024**3, 'total_bytes':(2 if container else 8)*1024**3},
+                'gpu_inventory_complete':True,
+                'gpus':[{'uuid':'GPU-fixture-one','power_w':100,'power_kind':'reported'}] if index < 3 else [],
+            }, 60 if container else 25)
+            observation = SourceObservation.from_sample(boot, scope, 'ab'*32 if index == 1 else None, at)
+            sample = {'source':'ssh','observed_at':at,'received_at':at,'status':'normal','boot':boot,
+                      'metrics':metrics,'source_observation':observation}
+            monitor.history.append(source.history_key,'synthetic',sample)
+            monitor.latest[source.id] = sample
+
+        with TestClient(create_app(config, monitor=monitor), base_url=ORIGIN) as client:
+            room = client.post('/api/rooms',json={'name':'Fixture room'}).json()['id']
+            for source in hosts[:3]:
+                client.put(f'/api/resources/{source.id}/room',json={'room_id':room}).raise_for_status()
+            page, errors = open_api_page(browser, client)
+            expect(page.locator('[data-value=online]')).to_have_text('2 / 2')
+            expect(page.locator('[data-value=watts]')).to_have_text('100')
+            expect(page.locator('.group-summary')).not_to_contain_text('容器 CPU')
+            page.wait_for_function('state.history?.series?.length === 1 && state.history.series[0].scope === "machine"')
+            page.locator('#overview-tab-machine').click()
+            expect(page.locator('#host-rows [data-machine-row]')).to_have_count(2)
+            page.locator('#host-search').fill('fixture-container-one')
+            expect(page.locator('#host-rows [data-machine-row]')).to_have_attribute('data-machine-row',ids[0])
+            page.locator('#host-rows .row-open').click()
+            expect(page.locator('#page-heading')).to_have_text(ids[0])
+            page.locator('.machine-sources summary').click()
+            expect(page.locator('.machine-sources')).to_contain_text('abababababab')
+            expect(page.locator('.machine-sources')).to_contain_text(ids[2])
+            page.locator(f'[data-configure-source="{ids[1]}"]').click()
+            expect(page.locator('#machine-target')).to_have_text(ids[1])
+            page.locator('#machine-cancel').click()
+            page.locator('#trend-source').select_option(ids[1])
+            page.wait_for_function('state.history?.scope === "container" && state.history.points.at(-1).values[0] === 60')
+
+            monitor.latest[ids[0]] = {'observed_at':now,'received_at':now,'status':'offline','metrics':None}
+            page.wait_for_function('getHost()?.scope === "container"')
+            expect(page.locator('.scope-note')).to_contain_text('容器')
+            expect(page.locator('[data-value=card-cpu]')).to_have_text('60')
+            page.goto(ORIGIN+'/#device/'+ids[1])
+            expect(page.locator('#page-heading')).to_have_text(ids[0])
+            page.set_viewport_size({'width':390,'height':844})
+            assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
             assert not errors, errors
             page.close()
 
@@ -346,8 +411,9 @@ if __name__ == '__main__':
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(executable_path=args.browser)
         check_overview_power(browser)
+        check_machine_sources(browser)
         check_resources(browser)
         check_layered_configuration(browser)
         browser.close()
-    print('PASS: three overview cards, deduplicated current and rated GPU power, independent coverage, storage enrollment, synthetic capacity, persisted alerts, room/cluster management and navigation, '
+    print('PASS: three overview cards, deduplicated current and rated GPU power, verified machine and container source views, independent coverage, storage enrollment, synthetic capacity, persisted alerts, room/cluster management and navigation, '
           '24-hour chart samples and coverage, keyboard tabs and sorting, filters, narrow layout, and localized layered configuration with explicit deletion confirmation')

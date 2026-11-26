@@ -15,6 +15,7 @@ from .collector import CollectionError, Collector, cpu_percent
 from .config import DEFAULT_IDLE_MEMORY_TOLERANCE_MIB, DEFAULT_SSH_CONNECT_TIMEOUT, Machine, MachineSettings
 from .groups import compute_key, group_history_data, storage_key, summarize_resources
 from .history import DAY_MS, GPU_FIELDS, History, HistoryInUse, MAX_POINTS, WARM_HOURS, WARM_MS, downsample
+from .machine_views import SCOPED_METRICS, SourceObservation, preferred_observation
 from .resources import StorageAdapter, StorageObservation
 
 
@@ -138,6 +139,7 @@ class Monitor:
         self.ssh_pins = {}
         self.machine_order = {}
         self.scopes = {}
+        self.source_observations = {}
         self.inventory = {}
         self.inventory_complete = {}
         self.last_seen = {}
@@ -189,6 +191,11 @@ class Monitor:
         self.rooms, self.clusters, self.locations, self.resource_order = await self.write(self.history.load_groups)
         self.global_idle_override = await self.write(self.history.global_idle_tolerance)
         self.ssh_pins = pins
+        linux_keys = [node.history_key for node in machines.values() if node.target_os == 'linux']
+        evidence = await self.write(self.history.source_observations, linux_keys, self.clock())
+        self.source_observations = {node.id:evidence[node.history_key] for node in machines.values()
+                                    if node.target_os == 'linux' and node.history_key in evidence}
+        self.scopes.update({id:value.scope for id,value in self.source_observations.items()})
         self.machine_order = order
         self.machines = machines
         await self.reconcile_alerts()
@@ -277,12 +284,15 @@ class Monitor:
             raise
         self.pending_removals.add(identity)
         self.machines.pop(machine.id)
-        self.discard_archive_analysis(identity)
+        for selection in tuple(self.archive_analyses):
+            if selection == identity or isinstance(selection, tuple) and any(key == identity for key,_ in selection):
+                self.discard_archive_analysis(selection)
         self.forget_resource(compute_key(identity))
         self.shared_users.discard(identity)
         for index in (self.ssh_pins,self.machine_order,self.aliases,self.machine_assignees):
             index.pop(identity, None)
-        for index in (self.latest,self.scopes,self.inventory,self.inventory_complete,self.last_seen,self.cpu_baseline):
+        for index in (self.latest,self.scopes,self.source_observations,self.inventory,self.inventory_complete,
+                      self.last_seen,self.cpu_baseline):
             index.pop(machine.id, None)
         await self.clean_removed_archives(identity)
         self.schedule_removal_retry()
@@ -312,13 +322,17 @@ class Monitor:
         async with self.settings_lock:
             if not self.registry_loaded:
                 raise OSError('机器配置暂不可读')
+            roster = self.machine_roster()
+            displayed = ids
+            if len(ids) == len(roster) and set(ids) == roster.keys():
+                ids = [node.id for id in ids for node in roster[id]]
             if len(ids) != len(self.machines) or set(ids) != self.machines.keys():
                 raise CollectionError('conflict', '机器清单已变化，请刷新后重试排序')
             if self.resource_order:
                 replacements = iter(ids)
                 combined = [next(replacements) if id in self.machines else id for id in self.ordered_resource_ids()]
                 await self.persist_resource_order(combined, self.resource_keys())
-                return {'machines':ids}
+                return {'machines':displayed}
             order = {self.machines[id].history_key:index for index,id in enumerate(ids)}
 
             async def save():
@@ -326,10 +340,41 @@ class Monitor:
                 self.machine_order = order
 
             await wait_for_work(asyncio.create_task(save()))
-        return {'machines':ids}
+        return {'machines':displayed}
 
     def ordered_machines(self):
         return sorted(self.machines.values(), key=lambda node:self.machine_order.get(node.history_key, math.inf))
+
+    def machine_roster(self):
+        groups = defaultdict(list)
+        for machine in self.ordered_machines():
+            evidence = self.source_observations.get(machine.id)
+            key = ('boot', evidence.boot) if evidence and evidence.boot else ('source', machine.id)
+            groups[key].append(machine)
+        roster = {}
+        for sources in groups.values():
+            if len(sources) > 1:
+                sources.sort(key=lambda source: (self.source_observations[source.id].scope != 'host', source.id))
+            roster[sources[0].id] = sources
+        return roster
+
+    def machine_sources(self, id):
+        for sources in self.machine_roster().values():
+            if any(source.id == id for source in sources):
+                return sources
+        raise KeyError(id)
+
+    def history_sources(self, sources):
+        return tuple((node.history_key, self.source_observations[node.id].boot if index else None)
+                     for index,node in enumerate(sources))
+
+    def history_selection(self, machine, source=None):
+        sources = self.machine_sources(machine)
+        if source is not None:
+            sources = [node for node in sources if node.id == source]
+            if not sources:
+                raise KeyError(source)
+        return sources
 
     def set_alias(self, identity, alias):
         if alias is None:
@@ -754,8 +799,12 @@ class Monitor:
         self.history_ok = False
         self.history_error_reported = True
 
-    def archive_analysis(self, machine, *, start=False):
-        identity = self.machines[machine].history_key
+    def archive_selection(self, machine, source):
+        sources = self.history_selection(machine, source)
+        return self.history_sources(sources) if len(sources) > 1 else sources[0].history_key
+
+    def archive_analysis(self, machine, *, start=False, source=None):
+        identity = self.archive_selection(machine, source)
         if not self.registry_loaded:
             raise OSError('指标库暂不可读')
         job = self.archive_analyses.get(identity)
@@ -809,8 +858,11 @@ class Monitor:
             if not job.read_lock.locked():
                 job.close()
 
-    async def archive_analysis_series(self, machine, metric, first, last):
-        identity = self.machines[machine].history_key
+    async def archive_analysis_series(self, machine, metric, first, last, *, source=None, scope=None):
+        identity = self.archive_selection(machine, source)
+        if scope is None and isinstance(identity, tuple) and metric in SCOPED_METRICS:
+            canonical = next(node for node in self.machines.values() if node.history_key == identity[0][0])
+            scope = self.source_observations[canonical.id].scope
         job = self.archive_analyses.get(identity)
         if job is None or job.status != 'ready':
             raise KeyError(machine)
@@ -820,7 +872,7 @@ class Monitor:
             if self.archive_analyses.get(identity) is not job:
                 raise KeyError(machine)
             try:
-                result = await offload(job.series, metric, start, end, stale)
+                result = await offload(job.series, metric, start, end, stale, scope)
                 if self.archive_analyses.get(identity) is not job:
                     raise KeyError(machine)
                 return result
@@ -913,6 +965,10 @@ class Monitor:
             if data.get('host_id') != machine.expected_host_id or not data.get('boot_id'):
                 raise CollectionError('unknown', '宿主身份或启动身份无法核实')
             self.scopes[machine.id] = 'container' if data.get('scope') == 'container' else 'host'
+            if machine.target_os == 'linux':
+                observation = SourceObservation.from_sample(data['boot_id'], self.scopes[machine.id],
+                                                            data.get('container_id'), started)
+                self.source_observations[machine.id] = snapshot['source_observation'] = observation
             if not any(data.get(field) is not None for field in ('cpu_count','memory','uptime_seconds','root_disk')) and not (
                 data.get('load_average') or data.get('gpus') or data.get('gpu_inventory_empty')
             ):
@@ -969,7 +1025,7 @@ class Monitor:
         view.update(id=machine.id, name=alias or default_name, alias=alias, default_name=default_name,
                     **self.user_view(machine.history_key), **self.group_links(compute_key(machine.history_key)), hardware_kind=self.hardware_kind(machine),
                     configured_hardware_kind=machine.hardware_kind,
-                    scope=self.scopes.get(machine.id), address=machine.display_address,
+                    scope=(view.get('metrics') or {}).get('scope', self.scopes.get(machine.id)), address=machine.display_address,
                     mode=machine.mode, target_os=machine.target_os,
                     require_gpu=machine.hardware_kind != 'cpu' and
                     (machine.require_gpu or 'gpu' in machine.active_checks or bool(self.inventory.get(machine.id))),
@@ -985,6 +1041,42 @@ class Monitor:
             view['status'] = 'waiting'
         elif result['metrics'] is not None and now-result['observed_at'] >= stale:
             view.update(status='stale', reason='有效样本超过时限，等待新采样', metrics=None, warnings=[])
+        return view
+
+    def projected_machine_view(self, sources, now):
+        rows = [self.machine_view(source, now) for source in sources]
+        primary = rows[0]
+        chosen = preferred_observation(rows)
+        view = dict(primary)
+        view.update({key:chosen.get(key) for key in (
+            'scope','status','reason','warnings','metrics','observed_at','received_at',
+            'devices','gpu_inventory_complete','sample_idle_memory_configuration',
+        )})
+        view['last_success_at'] = max((row['last_success_at'] for row in rows
+                                       if row['last_success_at'] is not None), default=None)
+        view['enabled'] = any(row['enabled'] for row in rows)
+        if view['enabled'] and view['status'] == 'disabled':
+            view['status'] = 'waiting'
+        view['stale_ms'] = chosen['stale_ms']
+        view['reading_source_id'] = chosen['id']
+        view['reading_checks'] = chosen['checks']
+        view['room_id'] = next((row['room_id'] for row in rows if row['room_id'] is not None), None)
+        view['cluster_ids'] = list(dict.fromkeys(id for row in rows for id in row['cluster_ids']))
+        expected = max((row['expected_gpu_count'] or 0 for row in rows), default=0)
+        view['expected_gpu_count'] = expected or None
+        view['require_gpu'] = any(row['require_gpu'] for row in rows)
+        if view['configured_hardware_kind'] is None:
+            view['hardware_kind'] = 'gpu' if any(row['hardware_kind'] == 'gpu' for row in rows) else chosen['hardware_kind']
+        if len(rows) > 1:
+            view['_gpu_sources'] = rows
+        view['sources'] = []
+        for row in rows:
+            evidence = self.source_observations.get(row['id'])
+            source = {key:value for key,value in row.items() if key not in (
+                'metrics','devices','warnings',
+            )}
+            view['sources'].append(dict(source, container_id=evidence.container_id if evidence else None,
+                                        has_sample=row['metrics'] is not None))
         return view
 
     def resource_keys(self):
@@ -1061,21 +1153,23 @@ class Monitor:
             self.locations[key] = location.room_id
 
     def group_views(self, views):
-        by_key = {key:views[id] for id,key in self.resource_keys().items() if id in views}
-        grouped = defaultdict(list)
-        for key, view in by_key.items():
-            if room := self.locations.get(key):
-                grouped[room].append(view)
+        by_room = defaultdict(list)
+        by_cluster = defaultdict(list)
+        for view in views.values():
+            if room := view['room_id']:
+                by_room[room].append(view)
+            for id in view['cluster_ids']:
+                by_cluster[id].append(view)
         rooms = []
         for id, room in self.rooms.items():
-            members = grouped[id]
+            members = by_room[id]
             owner = self.people.get(room['owner_id'])
             rooms.append({**room, 'owner':owner,'members':[node['id'] for node in members],
                           'idle_memory_configuration':self.room_idle_configuration(id),
                           'summary':summarize_resources(members)})
         clusters = []
         for id, cluster in self.clusters.items():
-            members = [by_key[key] for key in cluster['keys'] if key in by_key]
+            members = by_cluster[id]
             room_counts = defaultdict(int)
             for node in members:
                 room_counts[node['room_id']] += 1
@@ -1112,7 +1206,13 @@ class Monitor:
                 resources = self.resource_keys()
                 if any(member not in resources for member in body.members):
                     raise CollectionError('conflict','group_member_missing')
-                members = tuple(resources[member] for member in body.members)
+                roster = self.machine_roster()
+                existing = set(groups.get(id, {}).get('keys', ()))
+                members = []
+                for member in body.members:
+                    keys = [resources[node.id] for node in roster.get(member, ())]
+                    members.extend([key for key in keys if key in existing] or [resources[member]])
+                members = tuple(dict.fromkeys(members))
                 record = dict(id=id,name=body.name,person_id=body.person_id,shared=body.shared,keys=members)
                 operation = self.history.save_cluster
                 args = (id,body,members)
@@ -1168,9 +1268,14 @@ class Monitor:
             if not self.registry_loaded:
                 raise OSError('registry_unavailable')
             keys = self.resource_keys()
+            displayed = ids
+            roster = self.machine_roster()
+            if len(ids) == len(roster) + len(self.storage) and set(ids) == roster.keys() | self.storage.keys():
+                ids = [entry for id in ids for entry in ([node.id for node in roster[id]] if id in roster else [id])]
             if len(ids) != len(keys) or set(ids) != keys.keys():
                 raise CollectionError('conflict','resource_list_changed')
-            return await self.persist_resource_order(ids, keys)
+            await self.persist_resource_order(ids, keys)
+        return {'resources':displayed}
 
     async def persist_resource_order(self, ids, keys):
         order = {keys[id]:index for index,id in enumerate(ids)}
@@ -1183,13 +1288,19 @@ class Monitor:
             self.machine_order = machines
 
         await wait_for_work(asyncio.create_task(save()))
-        return {'resources':ids}
 
     def snapshot(self):
         now = self.clock()
-        machines = [self.machine_view(machine, now) for machine in self.ordered_machines()]
+        roster = self.machine_roster()
+        machines = [self.projected_machine_view(sources, now) for sources in roster.values()]
         storage = [self.storage_view(id, now) for id in self.storage]
         views = {node['id']:node for node in (*machines,*storage)}
+        canonical = {source.id:id for id,sources in roster.items() for source in sources}
+        ordered = dict.fromkeys(canonical.get(id,id) for id in self.ordered_resource_ids())
+        groups = self.group_views(views)
+        summary = summarize_resources(views.values(), overview=True)
+        for view in machines:
+            view.pop('_gpu_sources', None)
         return {'server_time':now, 'period_ms':round(self.config.interval_seconds*1000),
                 'default_ssh_connect_timeout_seconds':DEFAULT_SSH_CONNECT_TIMEOUT,
                 'stale_ms':round(self.config.stale_seconds*1000), 'history_writable':self.history_ok,
@@ -1197,13 +1308,13 @@ class Monitor:
                 'removal_pending':len(self.pending_removals),
                 'machine_history_hours':WARM_HOURS,
                 'people':self.person_views(self.people),
-                'storage':storage, 'groups':self.group_views(views),
-                'resource_order':self.ordered_resource_ids(), 'summary':summarize_resources(views.values(), overview=True),
+                'storage':storage, 'groups':groups,
+                'resource_order':list(ordered), 'summary':summary,
                 'storage_adapters':sorted(self.storage_adapters),
                 'idle_memory_configuration':self.global_idle_configuration(),
                 'machines':machines}
 
-    async def group_series(self, kind, selected, metric):
+    async def group_series(self, kind, selected, metric, *, machine_view=False):
         roster = self.rooms if kind == 'room' else self.clusters
         if any(id not in roster for id in selected):
             raise KeyError('group_missing')
@@ -1218,17 +1329,33 @@ class Monitor:
         defaults.update({storage_key(id):{'storage_kind':settings.storage_kind,
                                          'stale_ms':round(self.config.stale_seconds*1000)}
                          for id,settings in self.storage.items()})
-        groups = []
-        keys = set()
-        for id in ids:
-            members = (key for key, room in self.locations.items() if room == id) if kind == 'room' else roster[id]['keys']
-            current = [key for key in members if key in defaults]
-            groups.append({'id':id,'name':roster[id]['name'],'keys':current})
-            keys.update(current)
+        members = defaultdict(list)
+        sources = {}
+        boots = {}
+        views = {}
+        for id,nodes in self.machine_roster().items():
+            view = self.projected_machine_view(nodes, now)
+            key = compute_key(nodes[0].history_key)
+            views[key] = view
+            sources[key] = []
+            for identity, boot in self.history_sources(nodes):
+                source_key = compute_key(identity)
+                sources[key].append(source_key)
+                boots[source_key] = boot
+        for id in self.storage:
+            key = storage_key(id)
+            sources[key] = [key]
+            views[key] = self.group_links(key)
+        for key,view in views.items():
+            for id in view['cluster_ids'] if kind == 'cluster' else (view['room_id'],):
+                members[id].append(key)
+        groups = [{'id':id,'name':roster[id]['name'],'keys':members[id]} for id in ids]
+        keys = {source for group in groups for key in group['keys'] for source in sources[key]}
         async with self.readers:
             def series():
-                ticks = self.history.group_ticks(keys, start, now) if keys else {}
-                return group_history_data(groups, defaults, ticks, start, now, metric)
+                ticks = self.history.group_ticks(keys, start, now, boots) if keys else {}
+                return group_history_data(groups, defaults, ticks, start, now, metric, sources,
+                                          machine_view=machine_view)
 
             return await asyncio.to_thread(series)
 
@@ -1260,17 +1387,37 @@ class Monitor:
         return {'from':start,'to':now,'bucket_ms':bucket,'keys':[metric],
                 'points':downsample(rows, start, bucket, stale)}
 
-    async def series(self, machine, gpu, metric, hours):
-        enabled = [item for item in self.machines.values() if item.enabled]
-        if machine is None:
-            period = self.config.interval_seconds
+    async def series(self, machine, gpu, metric, hours, *, source=None, scope=None, by_id=False):
+        now = self.clock()
+        scope = scope if gpu is None and metric in SCOPED_METRICS else None
+        period = self.config.interval_seconds
+        projections = {}
+        enabled = {}
+        key = None
+        if machine is not None:
+            if by_id:
+                sources = self.history_selection(machine, source)
+                canonical = sources[0]
+                key = canonical.history_key
+                if scope is None and len(sources) > 1 and metric in SCOPED_METRICS and gpu is None:
+                    scope = self.source_observations[canonical.id].scope
+                projections[key] = self.history_sources(sources), scope
+            else:
+                key = machine
+                canonical = next((node for node in self.machines.values() if node.history_key == key), None)
+            if canonical is not None:
+                period = min(period, self.interval(canonical))
         else:
-            configured = next((item for item in self.machines.values() if item.history_key == machine), None)
-            period = min(self.interval(configured), self.config.interval_seconds) if configured else self.config.interval_seconds
+            for id,sources in self.machine_roster().items():
+                if not any(node.enabled for node in sources):
+                    continue
+                key_for_group = sources[0].history_key
+                enabled[id] = key_for_group
+                projections[key_for_group] = self.history_sources(sources), 'host' if metric in SCOPED_METRICS else None
         async with self.readers:
-            result = await asyncio.to_thread(self.history.series, [item.history_key for item in enabled],
-                                             machine, gpu, metric, hours, self.clock(),
-                                             round(period*1000), round(self.config.stale_seconds*1000))
+            result = await asyncio.to_thread(self.history.series, enabled.values(), key, gpu, metric, hours, now,
+                                             round(period*1000), round(self.config.stale_seconds*1000),
+                                             projections=projections)
         if machine is None:
-            result['machines'] = [item.id for item in enabled]
+            result['machines'] = list(enabled)
         return result

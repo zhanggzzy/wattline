@@ -942,7 +942,7 @@ def test_display_alias_migrates_and_persists_under_fixed_machine_identity(tmp_pa
 
 
 def set_legacy_registry_version(db, version):
-    for table in ('global_configuration','cluster_resources','resource_rooms','resource_order','clusters','rooms',
+    for table in ('machine_observations','global_configuration','cluster_resources','resource_rooms','resource_order','clusters','rooms',
                       'storage_ticks','storage_resources','alerts','shared_users'):
         db.execute(f'DROP TABLE {table}')
     db.execute('DROP TABLE machine_assignees')

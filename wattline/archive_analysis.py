@@ -5,8 +5,9 @@ import json
 import sqlite3
 from threading import Event
 
-from .history import HOST_METRICS, MAX_POINTS, downsample
+from .history import HOST_METRICS, MAX_POINTS, combine_source_points, downsample
 from .history_cold import read_cold_header
+from .machine_views import SCOPED_METRICS
 
 
 ARCHIVE_ANALYSIS_IDLE_SECONDS = 15 * 60
@@ -31,6 +32,7 @@ class ArchiveAnalysis:
         self.stopped = Event()
         self.workspace = None
         self.dates = None
+        self.source_count = 1
 
     def view(self, zone):
         dates = self.dates if self.status == 'ready' else (None, None)
@@ -45,8 +47,10 @@ class ArchiveAnalysis:
         db = sqlite3.connect('', check_same_thread=False)
         try:
             db.execute('PRAGMA journal_mode=OFF')
-            db.execute('CREATE TABLE ticks(at INTEGER PRIMARY KEY, boot TEXT, epoch TEXT, metrics TEXT)')
-            db.executemany('INSERT OR REPLACE INTO ticks VALUES (?,?,?,?)',
+            db.execute("""CREATE TABLE ticks(
+                source INTEGER, at INTEGER, boot TEXT, epoch TEXT, metrics TEXT,
+                PRIMARY KEY(source,at)) WITHOUT ROWID""")
+            db.executemany('INSERT OR REPLACE INTO ticks VALUES (?,?,?,?,?)',
                            self.rows(files, identity, notify))
             if self.stopped.is_set():
                 return
@@ -60,6 +64,9 @@ class ArchiveAnalysis:
                 db.close()
 
     def rows(self, files, identity, notify):
+        sources = identity if isinstance(identity, tuple) else ((identity,None),)
+        self.source_count = len(sources)
+        source_map = {key:(index,boot) for index,(key,boot) in enumerate(sources)}
         total = sum(size for _, size in files)
         completed = progress = 0
         for path, size in files:
@@ -75,24 +82,39 @@ class ArchiveAnalysis:
                         progress = percent
                         notify(progress)
                     row = json.loads(line)
-                    if row['machine'] == identity:
+                    if row['machine'] in source_map:
+                        index, boot = source_map[row['machine']]
+                        failed = row['boot'] is None and row.get('status') not in ('normal','warning')
+                        if boot is not None and row['boot'] != boot and not failed:
+                            continue
                         at, metrics = row['observed_at'], row['metrics']
                         if type(at) is not int or not isinstance(metrics, dict):
                             raise ValueError('无效的冷归档样本')
-                        yield at, row['boot'], row['epoch'], json.dumps(metrics, allow_nan=False)
+                        yield index, at, row['boot'], row['epoch'], json.dumps(metrics, allow_nan=False)
             completed += size
 
-    def series(self, metric, start, end, stale):
+    def series(self, metric, start, end, stale, scope=None):
         bucket = max(1, (end - start + MAX_POINTS - 1) // MAX_POINTS)
-        rows = self.workspace.execute("""
-            SELECT at,boot,epoch,json_extract(metrics,?),
-                   CASE WHEN ? THEN json_extract(metrics,'$.gpu_generation') || ':' ||
-                        COALESCE(json_extract(metrics,'$.gpu_power_kind'),'') END,
-                   json_extract(metrics,'$.stale_ms')
-            FROM ticks WHERE at>=? AND at<? ORDER BY at
-            """, ('$.'+HOST_METRICS[metric], metric in ('gpu','power'), start, end))
-        return {'from':start, 'to':end, 'bucket_ms':bucket, 'keys':[metric],
-                'points':downsample(rows, start, bucket, stale), 'gap_ms':max(stale, bucket*1.5)}
+        scope = scope if metric in SCOPED_METRICS else None
+        columns = []
+        for source in range(self.source_count):
+            rows = self.workspace.execute("""
+                SELECT at,boot,epoch,
+                       CASE WHEN ? IS NULL OR COALESCE(json_extract(metrics,'$.scope'),'host') = ?
+                            THEN json_extract(metrics,?) END,
+                       COALESCE(json_extract(metrics,'$.scope'),'host') || ':' ||
+                       CASE WHEN ? THEN COALESCE(json_extract(metrics,'$.gpu_generation'),'') || ':' ||
+                            COALESCE(json_extract(metrics,'$.gpu_power_kind'),'') ELSE '' END,
+                       json_extract(metrics,'$.stale_ms')
+                FROM ticks WHERE source=? AND at>=? AND at<? ORDER BY at
+                """, (scope,scope,'$.'+HOST_METRICS[metric],metric in ('gpu','power'),source,start,end))
+            columns.append(downsample(rows, start, bucket, stale))
+        points = combine_source_points(columns, start, bucket, stale) if len(columns) > 1 else columns[0]
+        result = {'from':start, 'to':end, 'bucket_ms':bucket, 'keys':[metric],
+                  'points':points, 'gap_ms':max(stale, bucket*1.5)}
+        if scope:
+            result['scope'] = scope
+        return result
 
     def close(self):
         if self.workspace is not None:

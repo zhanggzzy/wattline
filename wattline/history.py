@@ -9,6 +9,7 @@ import sqlite3
 from .groups import GROUP_BUCKET_MS, compute_key, storage_key, unlink_resource, write_room_link
 from .history_cold import export_cold, prune_cold, sync_directory
 from .history_schema import pack_batch, prepare_schema
+from .machine_views import SCOPED_METRICS, SourceObservation
 from .resources import (
     ACTIVE, RETENTION_MS, StorageSettings, alert_view, close_alerts, storage_tick,
     update_alerts, write_resource_users,
@@ -313,7 +314,7 @@ class History:
             if from_config:
                 db.execute('INSERT OR IGNORE INTO removed_config_machines VALUES (?)', (identity,))
             for table in ('machine_settings','machine_aliases','machine_ssh_pins','machine_order',
-                          'machine_assignees','host_ticks'):
+                          'machine_assignees','machine_observations','host_ticks'):
                 db.execute(f'DELETE FROM {table} WHERE machine=?', (identity,))
             catalog = db.execute('SELECT id FROM history_machines WHERE identity=?',(identity,)).fetchone()
             if catalog:
@@ -358,6 +359,33 @@ class History:
             self.lock.close()
             self.lock = None
 
+    def source_observations(self, machines, now):
+        observations = {}
+        seeded = []
+        with self.connect() as db:
+            persisted = {key:(boot, scope, container, at) for key, boot, scope, container, at in
+                         db.execute('SELECT machine,boot,scope,container_id,at FROM machine_observations')}
+            for key in machines:
+                row = persisted.get(key)
+                if row is None:
+                    # Older databases already recorded accepted boot and scope with their samples.
+                    row = db.execute("""
+                        SELECT boot,scope,NULL,at FROM (
+                            SELECT boot,json_extract(metrics,'$.scope') AS scope,at FROM host_ticks
+                            WHERE machine=? AND status IN ('normal','warning') AND at BETWEEN ? AND ?
+                            UNION ALL
+                            SELECT h.boot,json_extract(h.metrics,'$.scope'),h.at FROM warm_host_ticks h
+                            JOIN history_machines m ON m.id=h.machine
+                            WHERE m.identity=? AND h.status IN ('normal','warning') AND h.at BETWEEN ? AND ?
+                        ) WHERE boot IS NOT NULL ORDER BY at DESC LIMIT 1
+                        """, (key,now-WARM_MS,now,key,now-WARM_MS,now)).fetchone()
+                if row is not None and row[3] <= now:
+                    observation = observations[key] = SourceObservation.from_sample(*row)
+                    if key not in persisted:
+                        seeded.append((key,observation.boot,observation.scope,observation.container_id,observation.at))
+            db.executemany('INSERT OR IGNORE INTO machine_observations VALUES (?,?,?,?,?)', seeded)
+        return observations
+
     def append(self, machine, epoch, snapshot):
         metrics = snapshot.get('metrics') or {}
         devices = metrics.get('gpus', [])
@@ -372,6 +400,13 @@ class History:
             )).rowcount
             if not inserted:
                 return
+            if observation := snapshot.get('source_observation'):
+                db.execute("""
+                    INSERT INTO machine_observations VALUES (?,?,?,?,?)
+                    ON CONFLICT(machine) DO UPDATE SET boot=excluded.boot,scope=excluded.scope,
+                      container_id=excluded.container_id,at=excluded.at
+                    WHERE excluded.at > machine_observations.at
+                    """, (machine,observation.boot,observation.scope,observation.container_id,observation.at))
             db.executemany('INSERT OR IGNORE INTO gpu_ticks VALUES (?,?,?,?)', [
                 (machine, snapshot['observed_at'], gpu['uuid'],
                  json.dumps({key:gpu[key] for key in GPU_FIELDS if key in gpu}, allow_nan=False))
@@ -497,25 +532,35 @@ class History:
             WHERE machine=? AND at BETWEEN ? AND ? AND boot IS NOT NULL ORDER BY at DESC LIMIT 1
             """, (machine,since,now)).fetchone() or (None, None, None)
 
-    def series(self, machines, machine, gpu, metric, hours, now, period, stale):
+    def series(self, machines, machine, gpu, metric, hours, now, period, stale, *, projections=None, scope=None):
         window = hours * 3600000
         start = now-window
+        projections = projections or {}
         if machine is None:
             bucket = max(period, math.ceil(window/MAX_POINTS))
-            points = self.overview(machines, metric, start, now, bucket, stale)
+            points = self.overview(machines, metric, start, now, bucket, stale, projections)
             return {'from':start,'to':now,'bucket_ms':bucket,'keys':[metric],
                     'machines':list(machines),'points':points,'gap_ms':max(stale, bucket*1.5)}
         bucket = math.ceil(window/MAX_POINTS) if window/period >= MAX_POINTS else 0
-        points = self.machine_series(machine, gpu, metric, start, now, bucket, stale, hours > 24)
-        return {'from':start,'to':now,'bucket_ms':bucket,'keys':[metric],'points':points,
-                'gap_ms':max(stale, bucket*1.5)}
+        sources, scope = projections.get(machine, (((machine,None),),scope))
+        if len(sources) > 1:
+            bucket = max(period, math.ceil(window/MAX_POINTS))
+        with self.connect(read=True) as db:
+            points = self.projected_series(db, sources, gpu, metric, start, now, bucket, stale, hours > 24, scope)
+        result = {'from':start,'to':now,'bucket_ms':bucket,'keys':[metric],'points':points,
+                  'gap_ms':max(stale, bucket*1.5)}
+        if scope:
+            result['scope'] = scope
+        return result
 
-    def overview(self, machines, metric, start, now, bucket, stale):
+    def overview(self, machines, metric, start, now, bucket, stale, projections):
         if not machines:
             return []
         with self.connect(read=True) as db:
-            columns = [self.machine_series_in(db, machine, None, metric, start, now, bucket, stale, False)
-                       for machine in machines]
+            columns = []
+            for machine in machines:
+                sources, scope = projections.get(machine, (((machine,None),),None))
+                columns.append(self.projected_series(db, sources, None, metric, start, now, bucket, stale, False, scope))
         indexed = []
         for points in columns:
             indexed.append({(point['time']-start)//bucket:point for point in points})
@@ -537,8 +582,9 @@ class History:
                            'valid':valid,'samples':samples})
         return result
 
-    def group_ticks(self, keys, start, now):
+    def group_ticks(self, keys, start, now, boots=None):
         ticks = {}
+        boots = boots or {}
         slots = (now-start)//GROUP_BUCKET_MS
         with self.connect(read=True) as db:
             for key in keys:
@@ -559,7 +605,9 @@ class History:
                         }
                 else:
                     for warm in (True,False):
-                        for at, status, metrics, gpus in self.group_compute_ticks(db, identity, start, now, slots, warm):
+                        for at, status, metrics, gpus in self.group_compute_ticks(
+                            db, identity, start, now, slots, warm, boots.get(key),
+                        ):
                             slot = min((at-start)//GROUP_BUCKET_MS,slots-1)
                             if at < by_slot.get(slot, {}).get('observed_at', -1):
                                 continue
@@ -573,7 +621,7 @@ class History:
         return ticks
 
     @staticmethod
-    def group_compute_ticks(db, identity, start, now, slots, warm):
+    def group_compute_ticks(db, identity, start, now, slots, warm, boot):
         # Select one host tick per slot before reading card observations.
         if warm:
             machine = db.execute('SELECT id FROM history_machines WHERE identity=?', (identity,)).fetchone()
@@ -592,15 +640,19 @@ class History:
             SELECT h.at,h.status,h.metrics,({gpu_query})
             FROM {table} h WHERE h.machine=? AND h.at IN (
                 SELECT max(at) FROM {table} WHERE machine=? AND at BETWEEN ? AND ?
+                AND (? IS NULL OR boot=? OR (boot IS NULL AND status NOT IN ('normal','warning')))
                 GROUP BY min((at-?)/?,?))
             ORDER BY h.at
-        """, (identity,identity,start,now,start,GROUP_BUCKET_MS,slots-1))
+        """, (identity,identity,start,now,boot,boot,start,GROUP_BUCKET_MS,slots-1))
 
-    def machine_series(self, machine, gpu, metric, start, now, bucket, stale, include_warm):
-        with self.connect(read=True) as db:
-            return self.machine_series_in(db, machine, gpu, metric, start, now, bucket, stale, include_warm)
+    def projected_series(self, db, sources, gpu, metric, start, now, bucket, stale, include_warm, scope):
+        columns = [self.machine_series_in(db, machine, gpu, metric, start, now, bucket, stale,
+                                          include_warm, boot=boot, scope=scope)
+                   for machine,boot in sources]
+        return combine_source_points(columns, start, bucket, stale) if len(columns) > 1 else columns[0]
 
-    def machine_series_in(self, db, machine, gpu, metric, start, now, bucket, stale, include_warm):
+    def machine_series_in(self, db, machine, gpu, metric, start, now, bucket, stale, include_warm, *, boot, scope):
+        measure_scope = scope if not gpu and metric in SCOPED_METRICS else None
         if gpu:
             rows = db.execute("""
                 SELECT h.at, h.boot, h.epoch, json_extract(g.metrics, ?),
@@ -608,22 +660,30 @@ class History:
                        json_extract(h.metrics, '$.stale_ms')
                 FROM host_ticks h LEFT JOIN gpu_ticks g
                   ON g.machine=h.machine AND g.at=h.at AND g.uuid=?
-                WHERE h.machine=? AND h.at BETWEEN ? AND ? ORDER BY h.at
-                """, ('$.'+GPU_METRICS[metric], metric == 'power', gpu, machine, start, now))
+                WHERE h.machine=? AND h.at BETWEEN ? AND ?
+                AND (? IS NULL OR h.boot=? OR (h.boot IS NULL AND h.status NOT IN ('normal','warning')))
+                ORDER BY h.at
+                """, ('$.'+GPU_METRICS[metric], metric == 'power', gpu, machine, start, now, boot, boot))
         else:
             rows = db.execute("""
-                SELECT at, boot, epoch, json_extract(metrics, ?),
-                       CASE WHEN ? THEN json_extract(metrics, '$.gpu_generation') || ':' ||
-                            COALESCE(json_extract(metrics, '$.gpu_power_kind'), '') END,
+                SELECT at, boot, epoch,
+                       CASE WHEN ? IS NULL OR COALESCE(json_extract(metrics,'$.scope'),'host') = ?
+                            THEN json_extract(metrics, ?) END,
+                       COALESCE(json_extract(metrics,'$.scope'),'host') || ':' ||
+                       CASE WHEN ? THEN COALESCE(json_extract(metrics, '$.gpu_generation'), '') || ':' ||
+                            COALESCE(json_extract(metrics, '$.gpu_power_kind'), '') ELSE '' END,
                        json_extract(metrics, '$.stale_ms')
-                FROM host_ticks WHERE machine=? AND at BETWEEN ? AND ? ORDER BY at
-                """, ('$.'+HOST_METRICS[metric], metric in ('gpu','power'), machine, start, now))
+                FROM host_ticks WHERE machine=? AND at BETWEEN ? AND ?
+                AND (? IS NULL OR boot=? OR (boot IS NULL AND status NOT IN ('normal','warning')))
+                ORDER BY at
+                """, (measure_scope,measure_scope,'$.'+HOST_METRICS[metric],metric in ('gpu','power'),
+                      machine,start,now,boot,boot))
         if include_warm:
-            warm = self.warm_series(db, machine, gpu, metric, start, now)
+            warm = self.warm_series(db, machine, gpu, metric, start, now, boot, measure_scope)
             rows = merge(rows, warm, key=lambda row:row[0])
         return downsample(rows, start, bucket, stale)
 
-    def warm_series(self, db, machine, gpu, metric, start, now):
+    def warm_series(self, db, machine, gpu, metric, start, now, boot, scope):
         if gpu:
             column = GPU_METRICS[metric]
             return db.execute(f"""
@@ -633,16 +693,44 @@ class History:
                 LEFT JOIN warm_gpu_ticks g ON g.machine=h.machine AND g.at=h.at AND g.device=(
                     SELECT id FROM history_devices WHERE machine=h.machine AND uuid=?
                 )
-                WHERE m.identity=? AND h.at BETWEEN ? AND ? ORDER BY h.at
-                """, (metric=='power',gpu,machine,start,now))
+                WHERE m.identity=? AND h.at BETWEEN ? AND ?
+                AND (? IS NULL OR h.boot=? OR (h.boot IS NULL AND h.status NOT IN ('normal','warning')))
+                ORDER BY h.at
+                """, (metric=='power',gpu,machine,start,now,boot,boot))
         return db.execute("""
-            SELECT h.at,h.boot,h.epoch,json_extract(h.metrics,?),
-                   CASE WHEN ? THEN k.signature || ':' || COALESCE(json_extract(h.metrics,'$.gpu_power_kind'),'') END,
+            SELECT h.at,h.boot,h.epoch,
+                   CASE WHEN ? IS NULL OR COALESCE(json_extract(h.metrics,'$.scope'),'host') = ?
+                        THEN json_extract(h.metrics,?) END,
+                   COALESCE(json_extract(h.metrics,'$.scope'),'host') || ':' ||
+                   CASE WHEN ? THEN COALESCE(k.signature,'') || ':' ||
+                        COALESCE(json_extract(h.metrics,'$.gpu_power_kind'),'') ELSE '' END,
                    json_extract(h.metrics,'$.stale_ms')
             FROM warm_host_ticks h JOIN history_machines m ON m.id=h.machine
             LEFT JOIN gpu_generations k ON k.id=h.generation
-            WHERE m.identity=? AND h.at BETWEEN ? AND ? ORDER BY h.at
-            """, ('$.'+HOST_METRICS[metric],metric in ('gpu','power'),machine,start,now))
+            WHERE m.identity=? AND h.at BETWEEN ? AND ?
+            AND (? IS NULL OR h.boot=? OR (h.boot IS NULL AND h.status NOT IN ('normal','warning')))
+            ORDER BY h.at
+            """, (scope,scope,'$.'+HOST_METRICS[metric],metric in ('gpu','power'),machine,start,now,boot,boot))
+
+
+def combine_source_points(columns, start, bucket, stale):
+    by_slot = {}
+    for source, points in enumerate(columns):
+        for point in points:
+            slot = (point['time']-start)//bucket
+            previous = by_slot.get(slot)
+            # Sources are in preference order. A missing reading can yield to a valid one.
+            if previous is None or (previous[1]['values'][0] is None and point['values'][0] is not None):
+                by_slot[slot] = source, point
+    result = []
+    previous_source, previous_at = None, None
+    for slot in sorted(by_slot):
+        source, point = by_slot[slot]
+        broken = source != previous_source or point['time']-previous_at > max(stale, bucket*1.5)
+        result.append(dict(point, breaks=[point['breaks'][0] or broken]))
+        previous_source = source if point['values'][0] is not None else None
+        previous_at = point['time']
+    return result
 
 
 def downsample(rows, start, bucket, stale):

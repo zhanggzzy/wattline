@@ -179,12 +179,14 @@ const machineForId = (id, hosts = nodes()) =>
 const getHost = () => machineForId(state.machine);
 const sourceForId = (host, id) => host?.sources?.find(source => source.id === id);
 const configurationTarget = () => sourceForId(getHost(), machineForm.dataset.machine) ?? getHost();
-const historyScope = host => host?.sources
-  ? (sourceForId(host, state.historySource)?.scope ?? host.scope ?? 'host') : null;
+const historyScope = host => sourceForId(host, state.historySource)?.scope ?? null;
+const machineMetrics = host => host?.machine_metrics ?? host?.metrics;
 const getDevice = host => host?.devices.find(gpu => gpu.uuid === state.gpu);
 const currentDevice = (host, device) => host.metrics?.gpus?.find(gpu => gpu.uuid === device.uuid);
 const supported = (host, gpu) => gpu ? ['gpu','vram','power','temp']
-  : host?.storage_kind ? ['storage','storage_read','storage_write'] : ['cpu','memory', ...((historyScope(host) ?? host?.scope) === 'container' ? ['memory_used'] : []),
+  : host?.storage_kind ? ['storage','storage_read','storage_write'] : ['cpu','memory',
+    ...((historyScope(host) === 'container' || !state.historySource &&
+      (host?.scope === 'container' || host?.sources?.some(source => source.scope === 'container') || unlimitedMemory(host))) ? ['memory_used'] : []),
     ...(host?.require_gpu && host.hardware_kind !== 'cpu' ? ['gpu','power'] : [])];
 const reason = host => i18n.diagnostic(host.reason) || host.warnings?.map(i18n.diagnostic).join(' · ') || machineStates[host.status];
 const checks = host => host.storage_kind ? [] : host.hardware_kind === 'cpu'
@@ -193,7 +195,10 @@ const checks = host => host.storage_kind ? [] : host.hardware_kind === 'cpu'
 const typedResources = () => Array.isArray(state.snapshot?.storage);
 const resourcePath = host => (host?.storage_kind ? '/api/storage/' : '/api/machines/')+encodeURIComponent(host.id);
 const configUnavailable = () => state.snapshot.registry_loaded === false;
-const unlimitedMemory = host => host?.scope === 'container' && host.metrics?.memory?.total_bytes === null;
+const unlimitedMemory = host => {
+  const memory = machineMetrics(host)?.memory;
+  return memory?.total_bytes === null && Number.isFinite(memory.used_bytes);
+};
 const windowsHost = host => host.target_os === 'windows';
 const processMemory = process => Number.isFinite(process.used_memory_mib) ? process.used_memory_mib : -1;
 
@@ -261,6 +266,8 @@ function renderPage(force = false) {
         checks(node), reason(node), model.kind, model.names, node.target_os, node.gpu_inventory_complete];
     }),
     state.historySource, host?.reading_source_id,
+    machineMetrics(host)?.cpu_source_id, machineMetrics(host)?.memory_source_id,
+    machineMetrics(host)?.cpu_scope, machineMetrics(host)?.memory_scope,
     host?.sources?.map(source => [source.id,source.name,source.address,source.scope,source.container_id]),
     host?.devices, host?.metrics?.gpus?.map(processShape),
     host?.metrics?.driver_version, unlimitedMemory(host)]);
@@ -560,15 +567,15 @@ function chartPlot(host, key = null, index = 0) {
 
 function chartPanel(host, device) {
   const source = sourceForId(host, state.historySource);
-  const scope = historyScope(host) ?? host?.scope;
-  return `<section class="panel chart-panel"><div class="panel-head"><div><h2>${host ? t('resource_trends') : t('last_24_hours')}</h2><small>${host ? device ? 'GPU '+device.index : host.sources?.length > 1 ? '' : scope === 'container' ? t('container_scope') : t('whole_machine') : t(groupChartContext() ? 'current_group_membership' : 'overview_trend_scope')}</small></div>
+  const scope = historyScope(host);
+  return `<section class="panel chart-panel"><div class="panel-head"><div><h2>${host ? t('resource_trends') : t('last_24_hours')}</h2><small>${host ? device ? 'GPU '+device.index : host.sources?.length > 1 ? '' : t('whole_machine') : t(groupChartContext() ? 'current_group_membership' : 'overview_trend_scope')}</small></div>
     <div class="title-actions">${device ? `<button type="button" class="control" data-all-gpus>${t('back_to_machine')}</button>` : ''}
       ${host && !host.storage_kind && !device ? `<button type="button" id="open-archive" class="control" ${configUnavailable() ? 'disabled' : ''}>${t('archive_analysis')}</button>` : ''}
       <button type="button" id="focus-trends" class="control" data-focus-trends>${t('focus_charts')}</button></div></div>
     ${host?.sources?.length > 1 ? `<div class="tools"><label>${t('trend_source')}
       <select id="trend-source"><option value="">${t('whole_machine')}</option>
       ${host.sources.map(item => `<option value="${escape(item.id)}" ${item === source ? 'selected' : ''}>${escape(sourceLabel(item))}</option>`).join('')}</select>
-      </label><small>${t(scope === 'container' ? 'container_scope' : 'host_scope_label')}</small></div>` : ''}
+      </label>${scope ? `<small>${t(scope === 'container' ? 'container_scope' : 'host_scope_label')}</small>` : ''}</div>` : ''}
     ${chartControls(host,device)}${chartPlot(host)}
   </section>`;
 }
@@ -683,6 +690,7 @@ async function refreshArchiveChart(archive) {
   const params = new URLSearchParams({metric:archive.metric,start:archive.start,end:archive.end});
   if (archive.source) params.set('source',archive.source);
   if (archive.scope) params.set('scope',archive.scope);
+  if (!archive.source) params.set('view','machine');
   archive.history = null;
   archive.chartError = false;
   archive.singleDay = archive.start === archive.end;
@@ -716,13 +724,18 @@ function sourceLabel(source) {
 
 function machineSourceList(host) {
   if (!host.sources?.some(source => source.scope === 'container') && !(host.sources?.length > 1)) return '';
+  const {cpu_source_id, memory_source_id} = host.machine_metrics ?? {};
   return `<details class="panel facts machine-sources" data-machine="${escape(host.id)}"><summary>${t('monitoring_sources')}</summary>
-    <ul>${host.sources.map(source => `<li><span>${t(source.scope === 'container' ? 'container_scope' :
+    <ul>${host.sources.map(source => {
+      const readings = [['cpu',cpu_source_id],['memory',memory_source_id]]
+        .filter(([,id]) => source.id === id).map(([key]) => t(key));
+      return `<li><span>${t(source.scope === 'container' ? 'container_scope' :
       source.scope === 'host' ? 'host_scope_label' : 'unknown')} · ${escape(sourceLabel(source))}</span>
-      ${source.id === host.reading_source_id && host.metrics ? `<small>${t('current_readings')}</small>` : ''}
+      ${readings.length ? `<small>${t('current_readings')} · ${readings.join(' / ')}</small>` : ''}
       <button type="button" class="control" data-configure-source="${escape(source.id)}"
         aria-label="${escape(t('configure_source',{source:sourceLabel(source)}))}" ${configUnavailable() ? 'disabled' : ''}>${t('configure')}</button>
-    </li>`).join('')}</ul></details>`;
+    </li>`;
+    }).join('')}</ul></details>`;
 }
 
 function hostPage(host, device) {
@@ -730,6 +743,11 @@ function hostPage(host, device) {
   const container = host.scope === 'container';
   const unlimited = unlimitedMemory(host);
   const active = checks(host);
+  const resources = machineMetrics(host);
+  const cpuContainer = (resources?.cpu_scope ?? host.scope) === 'container';
+  const memoryContainer = (resources?.memory_scope ?? host.scope) === 'container';
+  const showCpu = active.includes('cpu') || resources?.cpu_percent != null;
+  const showMemory = active.includes('memory') || resources?.memory_percent != null || unlimited;
   const containerSource = container ? sourceLabel(sourceForId(host,host.reading_source_id)) : '';
   return `<section class="page-title"><div><p class="eyebrow">WATTLINE / NODE</p>${heading(host.name,statusBadge)}
     <p><span class="mono">${escape(host.address)}</span> ${host.hardware_kind ? ` · ${hardwareLabel(host.hardware_kind)}` : ''} · ${host.mode==='ssh' ? 'SSH' : t('local')}
@@ -740,23 +758,23 @@ function hostPage(host, device) {
     ${typedResources() ? deviceAlerts(host) : ''}
     ${!device ? machineSourceList(host) : ''}
     ${container ? `<p class="message scope-note"><strong>${t('container_scope')}${containerSource ? ' · '+escape(containerSource) : ''}</strong>
-      ${t('cpu_and_memory_describe_this_container_gpu_metrics_cover_visible_')}</p>` : ''}
+      ${active.includes('gpu') ? t('container_gpu_scope_note') : ''}</p>` : ''}
     ${host.reason || host.warnings?.length ? '<p class="message">'+escape(reason(host))+'</p>' : ''}
-    <section class="metrics" aria-label="${t('live_machine_resources')}" ${active.some(key => ['gpu','cpu','memory'].includes(key)) ? '' : 'hidden'}>
+    <section class="metrics" aria-label="${t('live_machine_resources')}" ${showCpu || showMemory || active.includes('gpu') ? '' : 'hidden'}>
       ${active.includes('gpu') ? metricTile(device ? t('gpu_device_utilization',{index:device.index}) : t('average_gpu_utilization'),'card-gpu','%','≋',
         device ? field('selected-gpu-memory') : t('only_devices_reporting_utilization')) : ''}
       ${active.includes('gpu') ? metricTile(device ? t('gpu_device_power',{index:device.index}) : container ? t('visible_gpu_power') : t('total_gpu_power'),'card-power','W','⌁',
         device ? field('selected-gpu-limit') : container ? t('total_power_of_devices_visible_to_container') : t('calculated_when_device_power_modes_agree')) : ''}
-      ${active.includes('cpu') ? metricTile(t('cpu_usage'),'card-cpu','%','◉',container ? t('share_of_container_cpu_capacity') : t('machine_logical_cpus')) : ''}
-      ${active.includes('memory') ? metricTile(unlimited ? t('memory_used') : t('memory_usage'),'card-memory',unlimited ? 'GiB' : '%','▤',field('memory-detail')) : ''}
+      ${showCpu ? metricTile(t('cpu'),'card-cpu','%','◉',cpuContainer ? t('share_of_container_cpu_capacity') : t('machine_logical_cpus')) : ''}
+      ${showMemory ? metricTile(t('memory'),'card-memory',unlimited ? 'GiB' : '%','▤',field('memory-detail')) : ''}
       ${host.hardware_kind === 'cpu' ? metricTile(t('1_minute_load'),'load','','⌁',field('cpu-detail')) +
         metricTile(t('system_disk_available'),'disk','','▥',field('uptime')) : ''}
     </section>
-    ${host.metrics && (host.metrics.driver_version || active.some(key => key === 'cpu' || key === 'memory' || (!container && key === 'system'))) ? `<div class="panel facts" aria-label="${t('additional_resource_metrics')}">
-      ${active.includes('cpu') ? `<span>${container ? t('container_cpu_capacity') : t('logical_cpus')} <strong>${field('cores')}</strong></span>` : ''}
-      ${!container && !windowsHost(host) && active.includes('cpu') ? `<span>${t('1_minute_load')} <strong>${field('load')}</strong></span>` : ''}
+    ${host.metrics && (host.metrics.driver_version || showCpu || showMemory || (!container && active.includes('system'))) ? `<div class="panel facts" aria-label="${t('additional_resource_metrics')}">
+      ${showCpu ? `<span>${cpuContainer ? t('container_cpu_capacity') : t('logical_cpus')} <strong>${field('cores')}</strong></span>` : ''}
+      ${!cpuContainer && !windowsHost(host) && showCpu ? `<span>${t('1_minute_load')} <strong>${field('load')}</strong></span>` : ''}
       ${!container && active.includes('system') ? `<span>${t('system_disk_available')} <strong>${field('disk')}</strong></span><span>${t('uptime')} <strong>${field('uptime')}</strong></span>` : ''}
-      ${active.includes('memory') && !unlimited ? `<span>${container ? t('memory_limit_headroom') : t('memory_available')} <strong>${field('available')}</strong></span>` : ''}
+      ${showMemory && !unlimited ? `<span>${memoryContainer ? t('memory_limit_headroom') : t('memory_available')} <strong>${field('available')}</strong></span>` : ''}
       ${host.metrics.driver_version ? `<span>${t('nvidia_driver')} <strong>`+escape(host.metrics.driver_version)+'</strong></span>' : ''}</div>` : ''}
     <div class="column details-layout">${chartPanel(host,device)}${host.hardware_kind === 'cpu' ? '' : hardwareTable(host)}</div>`;
 }
@@ -935,24 +953,27 @@ function paint() {
     const metrics = host.metrics;
     const selected = getDevice(host);
     const gpu = selected ? currentDevice(host,selected) : undefined;
-    const memory = metrics?.memory;
+    const resources = machineMetrics(host);
+    const memory = resources?.memory;
+    const cpuContainer = (resources?.cpu_scope ?? host.scope) === 'container';
+    const memoryContainer = (resources?.memory_scope ?? host.scope) === 'container';
     values['card-gpu'] = fmt(selected ? gpu?.utilization_percent : metrics?.gpu_percent);
     values['card-power'] = fmt(selected ? gpu?.power_w : metrics?.gpu_power_w);
     values['selected-gpu-memory'] = gpu ? fmt(vram(gpu.memory_used_mib),'',1)+' / '+fmt(vram(gpu.memory_total_mib),' GiB',1) : t('no_current_reading');
     values['selected-gpu-limit'] = t('current_power_limit_m146')+fmt(gpu?.power_limit_w,' W');
-    values['card-cpu'] = fmt(metrics?.cpu_percent);
-    values['card-memory'] = unlimitedMemory(host) ? fmt(gib(memory.used_bytes),'',1) : fmt(metrics?.memory_percent);
+    values['card-cpu'] = fmt(resources?.cpu_percent);
+    values['card-memory'] = unlimitedMemory(host) ? fmt(gib(memory.used_bytes),'',1) : fmt(resources?.memory_percent);
     values['host-time'] = time(host.last_success_at);
-    values['cores'] = fmt(metrics?.cpu_count,t('cores'),Number.isInteger(metrics?.cpu_count) ? 0 : 2);
-    values['load'] = fmt(metrics?.load_average?.[0],'',2);
-    values['cpu-detail'] = host.scope === 'container' ? t('container_scope') : values['cores'];
+    values['cores'] = fmt(resources?.cpu_count,t('cores'),Number.isInteger(resources?.cpu_count) ? 0 : 2);
+    values['load'] = fmt(resources?.load_average?.[0],'',2);
+    values['cpu-detail'] = cpuContainer ? t('container_scope') : values['cores'];
     const disk = metrics?.root_disk;
     values['disk'] = (disk?.volume ? disk.volume + ' · ' : '') + fmt(gib(disk?.available_bytes),' GiB',1);
     values['available'] = fmt(gib(memory?.available_bytes),' GiB',1);
     values['uptime'] = uptime(metrics?.uptime_seconds);
     values['memory-detail'] = memory?.total_bytes != null
-      ? fmt(gib(memory.used_bytes),' GiB',1)+' / '+fmt(gib(memory.total_bytes),' GiB',1)+(host.scope === 'container' ? t('used_including_cache') : t('used'))
-      : memory ? t('no_cgroup_memory_limit_usage_includes_cache') : t('no_current_reading');
+      ? fmt(gib(memory.used_bytes),' GiB',1)+' / '+fmt(gib(memory.total_bytes),' GiB',1)+(memoryContainer ? t('used_including_cache') : t('used'))
+      : unlimitedMemory(host) ? t(memoryContainer ? 'no_cgroup_memory_limit_usage_includes_cache' : 'unbounded_memory') : t('no_current_reading');
     for (const device of host.devices) {
       const reading = currentDevice(host,device)?.utilization_percent;
       values[device.uuid] = fmt(reading,'%');
@@ -1011,15 +1032,16 @@ function paint() {
         values[node.id+'-storage'] = capacityLabel(node.storage_observation?.capacity);
         continue;
       }
+      const resources = machineMetrics(node);
       for (const [key, value] of Object.entries({gpu:node.metrics?.gpu_percent, power:node.metrics?.gpu_power_w,
-        cpu:node.metrics?.cpu_percent, memory:node.metrics?.memory_percent})) {
+        cpu:resources?.cpu_percent, memory:resources?.memory_percent})) {
         const id = node.id+'-'+key;
         values[id] = fmt(value,key === 'power' ? ' W' : '%');
         scales[id] = value;
       }
-      if (unlimitedMemory(node)) values[node.id+'-memory'] = fmt(gib(node.metrics.memory.used_bytes),' GiB',1);
+      if (unlimitedMemory(node)) values[node.id+'-memory'] = fmt(gib(resources.memory.used_bytes),' GiB',1);
       else {
-        const memory = node.metrics?.memory;
+        const memory = resources?.memory;
         values[node.id+'-memory-used'] = groupedOverview() && memory?.total_bytes != null && Number.isFinite(memory.used_bytes)
           ? bytesLabel(memory.used_bytes)+' / '+bytesLabel(memory.total_bytes) : fmt(gib(memory?.used_bytes),' GiB',1);
       }
@@ -1078,6 +1100,7 @@ async function refreshHistory(reset = false) {
       if (state.historySource) params.set('source',state.historySource);
       const scope = historyScope(host);
       if (scope && ['cpu','memory','memory_used'].includes(metric)) params.set('scope',scope);
+      if (!state.historySource && !gpu) params.set('view','machine');
     }
     params.set('metric',metric);
     if (gpu) params.set('gpu',gpu.uuid);
@@ -1165,9 +1188,8 @@ function chartSeries(instance, history) {
     const [,unit] = descriptors[instance.metric];
     return (history?.series ?? []).map((item,index) => ({
       key:instance.metric, id:item.group, hidden:state.hiddenGroups.has(item.group), unit,
-      label:item.name+(
-        item.scope === 'storage' || item.scope === 'machine' && ['gpu','power'].includes(instance.metric)
-          ? '' : ' · '+t(item.scope === 'container' ? 'container_scope' : 'host_scope_label')),
+      label:item.name+(['host','container'].includes(item.scope)
+        ? ' · '+t(item.scope === 'container' ? 'container_scope' : 'host_scope_label') : ''),
       color:machineColors[index % machineColors.length],
       dash:machineDashes[item.scope === 'container' ? 1+(index%3) : index%3],
     }));

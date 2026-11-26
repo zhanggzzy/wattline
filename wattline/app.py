@@ -324,7 +324,8 @@ def create_app(config, *, monitor=None):
                       gpu: str | None = Query(None, pattern=r'^GPU-[a-zA-Z0-9-]{1,80}$'),
                       metric: str | None = Query(None, max_length=12),
                       hours: int = Query(24, ge=1, le=WARM_HOURS), source: MachineId | None = None,
-                      scope: Literal['host','container'] | None = None):
+                      scope: Literal['host','container'] | None = None,
+                      view: Literal['scoped','machine'] = 'scoped'):
         if machine is not None:
             if machine not in service.machines:
                 raise HTTPException(404, '监控机器不存在')
@@ -341,7 +342,8 @@ def create_app(config, *, monitor=None):
             if hours > 24:
                 raise HTTPException(422, '机器总览最多支持 24 小时，请在机器详情查看更长窗口')
         try:
-            return await service.series(machine, gpu, metric, hours, source=source, scope=scope, by_id=True)
+            return await service.series(machine, gpu, metric, hours, source=source, scope=scope, by_id=True,
+                                        machine_view=view == 'machine')
         except KeyError as error:
             raise HTTPException(404, '监控机器不存在') from error
         except (OSError, sqlite3.Error) as error:
@@ -359,13 +361,15 @@ def create_app(config, *, monitor=None):
 
     @app.get('/api/machines/{machine}/archive-analysis/series')
     async def archive_analysis_series(machine: MachineId, start: date, end: date, metric: str = 'cpu',
-                                      source: MachineId | None = None, scope: Literal['host','container'] | None = None):
+                                      source: MachineId | None = None, scope: Literal['host','container'] | None = None,
+                                      view: Literal['scoped','machine'] = 'scoped'):
         if machine not in service.machines:
             raise HTTPException(404, 'archive_analysis_missing')
         if start > end or metric not in HOST_METRICS:
             raise HTTPException(422, 'archive_analysis_invalid_range_or_metric')
         try:
-            return await service.archive_analysis_series(machine, metric, start, end, source=source, scope=scope)
+            return await service.archive_analysis_series(machine, metric, start, end, source=source, scope=scope,
+                                                         machine_view=view == 'machine')
         except KeyError as error:
             raise HTTPException(409, 'archive_analysis_missing') from error
         except (OSError, sqlite3.Error, TypeError, ValueError) as error:

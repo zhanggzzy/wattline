@@ -15,7 +15,7 @@ from .collector import CollectionError, Collector, cpu_percent
 from .config import DEFAULT_IDLE_MEMORY_TOLERANCE_MIB, DEFAULT_SSH_CONNECT_TIMEOUT, Machine, MachineSettings
 from .groups import compute_key, group_history_data, storage_key, summarize_resources
 from .history import DAY_MS, GPU_FIELDS, History, HistoryInUse, MAX_POINTS, WARM_HOURS, WARM_MS, downsample
-from .machine_views import SCOPED_METRICS, SourceObservation, preferred_observation
+from .machine_views import SCOPED_METRICS, SourceObservation, machine_resource_metrics, preferred_observation
 from .resources import StorageAdapter, StorageObservation
 
 
@@ -858,9 +858,10 @@ class Monitor:
             if not job.read_lock.locked():
                 job.close()
 
-    async def archive_analysis_series(self, machine, metric, first, last, *, source=None, scope=None):
+    async def archive_analysis_series(self, machine, metric, first, last, *, source=None, scope=None, machine_view=False):
         identity = self.archive_selection(machine, source)
-        if scope is None and isinstance(identity, tuple) and metric in SCOPED_METRICS:
+        machine_view = machine_view and source is None and scope is None and metric in SCOPED_METRICS
+        if not machine_view and scope is None and isinstance(identity, tuple) and metric in SCOPED_METRICS:
             canonical = next(node for node in self.machines.values() if node.history_key == identity[0][0])
             scope = self.source_observations[canonical.id].scope
         job = self.archive_analyses.get(identity)
@@ -872,7 +873,7 @@ class Monitor:
             if self.archive_analyses.get(identity) is not job:
                 raise KeyError(machine)
             try:
-                result = await offload(job.series, metric, start, end, stale, scope)
+                result = await offload(job.series, metric, start, end, stale, scope, machine_view)
                 if self.archive_analyses.get(identity) is not job:
                     raise KeyError(machine)
                 return result
@@ -1060,6 +1061,7 @@ class Monitor:
         view['stale_ms'] = chosen['stale_ms']
         view['reading_source_id'] = chosen['id']
         view['reading_checks'] = chosen['checks']
+        view['machine_metrics'] = machine_resource_metrics(rows)
         view['room_id'] = next((row['room_id'] for row in rows if row['room_id'] is not None), None)
         view['cluster_ids'] = list(dict.fromkeys(id for row in rows for id in row['cluster_ids']))
         expected = max((row['expected_gpu_count'] or 0 for row in rows), default=0)
@@ -1387,9 +1389,11 @@ class Monitor:
         return {'from':start,'to':now,'bucket_ms':bucket,'keys':[metric],
                 'points':downsample(rows, start, bucket, stale)}
 
-    async def series(self, machine, gpu, metric, hours, *, source=None, scope=None, by_id=False):
+    async def series(self, machine, gpu, metric, hours, *, source=None, scope=None, by_id=False, machine_view=False):
         now = self.clock()
-        scope = scope if gpu is None and metric in SCOPED_METRICS else None
+        resource_metric = gpu is None and metric in SCOPED_METRICS
+        scope = scope if resource_metric else None
+        machine_view = resource_metric and source is None and scope is None and (machine_view or machine is None)
         period = self.config.interval_seconds
         projections = {}
         enabled = {}
@@ -1399,7 +1403,7 @@ class Monitor:
                 sources = self.history_selection(machine, source)
                 canonical = sources[0]
                 key = canonical.history_key
-                if scope is None and len(sources) > 1 and metric in SCOPED_METRICS and gpu is None:
+                if not machine_view and scope is None and len(sources) > 1 and resource_metric:
                     scope = self.source_observations[canonical.id].scope
                 projections[key] = self.history_sources(sources), scope
             else:
@@ -1413,11 +1417,11 @@ class Monitor:
                     continue
                 key_for_group = sources[0].history_key
                 enabled[id] = key_for_group
-                projections[key_for_group] = self.history_sources(sources), 'host' if metric in SCOPED_METRICS else None
+                projections[key_for_group] = self.history_sources(sources), None
         async with self.readers:
             result = await asyncio.to_thread(self.history.series, enabled.values(), key, gpu, metric, hours, now,
                                              round(period*1000), round(self.config.stale_seconds*1000),
-                                             projections=projections)
+                                             projections=projections, machine_view=machine_view)
         if machine is None:
             result['machines'] = list(enabled)
         return result

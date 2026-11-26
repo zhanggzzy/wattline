@@ -1,12 +1,11 @@
 """Physical rooms, clusters, and aggregate resource measurements."""
 
 from collections import defaultdict
-import math
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .config import IdleMemoryTolerance, MachineId, PersonId, normalize_person_name
-from .machine_views import preferred_observation
+from .machine_views import known, machine_resource_metrics, preferred_observation
 
 GROUP_SCHEMA = (
     """CREATE TABLE rooms (
@@ -95,10 +94,6 @@ def storage_key(id):
     return 'storage:'+id
 
 
-def known(value):
-    return isinstance(value, (int,float)) and not isinstance(value,bool) and math.isfinite(value) and value >= 0
-
-
 def metric(value, valid, total):
     return {'value':value,'valid':valid,'total':total}
 
@@ -146,13 +141,26 @@ def gpu_power_total(gpus, field, total):
 
 def aggregate_scope(rows, scope):
     eligible = [row for row in rows if row.get('scope') == scope]
-    seen = [row for row in eligible if row.get('metrics') is not None]
+    seen = sorted((row for row in eligible if row.get('metrics') is not None),
+                  key=lambda row:row.get('observed_at') or 0, reverse=True)
+    gpus = visible_gpu_readings(seen)
+    gpu_values = [gpu['utilization_percent'] for gpu in gpus.values() if 'utilization_percent' in gpu]
+    # For GPU metrics, coverage is cards with readings out of visible or expected cards.
+    gpu_total = len(gpus)+expected_unseen_gpus(eligible)
+    return {
+        'devices': len(eligible),
+        **aggregate_cpu_memory((row['metrics'] for row in seen), len(eligible)),
+        'gpu':metric(sum(gpu_values)/len(gpu_values) if gpu_values else None,len(gpu_values),gpu_total),
+        'power':gpu_power_total(gpus,'power_w',gpu_total),
+    }
+
+
+def aggregate_cpu_memory(measurements, eligible):
     cpu = []
     used_values = []
     pairs = []
     unknown_limits = []
-    for row in sorted(seen, key=lambda item:item.get('observed_at') or 0, reverse=True):
-        metrics = row['metrics']
+    for metrics in measurements:
         usage, cores = metrics.get('cpu_percent'), metrics.get('cpu_count')
         if known(usage) and known(cores) and cores:
             cpu.append((usage,cores))
@@ -164,21 +172,14 @@ def aggregate_scope(rows, scope):
                 pairs.append((used,total))
             elif total is None:
                 unknown_limits.append(used)
-    gpus = visible_gpu_readings(seen)
-    gpu_values = [gpu['utilization_percent'] for gpu in gpus.values() if 'utilization_percent' in gpu]
-    # For GPU metrics, coverage is cards with readings out of visible or expected cards.
-    gpu_total = len(gpus)+expected_unseen_gpus(eligible)
     used_total = sum(item[0] for item in pairs) if pairs else None
     total_bytes = sum(item[1] for item in pairs) if pairs else None
     return {
-        'devices': len(eligible),
         'cpu':metric(sum(use*cores for use,cores in cpu)/sum(cores for _,cores in cpu) if cpu else None,
-                     len(cpu),len(eligible)),
-        'memory_used':metric(sum(used_values) if used_values else None,len(used_values),len(eligible)),
-        'memory':capacity(used_total,total_bytes,len(pairs),len(eligible),
+                     len(cpu),eligible),
+        'memory_used':metric(sum(used_values) if used_values else None,len(used_values),eligible),
+        'memory':capacity(used_total,total_bytes,len(pairs),eligible,
                           unbounded_used=sum(unknown_limits) if unknown_limits else None),
-        'gpu':metric(sum(gpu_values)/len(gpu_values) if gpu_values else None,len(gpu_values),gpu_total),
-        'power':gpu_power_total(gpus,'power_w',gpu_total),
     }
 
 
@@ -223,10 +224,9 @@ def summarize_resources(rows, *, overview=False):
     gpus, gpu_total = machine_gpu_readings(compute)
     gpu_values = [gpu['utilization_percent'] for gpu in gpus.values() if 'utilization_percent' in gpu]
     power = gpu_power_total(gpus,'power_w',gpu_total)
-    machine = dict(scopes['host'], devices=len(compute), power=power,
+    machine = dict(aggregate_cpu_memory((row['machine_metrics'] for row in compute), len(compute)),
+                   devices=len(compute), power=power,
                    gpu=metric(sum(gpu_values)/len(gpu_values) if gpu_values else None,len(gpu_values),gpu_total))
-    for key in ('cpu', 'memory', 'memory_used'):
-        machine[key] = dict(machine[key], total=len(compute))
     result = {**scopes, 'machine':machine, 'storage':aggregate_storage(storage), 'visible_gpu':len(gpus),
               'gpu_power':power,
               'online':sum(row.get('status') in ('normal','warning') for row in rows), 'registered':len(rows)}
@@ -260,6 +260,8 @@ def group_history_data(groups, defaults, ticks, start, now, selected_metric, sou
         for key, memberships in groups_by_resource.items():
             candidates = [{**defaults[source], **ticks.get(source, {}).get(slot, {})} for source in sources[key]]
             row = dict(preferred_observation(candidates))
+            if not row.get('storage_kind'):
+                row['machine_metrics'] = machine_resource_metrics(candidates)
             if len(candidates) > 1:
                 row['_gpu_sources'] = candidates
                 row['expected_gpu_count'] = max(item.get('expected_gpu_count') or 0 for item in candidates)

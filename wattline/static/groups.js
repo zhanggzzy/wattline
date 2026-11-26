@@ -186,7 +186,7 @@ function summaryTable(kind,groups) {
   const clusters = kind === 'cluster';
   const labels = [groupLabel(kind),t(clusters ? 'resource_user_mode' : 'room_owner')];
   if (clusters) labels.push(t('rooms'));
-  labels.push(t('online_registered'),t('host_cpu'),t('host_memory'),
+  labels.push(t('online_registered'),t('cpu'),t('memory'),
     t('gpu_utilization')+' / '+t('gpu_power'),t('storage_resource'),t('site_alerts'));
   return basicTable(labels,groups.map(group => {
     const row = [groupButton(kind,group.id,group.name),escape(groupPerson(group,kind) || t('unassigned'))];
@@ -235,7 +235,7 @@ function groupDetailPage(group,kind) {
   }) : group.rooms.map(item => [
     item.id ? groupButton('room',item.id,roomName(item.id)) : escape(t('no_room')),i18n.number(item.count),
   ]);
-  const cards = [[t('online_registered'),'online',''],[t('host_cpu'),'cpu','machine'],[t('host_memory'),'memory','machine'],[t('storage_resource'),'storage','']];
+  const cards = [[t('online_registered'),'online',''],[t('cpu'),'cpu','machine'],[t('memory'),'memory','machine'],[t('storage_resource'),'storage','']];
   return `<section class="page-title"><div>${heading(group.name)}
     <p>${groupLabel(kind)} · ${t(room ? 'room_owner' : 'resource_user_mode')} · ${escape(groupPerson(group,kind) || t('unassigned'))}
       ${group.location ? ' · '+escape(group.location) : ''}</p></div>

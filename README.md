@@ -93,10 +93,13 @@ The overview shows online devices, visible GPUs and GPU power above persisted
 alerts. The power card reports current draw and rated power with separate
 coverage of visible GPUs. Rated power uses the GPU default power limit reported
 by NVIDIA and appears when the live sample includes it. Rooms and
-clusters offer a 24-hour chart based on current machine membership. Group CPU
-and memory use host readings and report machine coverage. GPU totals use unique
-visible devices. A machine with only fresh container readings shows the
-container scope in its details. Use the history source selector in a machine
+clusters offer a 24-hour chart based on current machine membership. Machine
+and group views select CPU and memory independently, using a valid host reading
+first and a valid container reading when needed. Each machine contributes once
+per metric. Measured memory use counts toward usage coverage even when a limit
+is missing, and memory percentages report coverage of comparable used and total
+pairs. GPU totals use unique visible devices. Machine details identify the sources
+of current CPU and memory readings. Use the history source selector in a machine
 with several endpoints to see an original endpoint's recent or archived
 readings. The alert center shows first and most
 recent observations, verified recovery and administrative closure.

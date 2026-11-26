@@ -5,7 +5,10 @@ import json
 import sqlite3
 from threading import Event
 
-from .history import HOST_METRICS, MAX_POINTS, combine_source_points, downsample
+from .history import (
+    HOST_METRICS, MAX_POINTS, combine_machine_resource_points, combine_source_points, downsample,
+    machine_resource_points,
+)
 from .history_cold import read_cold_header
 from .machine_views import SCOPED_METRICS
 
@@ -93,23 +96,30 @@ class ArchiveAnalysis:
                         yield index, at, row['boot'], row['epoch'], json.dumps(metrics, allow_nan=False)
             completed += size
 
-    def series(self, metric, start, end, stale, scope=None):
+    def series(self, metric, start, end, stale, scope=None, machine_view=False):
         bucket = max(1, (end - start + MAX_POINTS - 1) // MAX_POINTS)
         scope = scope if metric in SCOPED_METRICS else None
         columns = []
         for source in range(self.source_count):
             rows = self.workspace.execute("""
                 SELECT at,boot,epoch,
-                       CASE WHEN ? IS NULL OR COALESCE(json_extract(metrics,'$.scope'),'host') = ?
+                       CASE WHEN ? THEN metrics
+                            WHEN ? IS NULL OR COALESCE(json_extract(metrics,'$.scope'),'host') = ?
                             THEN json_extract(metrics,?) END,
                        COALESCE(json_extract(metrics,'$.scope'),'host') || ':' ||
                        CASE WHEN ? THEN COALESCE(json_extract(metrics,'$.gpu_generation'),'') || ':' ||
                             COALESCE(json_extract(metrics,'$.gpu_power_kind'),'') ELSE '' END,
                        json_extract(metrics,'$.stale_ms')
                 FROM ticks WHERE source=? AND at>=? AND at<? ORDER BY at
-                """, (scope,scope,'$.'+HOST_METRICS[metric],metric in ('gpu','power'),source,start,end))
-            columns.append(downsample(rows, start, bucket, stale))
-        points = combine_source_points(columns, start, bucket, stale) if len(columns) > 1 else columns[0]
+                """, (machine_view,scope,scope,'$.'+HOST_METRICS[metric],metric in ('gpu','power'),source,start,end))
+            if machine_view:
+                columns.append(machine_resource_points(rows, metric, start, bucket, stale))
+            else:
+                columns.append(downsample(rows, start, bucket, stale))
+        if machine_view:
+            points = combine_machine_resource_points(columns, start, bucket, stale)
+        else:
+            points = combine_source_points(columns, start, bucket, stale) if len(columns) > 1 else columns[0]
         result = {'from':start, 'to':end, 'bucket_ms':bucket, 'keys':[metric],
                   'points':points, 'gap_ms':max(stale, bucket*1.5)}
         if scope:

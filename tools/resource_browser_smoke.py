@@ -120,10 +120,10 @@ def check_machine_sources(browser):
             at = now-1000+index
             metrics = metrics_from({
                 'scope':scope, 'cpu_count':2 if container else 8,
-                'memory':{'used_bytes':1024**3, 'total_bytes':(2 if container else 8)*1024**3},
+                'memory':{'used_bytes':1024**3, 'total_bytes':(2 if container else 8)*1024**3} if index else None,
                 'gpu_inventory_complete':True,
                 'gpus':[{'uuid':'GPU-fixture-one','power_w':100,'power_kind':'reported'}] if index < 3 else [],
-            }, 60 if container else 25)
+            }, 60 if container else 0 if index == 0 else 25)
             observation = SourceObservation.from_sample(boot, scope, 'ab'*32 if index == 1 else None, at)
             sample = {'source':'ssh','observed_at':at,'received_at':at,'status':'normal','boot':boot,
                       'metrics':metrics,'source_observation':observation}
@@ -134,17 +134,36 @@ def check_machine_sources(browser):
             room = client.post('/api/rooms',json={'name':'Fixture room'}).json()['id']
             for source in hosts[:3]:
                 client.put(f'/api/resources/{source.id}/room',json={'room_id':room}).raise_for_status()
+            client.post('/api/clusters',json={'name':'Fixture cluster','members':list(ids[:3])}).raise_for_status()
             page, errors = open_api_page(browser, client)
             expect(page.locator('[data-value=online]')).to_have_text('2 / 2')
             expect(page.locator('[data-value=watts]')).to_have_text('100')
-            expect(page.locator('.group-summary')).not_to_contain_text('容器 CPU')
-            page.wait_for_function('state.history?.series?.length === 1 && state.history.series[0].scope === "machine"')
+            for locale, memory_label in [('en','Memory'), ('zh-CN','内存')]:
+                page.locator('#locale-select').select_option(locale)
+                for kind in ('room','cluster'):
+                    page.locator(f'#overview-tab-{kind}').click()
+                    table = page.locator('.group-summary')
+                    expect(table.get_by_role('columnheader',name='CPU',exact=True)).to_be_visible()
+                    expect(table.get_by_role('columnheader',name=memory_label,exact=True)).to_be_visible()
+                    expect(table.locator('[data-group-reading=cpu]')).to_have_text('0% · 1/1')
+                    expect(table.locator('[data-group-reading=memory]')).to_contain_text('1.0 GiB / 2.0 GiB')
+                    page.locator('[data-overview-metric=memory]').click()
+                    page.wait_for_function('state.history?.keys[0] === "memory" && state.history.points.at(-1).values[0] === 50')
+                    expect(page.locator('#chart-legend [data-legend-group]')).to_have_text(f'Fixture {kind}')
+                    table.get_by_role('button',name=f'Fixture {kind}',exact=True).click()
+                    expect(page.locator('.metric:has([data-group-reading=cpu]) .metric-name')).to_have_text('CPU')
+                    expect(page.locator('.metric:has([data-group-reading=memory]) .metric-name')).to_have_text(memory_label)
+                    expect(page.locator('.metric [data-group-reading=memory]')).to_contain_text('50%')
+                    page.locator('#breadcrumb [data-overview]').click()
             page.locator('#overview-tab-machine').click()
             expect(page.locator('#host-rows [data-machine-row]')).to_have_count(2)
             page.locator('#host-search').fill('fixture-container-one')
             expect(page.locator('#host-rows [data-machine-row]')).to_have_attribute('data-machine-row',ids[0])
             page.locator('#host-rows .row-open').click()
             expect(page.locator('#page-heading')).to_have_text(ids[0])
+            expect(page.locator('[data-value=card-cpu]')).to_have_text('0')
+            expect(page.locator('[data-value=card-memory]')).to_have_text('50')
+            page.wait_for_function('state.history?.points.at(-1)?.values[0] === 0 && !state.history.scope')
             page.locator('.machine-sources summary').click()
             expect(page.locator('.machine-sources')).to_contain_text('abababababab')
             expect(page.locator('.machine-sources')).to_contain_text(ids[2])

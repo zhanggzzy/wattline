@@ -9,7 +9,7 @@ import sqlite3
 from .groups import GROUP_BUCKET_MS, compute_key, storage_key, unlink_resource, write_room_link
 from .history_cold import export_cold, prune_cold, sync_directory
 from .history_schema import pack_batch, prepare_schema
-from .machine_views import SCOPED_METRICS, SourceObservation
+from .machine_views import SCOPED_METRICS, SourceObservation, known, memory_reading
 from .resources import (
     ACTIVE, RETENTION_MS, StorageSettings, alert_view, close_alerts, storage_tick,
     update_alerts, write_resource_users,
@@ -532,13 +532,14 @@ class History:
             WHERE machine=? AND at BETWEEN ? AND ? AND boot IS NOT NULL ORDER BY at DESC LIMIT 1
             """, (machine,since,now)).fetchone() or (None, None, None)
 
-    def series(self, machines, machine, gpu, metric, hours, now, period, stale, *, projections=None, scope=None):
+    def series(self, machines, machine, gpu, metric, hours, now, period, stale, *, projections=None, scope=None,
+               machine_view=False):
         window = hours * 3600000
         start = now-window
         projections = projections or {}
         if machine is None:
             bucket = max(period, math.ceil(window/MAX_POINTS))
-            points = self.overview(machines, metric, start, now, bucket, stale, projections)
+            points = self.overview(machines, metric, start, now, bucket, stale, projections, machine_view=machine_view)
             return {'from':start,'to':now,'bucket_ms':bucket,'keys':[metric],
                     'machines':list(machines),'points':points,'gap_ms':max(stale, bucket*1.5)}
         bucket = math.ceil(window/MAX_POINTS) if window/period >= MAX_POINTS else 0
@@ -546,21 +547,23 @@ class History:
         if len(sources) > 1:
             bucket = max(period, math.ceil(window/MAX_POINTS))
         with self.connect(read=True) as db:
-            points = self.projected_series(db, sources, gpu, metric, start, now, bucket, stale, hours > 24, scope)
+            points = self.projected_series(db, sources, gpu, metric, start, now, bucket, stale, hours > 24, scope,
+                                           machine_view=machine_view)
         result = {'from':start,'to':now,'bucket_ms':bucket,'keys':[metric],'points':points,
                   'gap_ms':max(stale, bucket*1.5)}
         if scope:
             result['scope'] = scope
         return result
 
-    def overview(self, machines, metric, start, now, bucket, stale, projections):
+    def overview(self, machines, metric, start, now, bucket, stale, projections, *, machine_view=False):
         if not machines:
             return []
         with self.connect(read=True) as db:
             columns = []
             for machine in machines:
                 sources, scope = projections.get(machine, (((machine,None),),None))
-                columns.append(self.projected_series(db, sources, None, metric, start, now, bucket, stale, False, scope))
+                columns.append(self.projected_series(db, sources, None, metric, start, now, bucket, stale, False, scope,
+                                                     machine_view=machine_view))
         indexed = []
         for points in columns:
             indexed.append({(point['time']-start)//bucket:point for point in points})
@@ -645,13 +648,17 @@ class History:
             ORDER BY h.at
         """, (identity,identity,start,now,boot,boot,start,GROUP_BUCKET_MS,slots-1))
 
-    def projected_series(self, db, sources, gpu, metric, start, now, bucket, stale, include_warm, scope):
+    def projected_series(self, db, sources, gpu, metric, start, now, bucket, stale, include_warm, scope, *,
+                         machine_view=False):
         columns = [self.machine_series_in(db, machine, gpu, metric, start, now, bucket, stale,
-                                          include_warm, boot=boot, scope=scope)
+                                          include_warm, boot=boot, scope=scope, machine_view=machine_view)
                    for machine,boot in sources]
+        if machine_view:
+            return combine_machine_resource_points(columns, start, bucket, stale)
         return combine_source_points(columns, start, bucket, stale) if len(columns) > 1 else columns[0]
 
-    def machine_series_in(self, db, machine, gpu, metric, start, now, bucket, stale, include_warm, *, boot, scope):
+    def machine_series_in(self, db, machine, gpu, metric, start, now, bucket, stale, include_warm, *, boot, scope,
+                          machine_view=False):
         measure_scope = scope if not gpu and metric in SCOPED_METRICS else None
         if gpu:
             rows = db.execute("""
@@ -667,7 +674,8 @@ class History:
         else:
             rows = db.execute("""
                 SELECT at, boot, epoch,
-                       CASE WHEN ? IS NULL OR COALESCE(json_extract(metrics,'$.scope'),'host') = ?
+                       CASE WHEN ? THEN metrics
+                            WHEN ? IS NULL OR COALESCE(json_extract(metrics,'$.scope'),'host') = ?
                             THEN json_extract(metrics, ?) END,
                        COALESCE(json_extract(metrics,'$.scope'),'host') || ':' ||
                        CASE WHEN ? THEN COALESCE(json_extract(metrics, '$.gpu_generation'), '') || ':' ||
@@ -676,14 +684,16 @@ class History:
                 FROM host_ticks WHERE machine=? AND at BETWEEN ? AND ?
                 AND (? IS NULL OR boot=? OR (boot IS NULL AND status NOT IN ('normal','warning')))
                 ORDER BY at
-                """, (measure_scope,measure_scope,'$.'+HOST_METRICS[metric],metric in ('gpu','power'),
+                """, (machine_view,measure_scope,measure_scope,'$.'+HOST_METRICS[metric],metric in ('gpu','power'),
                       machine,start,now,boot,boot))
         if include_warm:
-            warm = self.warm_series(db, machine, gpu, metric, start, now, boot, measure_scope)
+            warm = self.warm_series(db, machine, gpu, metric, start, now, boot, measure_scope, machine_view=machine_view)
             rows = merge(rows, warm, key=lambda row:row[0])
+        if machine_view:
+            return machine_resource_points(rows, metric, start, bucket, stale)
         return downsample(rows, start, bucket, stale)
 
-    def warm_series(self, db, machine, gpu, metric, start, now, boot, scope):
+    def warm_series(self, db, machine, gpu, metric, start, now, boot, scope, *, machine_view=False):
         if gpu:
             column = GPU_METRICS[metric]
             return db.execute(f"""
@@ -699,7 +709,8 @@ class History:
                 """, (metric=='power',gpu,machine,start,now,boot,boot))
         return db.execute("""
             SELECT h.at,h.boot,h.epoch,
-                   CASE WHEN ? IS NULL OR COALESCE(json_extract(h.metrics,'$.scope'),'host') = ?
+                   CASE WHEN ? THEN h.metrics
+                        WHEN ? IS NULL OR COALESCE(json_extract(h.metrics,'$.scope'),'host') = ?
                         THEN json_extract(h.metrics,?) END,
                    COALESCE(json_extract(h.metrics,'$.scope'),'host') || ':' ||
                    CASE WHEN ? THEN COALESCE(k.signature,'') || ':' ||
@@ -710,7 +721,7 @@ class History:
             WHERE m.identity=? AND h.at BETWEEN ? AND ?
             AND (? IS NULL OR h.boot=? OR (h.boot IS NULL AND h.status NOT IN ('normal','warning')))
             ORDER BY h.at
-            """, (scope,scope,'$.'+HOST_METRICS[metric],metric in ('gpu','power'),machine,start,now,boot,boot))
+            """, (machine_view,scope,scope,'$.'+HOST_METRICS[metric],metric in ('gpu','power'),machine,start,now,boot,boot))
 
 
 def combine_source_points(columns, start, bucket, stale):
@@ -733,7 +744,45 @@ def combine_source_points(columns, start, bucket, stale):
     return result
 
 
-def downsample(rows, start, bucket, stale):
+def machine_resource_points(rows, metric, start, bucket, stale):
+    def readings():
+        for at, boot, epoch, packed, _, sample_stale in rows:
+            data = json.loads(packed)
+            scope = data.get('scope') or 'host'
+            if metric == 'cpu':
+                cpu = data.get('cpu_percent')
+                reading = (cpu, True) if known(cpu) else (None, False)
+            else:
+                memory, percent = memory_reading(data)
+                value = percent if metric == 'memory' else (memory or {}).get('used_bytes')
+                reading = value, memory is not None or percent is not None
+            yield at, boot, epoch, reading, scope, sample_stale
+
+    return downsample(readings(), start, bucket, stale, latest_resource=True)
+
+
+def combine_machine_resource_points(columns, start, bucket, stale):
+    by_slot = {}
+    for source, points in enumerate(columns):
+        for point in points:
+            slot = (point['time']-start)//bucket if bucket else point['time']
+            previous = by_slot.get(slot)
+            if previous is None or point['_priority'] > previous[1]['_priority']:
+                by_slot[slot] = source, point
+    result = []
+    previous_source, previous_at = None, None
+    for slot in sorted(by_slot):
+        source, point = by_slot[slot]
+        _, host, _ = point.pop('_priority')
+        provenance = source, host
+        broken = provenance != previous_source or point['time']-previous_at > max(stale, bucket*1.5)
+        result.append(dict(point, breaks=[point['breaks'][0] or broken]))
+        previous_source = provenance if point['values'][0] is not None else None
+        previous_at = point['time']
+    return result
+
+
+def downsample(rows, start, bucket, stale, *, latest_resource=False):
     points = []
     previous = None
     group_key = (lambda row:(row[0]-start)//bucket) if bucket else (lambda row:row[0])
@@ -743,6 +792,8 @@ def downsample(rows, start, bucket, stale):
         total = 0
         gap = False
         for at, boot, epoch, value, kind, sample_stale in rows_in_bucket:
+            if latest_resource:
+                value, available = value
             identity = (boot, epoch, kind)
             if previous is None or previous[1] != identity or at-previous[0] > previous[2]:
                 gap = True
@@ -754,6 +805,12 @@ def downsample(rows, start, bucket, stale):
             else:
                 gap = True
                 previous = None
+        if latest_resource:
+            # Select one observation per source per slot. Keep its availability even
+            # when the selected memory reading cannot provide this particular unit.
+            points.append({'time':at, 'values':[value], 'breaks':[gap], 'valid':[int(value is not None)],
+                           'samples':total, '_priority':(available, kind == 'host', at)})
+            continue
         # A bucket crossing a boot, collector restart, or measured power mode stays a gap.
         compatible = len(identities) == 1
         points.append({'time':at, 'values':[sum(values)/len(values) if compatible else None],

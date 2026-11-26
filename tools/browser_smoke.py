@@ -1460,7 +1460,7 @@ def check_people_directory(browser):
                     if width == 1440:
                         page.locator(".machine-scroll").screenshot(path=str(OUT / f"assignees-list-desktop-{locale}.png"))
                     if width == 320:
-                        page.locator(".machine-scroll").screenshot(path=str(OUT / f"assignees-list-{locale}.png"))
+                        page.screenshot(path=str(OUT / f"assignees-list-{locale}.png"), full_page=True)
                     layout_results.append({"locale": locale, "width": width, "detail": detail, "list": listing})
                     row.locator(".row-open").click()
 

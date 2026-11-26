@@ -27,3 +27,22 @@ Commands ran in the replay worktree using the task virtual environment, Python 3
 ## Scope
 
 Evidence comes from synthetic host and device fixtures, temporary SQLite and Chromium with the in-process HTTP API or intercepted requests. Real SSH, physical GPU or Windows machines, other browser engines and instance deployment are outside this verification. AN-218 is the independent review. Its task remains open in this active change.
+
+## Independent review and local integration (AN-218 / AN-202)
+
+On 2026-11-26 Reviewer-DeepSeek (DeepSeek 4.1 Flash) passed the six-commit
+handoff in AN-218 (comment `01a2179c-ffab-7d7f-b2e5-57d2cf82dd19`). The reviewer
+applied the patch in an independent checkout on `10f966f2d0da4390d3de5502b0dadcab85056642`
+and matched tree `69b7560d2f7c74ef8a40737b82ba01745f3479ef`.
+
+The reviewer reran 83 tests, both Chromium smoke checks, OpenSpec 1.14.2 strict
+change validation, JavaScript syntax and localization checks, and the Git diff
+check. Independent probes covered scope deletion, conflicts and invalid
+selections, explicit zero at each level, omitted fields, failed writes,
+invalid input and collection alert evidence.
+
+Mika replayed the same reviewed tree, recorded the review and synchronized the
+Linux GPU occupancy, machine registry, overview and resource group specifications.
+The closure commit adds OpenSpec records only. The verification used synthetic
+GPU XML, temporary SQLite and isolated Chromium. Live SSH, physical GPUs,
+Windows and container hosts, and production deployment were outside its scope.

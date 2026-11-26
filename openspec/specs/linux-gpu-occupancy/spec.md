@@ -10,68 +10,60 @@ trust the resulting occupancy state and collection warning.
 
 ### Requirement: Configurable Linux idle memory tolerance
 
-For Linux hosts, the default idle memory tolerance SHALL be 256 MiB per card. An explicit
-per-machine `idle_memory_tolerance_mib` value, including 0, SHALL take precedence over
-that default. The tolerance SHALL apply per GPU to used framebuffer memory, not to total
-capacity.
+Wattline SHALL resolve the Linux host idle tolerance per card from machine, member cluster, room and global in descending order. The built-in global fallback SHALL be 256 MiB. The tolerance SHALL apply to used framebuffer memory per GPU.
 
 #### Scenario: Existing configuration without the field
 
-- **WHEN** a Linux machine is loaded from configuration that omits
-  `idle_memory_tolerance_mib`
-- **THEN** its tolerance is 256 MiB and small residual VRAM does not by itself make an
-  idle card unknown.
+- **WHEN** a Linux machine omits a local tolerance and no higher-than-default value applies
+- **THEN** the tolerance is 256 MiB and small residual VRAM does not by itself make an idle card unknown
 
 #### Scenario: Explicit per-machine override
 
-- **WHEN** a Linux machine explicitly sets `idle_memory_tolerance_mib` to 0 or another
-  non-negative value
-- **THEN** that value is used instead of the 256 MiB default.
+- **WHEN** a Linux machine explicitly sets zero or another non-negative value
+- **THEN** it overrides cluster, room and global values
+
+#### Scenario: Clear overrides successively
+
+- **WHEN** machine, cluster, room and global overrides are removed in order
+- **THEN** the effective threshold and reported source move through cluster, room, global and the built-in default
 
 ### Requirement: Edit the effective Linux GPU tolerance
 
-Wattline SHALL show the effective per-card tolerance in Machine details → Configure
-for Linux GPU hosts and accept a finite non-negative number of MiB, including zero.
-The settings API SHALL report the effective value.
+Wattline SHALL show the local override or inherited state, effective per-card value and source in Machine details → Configure for Linux GPU hosts. It SHALL accept finite non-negative MiB, including zero, and clearing the override. The settings API SHALL report the effective value and source.
 
 #### Scenario: Localized setting and saved readback
 
-- **WHEN** an operator opens the settings in either supported language and saves a valid
-  tolerance
-- **THEN** the localized control shows the current value, the save response and
-  subsequent reads report the new value, and later samples use it without a service restart
+- **WHEN** an operator saves a tolerance or clears it in either language
+- **THEN** the response and later reads show the effective value and source, and the next sample uses that policy without a restart
 
 #### Scenario: Inapplicable device
 
-- **WHEN** the operator opens settings for Windows, a known container endpoint, a CPU
-  machine or a storage device
-- **THEN** the tolerance control is hidden
+- **WHEN** an operator opens settings for Windows, a known container endpoint, a CPU machine or storage
+- **THEN** the machine tolerance control is hidden
 
 ### Requirement: Preserve the tolerance across settings updates
 
-A successfully saved override SHALL take precedence over the base configuration and
-survive service restart. An omitted field SHALL preserve the effective value and its
-inheritance. An invalid value or failed write SHALL preserve both the effective and
-stored settings.
+A saved override or explicit clear SHALL survive restart. Omitted request fields SHALL preserve the existing local state. Invalid values and failed writes SHALL preserve stored and effective policy.
 
 #### Scenario: Existing machine or client
 
-- **WHEN** an old settings row or a settings request omits the threshold
-- **THEN** Wattline uses any stored override, the explicit base configuration if present,
-  or the 256 MiB default
+- **WHEN** an old settings row or client omits the tolerance
+- **THEN** a numeric stored override or explicit file threshold still applies, and a machine with neither inherits
 
 #### Scenario: Existing registration serialized the old default
 
-- **WHEN** a machine registered before AN-211 has 0 MiB in its registration record
-  and its settings omit the threshold
-- **THEN** the machine inherits the 256 MiB default
+- **WHEN** an old registration contains the implicit zero and its settings omit the threshold
+- **THEN** the machine inherits its applicable cluster, room or global value
+
+#### Scenario: Clear a file-configured threshold
+
+- **WHEN** an operator clears a machine with an explicit file threshold
+- **THEN** the machine inherits and continues to inherit after unrelated updates and restart
 
 #### Scenario: Rejected update
 
-- **WHEN** the service receives a negative or non-finite value, or the settings
-  transaction fails
-- **THEN** the API returns an error and later samples and reads use the previously
-  effective threshold, including after restart
+- **WHEN** a tolerance is negative or non-finite, or the transaction fails
+- **THEN** the API reports failure and subsequent reads and samples use the previous policy, including after restart
 
 ### Requirement: Linux GPU occupancy classification
 
@@ -105,8 +97,7 @@ the returned count.
 
 - **WHEN** `attached_gpus` reports two GPUs and the XML returns one valid GPU record with
   128 MiB used VRAM and an empty process table
-- **THEN** the inventory is unverified, that GPU is `unknown` and the occupancy warning
-  is emitted when enabled.
+- **THEN** the inventory is unverified, that GPU is `unknown`, and the device reports the inventory diagnostic.
 
 #### Scenario: Reported count is invalid
 
@@ -122,15 +113,14 @@ the returned count.
 ### Requirement: Unverifiable occupancy evidence
 
 When no valid PID is observed, missing used VRAM, incomplete GPU inventory or incomplete
-process enumeration SHALL keep the affected GPU unknown. When any visible GPU remains
-unknown and occupancy warnings are enabled, Wattline SHALL report the existing
-“部分 GPU 占用状态无法核实” warning.
+process enumeration SHALL keep the affected GPU unknown. A valid machine sample SHALL
+report occupancy independently of the collection issue lifecycle defined by in-app-alerts.
 
 #### Scenario: Evidence cannot prove idle
 
-- **WHEN** no valid PID is observed and any idle evidence is unavailable due to missing
-  used VRAM, incomplete inventory or incomplete process enumeration
-- **THEN** the GPU state is unknown and the occupancy warning is emitted when enabled.
+- **WHEN** a valid sample returns no valid PID and idle evidence is missing because of
+  unavailable used VRAM, incomplete inventory or incomplete process enumeration
+- **THEN** the GPU state is unknown and the sample opens no collection issue.
 
 ### Requirement: Windows and container occupancy
 
@@ -149,3 +139,26 @@ PID is observed or `unknown` otherwise, independently of used VRAM.
 - **WHEN** process checks are enabled and the container reports a visible GPU
 - **THEN** process visibility is `partial`. Occupancy is `occupied` if a valid PID is
   observed and `unknown` otherwise.
+
+### Requirement: Resolve conflicting cluster overrides explicitly
+
+Machines SHALL inherit agreeing explicit member-cluster values independent of listing order. Conflicting values SHALL use a valid chosen member cluster for the field or fall back to room and global. Configuration SHALL identify the competing clusters, any chosen source and an unusable selection.
+
+#### Scenario: Conflict introduction and recovery
+
+- **WHEN** a machine without an override belongs to two differently configured clusters
+- **THEN** it shows the conflict and effective fallback until the operator selects an eligible source or the cluster values come into agreement
+
+#### Scenario: Membership or room changes
+
+- **WHEN** a selected cluster is removed, no longer includes the machine, or clears its override
+- **THEN** the selection can be corrected or cleared and a remaining unresolved conflict uses the current room or global value
+
+### Requirement: Keep samples aligned with their captured policy
+
+A sample SHALL use the effective value captured when collection begins. The latest sample SHALL retain its captured policy in API readback while it is displayed.
+
+#### Scenario: Change while collection is underway
+
+- **WHEN** an operator saves a configuration or membership change during a sample
+- **THEN** current configuration reflects the successful write, the in-flight sample retains its starting policy, and the next sample uses the newly resolved policy

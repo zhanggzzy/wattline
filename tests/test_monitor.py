@@ -7,6 +7,7 @@ import time
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 import pytest
 
 from wattline.app import create_app
@@ -130,6 +131,113 @@ def test_monitor_probe_nvidia_power_and_host_fields(tmp_path, monkeypatch):
     waiting = host_probe.monitor(config)
     assert waiting['gpus'] == [] and waiting['memory'] == sample['memory']
     assert any('nvidia-smi' in warning for warning in waiting['warnings'])
+
+
+def test_idle_memory_tolerance_configuration_defaults():
+    def load(**settings):
+        payload = {'data_dir':'data', 'machines':[{
+            'id':'lab-01', 'mode':'ssh', 'ssh_alias':'lab-01', 'expected_host_id':ID, **settings}]}
+        return Config.model_validate_json(json.dumps(payload)).machines[0]
+
+    assert load().idle_memory_tolerance_mib == 256
+    assert load(idle_memory_tolerance_mib=0).idle_memory_tolerance_mib == 0
+    assert load(idle_memory_tolerance_mib=512).idle_memory_tolerance_mib == 512
+
+
+def idle_gpu_xml(used='0 MiB', *, processes='None', mig=None, inventory=''):
+    memory = (f'<fb_memory_usage><used>{used}</used><total>98304 MiB</total></fb_memory_usage>'
+              if used else '')
+    mig_xml = f'<mig_mode><current_mig>{mig}</current_mig></mig_mode>' if mig else ''
+    return (f'<nvidia_smi_log>{inventory}<gpu><uuid>{GPU}</uuid>{mig_xml}{memory}'
+            f'<processes>{processes}</processes></gpu></nvidia_smi_log>').encode()
+
+
+@pytest.mark.parametrize(('options', 'xml', 'state'), [
+    ({}, idle_gpu_xml('0 MiB'), 'free'),
+    ({}, idle_gpu_xml('256 MiB'), 'free'),
+    ({}, idle_gpu_xml('256.5 MiB'), 'unknown'),
+    ({'idle_memory_tolerance_mib':0}, idle_gpu_xml('128 MiB'), 'unknown'),
+    ({'idle_memory_tolerance_mib':2048}, idle_gpu_xml('1024 MiB'), 'free'),
+    ({}, idle_gpu_xml('0 MiB', processes='<process_info><pid>93</pid></process_info>'), 'occupied'),
+    ({}, idle_gpu_xml(''), 'unknown'),
+    ({}, idle_gpu_xml('0 MiB', processes='N/A'), 'unknown'),
+    ({}, idle_gpu_xml('0 MiB', mig='Enabled'), 'unknown'),
+    ({'expected_gpu_count':2}, idle_gpu_xml('0 MiB'), 'unknown'),
+], ids=['default-zero', 'default-boundary', 'above-boundary', 'explicit-zero',
+        'explicit-high', 'occupied-process', 'missing-used', 'partial-enumeration',
+        'mig-partial', 'incomplete-inventory'])
+def test_linux_gpu_occupancy_tolerance(tmp_path, monkeypatch, options, xml, state):
+    proc = tmp_path/'proc'
+    proc.mkdir()
+    (proc/'uptime').write_text('1000.00 0')
+    monkeypatch.setattr(host_probe.subprocess, 'run',
+                        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=xml))
+    warnings = []
+    gpu = host_probe.monitor_gpus(dict(options), proc, warnings)['gpus'][0]
+    assert gpu['state'] == state
+    assert '部分 GPU 占用状态无法核实' not in warnings
+
+
+@pytest.mark.parametrize(('inventory', 'complete', 'state'), [
+    pytest.param('', True, 'free', id='absent'),
+    pytest.param('<attached_gpus> 1 </attached_gpus>', True, 'free', id='matching'),
+    pytest.param('<attached_gpus>01</attached_gpus>', True, 'free', id='leading-zero'),
+    pytest.param('<attached_gpus>2</attached_gpus>', False, 'unknown', id='mismatch'),
+    pytest.param('<attached_gpus>0</attached_gpus>', False, 'unknown', id='reports-zero'),
+    pytest.param('<attached_gpus>-1</attached_gpus>', False, 'unknown', id='negative'),
+    pytest.param('<attached_gpus>1.0</attached_gpus>', False, 'unknown', id='fractional'),
+    pytest.param('<attached_gpus> </attached_gpus>', False, 'unknown', id='blank'),
+    pytest.param('<attached_gpus>N/A</attached_gpus>', False, 'unknown', id='unavailable'),
+    pytest.param('<attached_gpus>1</attached_gpus>' * 2, False, 'unknown', id='duplicate'),
+    pytest.param('<attached_gpus>1<count/></attached_gpus>', False, 'unknown', id='nested'),
+    pytest.param('<attached_gpus>2</attached_gpus>', False, 'occupied', id='pid-priority'),
+])
+async def test_linux_gpu_inventory_count_and_collection_validity(tmp_path, monkeypatch, inventory, complete, state):
+    host = machine(checks=('gpu', 'processes'))
+    (tmp_path/'uptime').write_text('1000.00 0')
+    used, processes = '128 MiB', 'None'
+    if state == 'occupied':
+        used, processes = 'N/A', 'N/A<process_info><pid>93</pid></process_info>'
+    xml = idle_gpu_xml(used, processes=processes, inventory=inventory)
+    monkeypatch.setattr(host_probe.subprocess, 'run',
+                        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=xml))
+
+    async def collect(node):
+        warnings = []
+        measured = host_probe.monitor_gpus(
+            {'idle_memory_tolerance_mib':node.idle_memory_tolerance_mib}, tmp_path, warnings)
+        return dict(data(), **measured, warnings=warnings)
+
+    monitor = Monitor(Config(data_dir=tmp_path, machines=(host,)), collect)
+    try:
+        snapshot = await monitor.observe(host)
+        metrics = snapshot['metrics']
+        gpu, = metrics['gpus']
+        assert metrics['gpu_inventory_complete'] is monitor.inventory_complete[host.id] is complete
+        assert (gpu['state'], gpu['process_visibility']) == (
+            state, 'partial' if state == 'occupied' else 'complete')
+        assert ('GPU 清单与配置不符或不可见，无法核实空闲状态' in snapshot['warnings']) is not complete
+        assert '部分 GPU 占用状态无法核实' not in snapshot['warnings']
+        assert monitor.compute_alert(host, snapshot)[4] == {}
+    finally:
+        await monitor.close()
+
+
+@pytest.mark.parametrize(('processes', 'state'), [
+    ('None', 'unknown'),
+    ('<process_info><pid>93</pid></process_info>', 'occupied'),
+])
+def test_container_view_keeps_partial_process_visibility(tmp_path, monkeypatch, processes, state):
+    proc = tmp_path/'proc'
+    proc.mkdir()
+    (proc/'uptime').write_text('1000.00 0')
+    xml = idle_gpu_xml(processes=processes)
+    monkeypatch.setattr(host_probe.subprocess, 'run',
+                        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=xml))
+    warnings = []
+    gpu = host_probe.monitor_gpus({'idle_memory_tolerance_mib':256}, proc, warnings, host_processes=False)['gpus'][0]
+    assert (gpu['state'], gpu['process_visibility']) == (state, 'partial')
+    assert '部分 GPU 占用状态无法核实' not in warnings
 
 
 @pytest.mark.parametrize(('case', 'verified'), [
@@ -834,7 +942,7 @@ def test_display_alias_migrates_and_persists_under_fixed_machine_identity(tmp_pa
 
 
 def set_legacy_registry_version(db, version):
-    for table in ('cluster_resources','resource_rooms','resource_order','clusters','rooms',
+    for table in ('global_configuration','cluster_resources','resource_rooms','resource_order','clusters','rooms',
                       'storage_ticks','storage_resources','alerts','shared_users'):
         db.execute(f'DROP TABLE {table}')
     db.execute('DROP TABLE machine_assignees')
@@ -1311,3 +1419,193 @@ async def test_settings_replace_sampler_without_overlap_and_disabled_hosts_stay_
         assert service.snapshot()['machines'][0]['status'] == 'disabled'
     finally:
         await service.close()
+
+
+async def test_gpu_tolerance_settings_apply_to_later_samples_and_persist(tmp_path, monkeypatch):
+    field = 'idle_memory_tolerance_mib'
+    settings = {'checks':['gpu', 'processes'], 'interval_seconds':10}
+    host = machine(checks=tuple(settings['checks']))
+    file_override = machine('lab-02', 'b'*32, enabled=False, idle_memory_tolerance_mib=0)
+    legacy_registration = machine('lab-03', 'c'*32, idle_memory_tolerance_mib=0)
+    config = Config(data_dir=tmp_path, machines=(host, file_override))
+    history = History(tmp_path)
+    history.prepare()
+    try:
+        for node, registration in ((file_override, None), (legacy_registration, legacy_registration.model_dump_json())):
+            history.save_machine(node.history_key, registration, json.dumps({'enabled':False}), None, {})
+    finally:
+        history.close()
+
+    (tmp_path/'uptime').write_text('1000.00 0')
+    used = '256 MiB'
+    monkeypatch.setattr(host_probe.subprocess, 'run',
+                        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=idle_gpu_xml(used)))
+    thresholds = []
+
+    async def transport(argv, payload, timeout):
+        options = json.loads(payload)
+        assert options['checks'] == settings['checks']
+        thresholds.append(options[field])
+        warnings = []
+        measured = host_probe.monitor_gpus(options, tmp_path, warnings)
+        return 0, json.dumps({'data':dict(data(), **measured, warnings=warnings)}).encode(), b''
+
+    clock = ManualTime()
+    service = Monitor(config, Collector(config, transport), clock.clock, clock.sleep, lambda: clock.seconds)
+    url = f'/api/machines/{host.id}/settings'
+
+    async def read_nodes(client):
+        response = await client.get('/api/snapshot')
+        assert response.status_code == 200
+        return {node['id']:node for node in response.json()['machines']}
+
+    async def expect_sample(client, at, tolerance, state):
+        await eventual(lambda: service.latest.get(host.id, {}).get('observed_at') == at)
+        node = (await read_nodes(client))[host.id]
+        assert thresholds[-1] == node[field] == tolerance
+        assert node['metrics']['gpus'][0]['state'] == state
+        assert '部分 GPU 占用状态无法核实' not in node['warnings']
+
+    app = create_app(config, monitor=service)
+    async with app.router.lifespan_context(app), AsyncClient(
+        transport=ASGITransport(app=app), base_url='http://127.0.0.1'
+    ) as client:
+        await expect_sample(client, clock.clock(), 256, 'free')
+        sampler = service.samplers[host.id]
+        nodes = await read_nodes(client)
+        assert nodes[file_override.id][field] == 0
+        assert nodes[legacy_registration.id][field] == 256
+        for node, expected in ((file_override, 0), (legacy_registration, 256)):
+            response = await client.put(f'/api/machines/{node.id}/settings', json={'enabled':False})
+            assert response.status_code == 200 and response.json()[field] == expected
+
+        tolerance = 300.50000000000006
+        response = await client.put(url, json=dict(settings, **{field:tolerance}))
+        assert response.status_code == 200 and response.json()[field] == tolerance
+        assert (await read_nodes(client))[host.id][field] == tolerance
+        assert thresholds == [256] and service.samplers[host.id] is sampler
+        assert (await client.put(url, json=settings)).json()[field] == tolerance
+        stored = {identity:json.loads(values) for identity, _, values in service.history.machine_settings()}
+        assert stored[host.history_key][field] == tolerance
+        assert field not in stored[file_override.history_key]
+        assert field not in stored[legacy_registration.history_key]
+        used = f'{tolerance} MiB'
+        clock.advance(10)
+        await expect_sample(client, clock.clock(), tolerance, 'free')
+        used = '300.75 MiB'
+        clock.advance(10)
+        await expect_sample(client, clock.clock(), tolerance, 'unknown')
+
+        assert (await client.put(url, json=dict(settings, **{field:0}))).json()[field] == 0
+        assert (await client.put(url, json=settings)).json()[field] == 0
+        used = '0 MiB'
+        clock.advance(10)
+        await expect_sample(client, clock.clock(), 0, 'free')
+        saved_rows = service.history.machine_settings()
+        for raw_value in ('-1', '1e309', 'NaN', 'Infinity', '-Infinity', 'true', '"12"', '{"value": NaN}'):
+            body = json.dumps(dict(settings, **{field:'value'})).replace('"value"', raw_value)
+            response = await client.put(url, content=body, headers={'Content-Type':'application/json'})
+            assert response.status_code == 422
+            assert response.json()['detail'][0]['loc'] == ['body', field]
+
+        # Fail after the transaction has already attempted to update the settings row.
+        with service.history.connect() as db:
+            db.execute("""CREATE TRIGGER reject_alias BEFORE INSERT ON machine_aliases
+                          BEGIN SELECT RAISE(ABORT, 'synthetic settings failure'); END""")
+        response = await client.put(url, json=dict(settings, alias='will fail', **{field:800}))
+        assert response.status_code == 503
+        assert service.history.machine_settings() == saved_rows
+        assert service.samplers[host.id] is sampler
+        used = '1 MiB'
+        clock.advance(10)
+        await expect_sample(client, clock.clock(), 0, 'unknown')
+
+    service = Monitor(config, Collector(config, transport), clock.clock, clock.sleep, lambda: clock.seconds)
+    app = create_app(config, monitor=service)
+    async with app.router.lifespan_context(app), AsyncClient(
+        transport=ASGITransport(app=app), base_url='http://127.0.0.1'
+    ) as client:
+        await expect_sample(client, clock.clock(), 0, 'unknown')
+        nodes = await read_nodes(client)
+        assert nodes[file_override.id][field] == 0
+        assert nodes[legacy_registration.id][field] == 256
+
+
+async def test_layered_tolerance_uses_membership_at_start_of_each_sample(tmp_path, monkeypatch):
+    field = 'idle_memory_tolerance_mib'
+    host = machine(checks=('gpu', 'processes'))
+    config = Config(data_dir=tmp_path, machines=(host,))
+    clock = ManualTime()
+    (tmp_path/'uptime').write_text('1000.00 0')
+    monkeypatch.setattr(host_probe.subprocess, 'run',
+                        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=idle_gpu_xml('300 MiB')))
+    started, finish = asyncio.Event(), asyncio.Event()
+    captured = []
+
+    async def transport(_argv, payload, _timeout):
+        options = json.loads(payload)
+        captured.append(options[field])
+        if len(captured) == 2:
+            started.set()
+            await finish.wait()
+        warnings = []
+        measured = host_probe.monitor_gpus(options, tmp_path, warnings)
+        return 0, json.dumps({'data':dict(data(), **measured, warnings=warnings)}).encode(), b''
+
+    service = Monitor(config, Collector(config, transport), clock.clock, clock.sleep, lambda: clock.seconds)
+    app = create_app(config, monitor=service)
+    async with app.router.lifespan_context(app), AsyncClient(
+        transport=ASGITransport(app=app), base_url='http://127.0.0.1'
+    ) as client:
+        async def mutation(method, path, **values):
+            response = await client.request(method, path, json=values)
+            response.raise_for_status()
+            return response.json()
+
+        async def sample(value, source, state):
+            await eventual(lambda: service.latest.get(host.id, {}).get('observed_at') == clock.clock())
+            snapshot = (await client.get('/api/snapshot')).json()
+            node = snapshot['machines'][0]
+            seen = node['sample_idle_memory_configuration']
+            assert (seen['effective'], seen['source']['scope'], captured[-1]) == (value, source, value)
+            assert node['metrics']['gpus'][0]['state'] == state
+            assert snapshot['alerts']['events'] == []
+            return node
+
+        await sample(256, 'default', 'unknown')
+        await mutation('PUT', '/api/configuration', **{field:400})
+        room = (await mutation('POST', '/api/rooms', name='East', **{field:280}))['id']
+        west = (await mutation('POST', '/api/rooms', name='West', **{field:410}))['id']
+        await mutation('PUT', f'/api/resources/{host.id}/room', room_id=room)
+        main = (await mutation('POST', '/api/clusters', name='Primary', members=[host.id], **{field:320}))['id']
+        await mutation('POST', '/api/clusters', name='Other', members=[host.id], **{field:220})
+        clock.advance(10)
+        await asyncio.wait_for(started.wait(), 3)
+        try:
+            settings = dict(checks=['gpu', 'processes'], interval_seconds=10)
+            edited = await mutation('PUT', f'/api/machines/{host.id}/settings', **settings,
+                                    room_id=west, configuration_cluster_id=main)
+            assert edited['idle_memory_configuration']['source'] == {'scope':'cluster', 'ids':[main]}
+            assert edited[field] == 320
+        finally:
+            finish.set()
+        in_flight = await sample(280, 'room', 'unknown')
+        assert in_flight[field] == 320 and in_flight['room_id'] == west
+        assert in_flight['sample_idle_memory_configuration']['cluster_conflict']
+        sampler = service.samplers[host.id]
+        clock.advance(10)
+        latest = await sample(320, 'cluster', 'free')
+        assert latest['sample_idle_memory_configuration'] == latest['idle_memory_configuration']
+        await mutation('POST', '/api/clusters', name='Third', members=[host.id], **{field:440})
+        await mutation('PUT', f'/api/clusters/{main}', name='Primary', members=[])
+        clock.advance(10)
+        latest = await sample(410, 'room', 'free')
+        assert latest['idle_memory_configuration']['invalid_cluster_selection']
+        assert latest['idle_memory_configuration']['cluster_conflict']
+        await mutation('PUT', f'/api/rooms/{west}', name='West', **{field:None})
+        clock.advance(10)
+        await sample(400, 'global', 'free')
+        await mutation('PUT', '/api/configuration', **{field:None})
+        clock.advance(10)
+        await sample(256, 'default', 'unknown')
+        assert service.samplers[host.id] is sampler

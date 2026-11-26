@@ -8,13 +8,16 @@ import sqlite3
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Path as PathParameter, Query, Request, Response
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .collector import CollectionError
 from .config import (
-    AliasUpdate, MachineAssignees, MachineId, MachineOrder, MachineRegistration, MachineRemoval, MachineSettings, PersonName,
+    AliasUpdate, GlobalConfiguration, MachineAssignees, MachineId, MachineOrder, MachineRegistration,
+    MachineRemoval, MachineSettings, PersonName,
 )
 from .groups import ClusterSettings, ResourceLocation, ResourceOrder, RoomSettings
 from .history import GPU_METRICS, HOST_METRICS, OVERVIEW_METRICS, WARM_HOURS
@@ -52,6 +55,15 @@ def create_app(config, *, monitor=None):
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=['127.0.0.1','localhost'], www_redirect=False)
     app.mount('/static', StaticFiles(directory=STATIC), name='static')
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, error: RequestValidationError):
+        errors = error.errors()
+        if any(item['loc'] == ('body', 'idle_memory_tolerance_mib') for item in errors):
+            # An invalid tolerance can contain non-finite values that JSON cannot echo.
+            error = RequestValidationError([{key: value for key, value in item.items() if key != 'input'}
+                                            for item in errors])
+        return await request_validation_exception_handler(request, error)
 
     @app.middleware('http')
     async def access(request: Request, call_next):
@@ -257,6 +269,10 @@ def create_app(config, *, monitor=None):
             raise HTTPException(409, str(error)) from error
         except (OSError, sqlite3.Error) as error:
             raise HTTPException(503, 'group_save_failed') from error
+
+    @app.put('/api/configuration', dependencies=[Depends(same_origin_json)])
+    async def global_configuration(body: GlobalConfiguration):
+        return await group_mutation(service.configure_global_idle, body)
 
     @app.post('/api/rooms', status_code=201, dependencies=[Depends(same_origin_json)])
     async def add_room(body: RoomSettings):

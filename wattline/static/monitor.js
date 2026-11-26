@@ -339,7 +339,8 @@ function overviewPage(hosts) {
   const issues = hosts.filter(host => ['warning','offline','unknown','stale'].includes(host.status));
   return `<section class="page-title"><div><p class="eyebrow">WATTLINE / OVERVIEW</p>${heading(t('compute_at_a_glance'))}
       <p>${t('current_machine_and_physical_gpu_status_with_trends_over_the_last')}</p></div>
-      <button type="button" class="control primary-control" data-add-machine ${configUnavailable() ? 'disabled' : ''}>${t(typedResources() ? 'add_resource' : 'add_machine')}</button></section>
+      <div class="title-actions">${globalConfigurationButton()}
+      <button type="button" class="control primary-control" data-add-machine ${configUnavailable() ? 'disabled' : ''}>${t(typedResources() ? 'add_resource' : 'add_machine')}</button></div></section>
     ${overviewCards()}
     <div class="overview-stack">
       ${typedResources() ? overviewAlerts(state.snapshot.alerts) : `<section class="panel attention-panel">
@@ -695,10 +696,7 @@ function hostPage(host, device) {
     ${windowsHost(host) ? ' · Windows' : ''}${container ? t('container_scope_m077') : ''}${device ? ' · '+escape(device.name || 'NVIDIA GPU') : ''}</p>
     ${assigneeSummary(host)}${deviceGroupLinks(host)}</div>
     <div class="title-actions"><span class="time">${t('last_valid_sample')} ${field('host-time')}</span>
-    <div class="machine-settings-actions">
-    <button type="button" class="control" data-configure-machine ${configUnavailable() ? 'disabled' : ''}>${t('configure')}</button>
-    <button type="button" class="control" data-edit-assignees ${configUnavailable() ? 'disabled' : ''}>${t('assignees')}</button></div>
-    <button type="button" class="control danger-control" data-remove-machine ${configUnavailable() ? 'disabled' : ''}>${t('remove_node')}</button></div></section>
+    <button type="button" class="control" data-configure-machine ${configUnavailable() ? 'disabled' : ''}>${t('configure')}</button></div></section>
     ${typedResources() ? deviceAlerts(host) : ''}
     ${container ? `<p class="message scope-note"><strong>${t('container_scope')}</strong> ${t('cpu_and_memory_describe_this_container_gpu_metrics_cover_visible_')}</p>` : ''}
     ${host.reason || host.warnings?.length ? '<p class="message">'+escape(reason(host))+'</p>' : ''}
@@ -1077,6 +1075,7 @@ async function refresh() {
   }
   if (state.machine && !getHost()) openHost(null);
   if (state.page === 'group' && !detailGroup()) openHost(null);
+  if (machineDialog.open && machineForm.dataset.machine) updateMachineConfiguration(getHost());
   if (state.page === 'alerts' && (state.alerts?.events.length ?? 0) <= 200 &&
       performance.now()-(state.alertRefreshAt ?? 0) > 10000) void loadAlerts();
   const replaced = state.gpu && !getDevice(getHost());
@@ -1382,6 +1381,31 @@ function updateProcessCheck() {
   if (processCheck.disabled) processCheck.checked = false;
 }
 
+function isLinuxGpu(host, kind = host?.configured_hardware_kind ?? '', gpu = host?.require_gpu) {
+  return Boolean(host && !host.storage_kind && (kind === 'gpu' || (!kind && gpu))
+    && !windowsHost(host) && host.scope !== 'container');
+}
+
+function updateMachineConfiguration(host) {
+  const policy = host?.idle_memory_configuration;
+  const sampled = host?.sample_idle_memory_configuration;
+  const section = byId('machine-sampled-configuration');
+  byId('machine-configuration-summary').textContent = configurationSummary(policy);
+  const differs = policy && sampled && (policy.effective !== sampled.effective
+    || JSON.stringify(policy.source) !== JSON.stringify(sampled.source));
+  section.hidden = !differs || !host.metrics;
+  section.textContent = differs ? t('configuration_latest_sample', {policy:effectiveConfiguration(sampled)}) : '';
+  const conflict = byId('machine-configuration-conflict');
+  conflict.hidden = !policy?.cluster_conflict && !policy?.invalid_cluster_selection;
+  conflict.textContent = [
+    policy?.cluster_conflict ? t('configuration_cluster_conflict') : '',
+    policy?.invalid_cluster_selection ? t('configuration_cluster_ineligible') : '',
+  ].filter(Boolean).join(' ');
+  const assignees = host?.assigned_users?.map(person => person.name) ?? [];
+  byId('machine-assignment-preview').textContent = host?.assignment_mode === 'shared' ? t('shared_user')
+    : assignees.length ? new Intl.ListFormat(i18n.locale).format(assignees) : t('unassigned');
+}
+
 function openMachineDialog(host) {
   machineForm.reset();
   machineForm.dataset.machine = host?.id ?? '';
@@ -1398,6 +1422,20 @@ function openMachineDialog(host) {
   byId('ssh-timeout-field').hidden = local;
   fields.ssh_connect_timeout_seconds.disabled = local;
   fields.ssh_connect_timeout_seconds.value = host?.ssh_connect_timeout_seconds ?? state.snapshot.default_ssh_connect_timeout_seconds;
+  const policy = host?.idle_memory_configuration;
+  initializeTolerance(fields.idle_memory_tolerance_mib, policy ?? {override:host?.idle_memory_tolerance_mib});
+  const source = fields.configuration_cluster_id;
+  source.innerHTML = `<option value="">${t('configuration_cluster_auto')}</option>` +
+    (policy?.cluster_candidates ?? []).map(({id,value}) => `<option value="${escape(id)}">${escape(
+      (groupRecord('cluster',id)?.name ?? id) + ' · ' + configurationValue(value))}</option>`).join('');
+  if (policy?.invalid_cluster_selection) {
+    const id = policy.selected_cluster_id;
+    source.add(new Option(t('configuration_cluster_stale', {name:groupRecord('cluster',id)?.name ?? id}), id));
+  }
+  source.value = source.dataset.savedValue = policy?.selected_cluster_id ?? '';
+  byId('machine-properties-heading').hidden = byId('machine-assignment-section').hidden = !host;
+  machineForm.querySelector('[data-remove-machine]').hidden = !host;
+  updateMachineConfiguration(host);
   fields.enabled.checked = host?.enabled ?? true;
   for (const input of checkboxes) input.checked = !host || checks(host).includes(input.value);
   fields.hardware_kind.value = host?.storage_kind ? 'storage' : host?.configured_hardware_kind ?? '';
@@ -1411,12 +1449,17 @@ function openMachineDialog(host) {
     [...adapters].map(id => `<option value="${escape(id)}">${escape(id)}</option>`).join('');
   fields.adapter.value = host?.adapter ?? '';
   const room = groupedOverview();
+  byId('machine-placement-heading').hidden = !host || !room;
   byId('registration-room').hidden = fields.room_id.disabled = !room;
   fields.room_id.innerHTML = roomOptions(host?.room_id ?? (state.group?.kind === 'room' ? state.group.id : null));
+  const names = (host?.cluster_ids ?? []).map(id => groupRecord('cluster',id)?.name ?? id);
+  byId('machine-clusters').hidden = !host || !room;
+  byId('machine-clusters').textContent = t('configuration_machine_clusters', {
+    clusters:names.length ? new Intl.ListFormat(i18n.locale).format(names) : t('no_cluster'),
+  });
   byId('registration-user').hidden = Boolean(host) || !typedResources();
   fields.resource_user.innerHTML = personOptions(true);
   updateResourceForm();
-  updateProcessCheck();
   machineError.hidden = true;
   machineDialog.showModal();
   (host?.storage_kind ? fields.storage_name : host ? fields.alias : fields.host).focus();
@@ -1428,20 +1471,30 @@ function personOptions(shared = false) {
 }
 
 function updateResourceForm() {
-  const {hardware_kind} = machineForm.elements;
+  const {hardware_kind, idle_memory_tolerance_mib, configuration_cluster_id} = machineForm.elements;
   const storage = hardware_kind.value === 'storage';
   byId('storage-fields').hidden = byId('storage-fields').disabled = !storage;
   byId('compute-fields').hidden = byId('compute-fields').disabled = storage;
   gpuCheck.disabled = hardware_kind.value === 'cpu';
   if (gpuCheck.disabled) gpuCheck.checked = false;
   updateProcessCheck();
+  const host = machineForm.dataset.machine ? getHost() : null;
+  const showTolerance = isLinuxGpu(host, hardware_kind.value, host?.require_gpu || gpuCheck.checked)
+    && Number.isFinite(host.idle_memory_tolerance_mib);
+  byId('idle-memory-tolerance-field').hidden = idle_memory_tolerance_mib.disabled = !showTolerance;
+  byId('machine-source-field').hidden = configuration_cluster_id.disabled = !showTolerance
+    || configuration_cluster_id.options.length <= 1;
 }
 
 machineForm.elements.hardware_kind.addEventListener('change', updateResourceForm);
-gpuCheck.addEventListener('change', updateProcessCheck);
+gpuCheck.addEventListener('change', updateResourceForm);
 machineCancel.addEventListener('click', () => machineDialog.close());
 machineDialog.addEventListener('cancel', event => {
   if (machineSave.disabled) event.preventDefault();
+});
+machineDialog.addEventListener('close', () => {
+  renderPage();
+  paint();
 });
 machineForm.addEventListener('submit', async event => {
   event.preventDefault();
@@ -1462,6 +1515,11 @@ machineForm.addEventListener('submit', async event => {
   };
   if (fields.has('ssh_connect_timeout_seconds')) {
     settings.ssh_connect_timeout_seconds = Number(fields.get('ssh_connect_timeout_seconds'));
+  }
+  const {idle_memory_tolerance_mib, configuration_cluster_id} = machineForm.elements;
+  includeToleranceChange(settings, idle_memory_tolerance_mib);
+  if (fields.has(configuration_cluster_id.name) && configuration_cluster_id.value !== configuration_cluster_id.dataset.savedValue) {
+    settings.configuration_cluster_id = configuration_cluster_id.value || null;
   }
   if (!storage && settings.enabled && !settings.checks.length) {
     machineError.textContent = t('select_at_least_one_check_when_monitoring_is_enabled');
@@ -1492,7 +1550,8 @@ machineForm.addEventListener('submit', async event => {
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const detail = typeof result.detail === 'string' ? t('could_not_save_please_retry_later')+' '+alertEvidence(result.detail)
+      const detail = result.detail === 'configuration_cluster_ineligible' ? t(result.detail)
+        : typeof result.detail === 'string' ? t('could_not_save_please_retry_later')+' '+alertEvidence(result.detail)
         : response.status === 422 ? t('check_the_address_username_and_monitoring_settings') : t('could_not_save_please_retry_later');
       throw new Error(detail);
     }
@@ -1621,6 +1680,7 @@ assigneeDialog.addEventListener('cancel', event => {
   if (assigneeSave.disabled) event.preventDefault();
 });
 assigneeDialog.addEventListener('close', () => {
+  if (machineDialog.open) updateMachineConfiguration(getHost());
   renderPage();
   paint();
 });
@@ -1790,6 +1850,7 @@ removeForm.addEventListener('submit', async event => {
     state.snapshot[list] = state.snapshot[list].filter(node => node.id !== id);
     if (result.cleanup_pending) state.snapshot.removal_pending = Math.max(state.snapshot.removal_pending ?? 0,1);
     removeDialog.close();
+    machineDialog.close();
     openHost(null);
   } catch (error) {
     removeError.textContent = error instanceof Error && error.name !== 'TypeError' ? error.message : t('could_not_remove_please_retry_later');
@@ -1818,9 +1879,9 @@ document.addEventListener('click',event => {
   else if (button.hasAttribute('data-overview')) openHost(null);
   else if (button.hasAttribute('data-add-machine')) openMachineDialog(null);
   else if (button.hasAttribute('data-configure-machine')) openMachineDialog(getHost());
-  else if (button.hasAttribute('data-edit-assignees')) openAssigneeDialog(getHost());
+  else if (button.hasAttribute('data-edit-assignees') && !machineSave.disabled) openAssigneeDialog(getHost());
   else if (button.hasAttribute('data-people-directory')) openPeopleDialog();
-  else if (button.hasAttribute('data-remove-machine')) openRemoveDialog(getHost());
+  else if (button.hasAttribute('data-remove-machine') && !machineSave.disabled) openRemoveDialog(getHost());
   else if (button.hasAttribute('data-focus-trends')) setTrendFocus(true);
   else if (button.hasAttribute('data-exit-focus')) setTrendFocus(false);
   else if (button.hasAttribute('data-gpu-trends')) {
@@ -2031,9 +2092,7 @@ function basicTable(labels, rows) {
 
 function resourceActions() {
   const disabled = configUnavailable() ? 'disabled' : '';
-  return `<div class="title-actions"><button type="button" class="control" data-configure-machine ${disabled}>${t('configure')}</button>
-    <button type="button" class="control" data-edit-assignees ${disabled}>${t('assignees')}</button>
-    <button type="button" class="control danger-control" data-remove-machine ${disabled}>${t('remove_node')}</button></div>`;
+  return `<div class="title-actions"><button type="button" class="control" data-configure-machine ${disabled}>${t('configure')}</button></div>`;
 }
 
 function storagePage(host) {

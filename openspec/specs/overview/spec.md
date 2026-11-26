@@ -157,3 +157,11 @@ The GPU power card SHALL show current draw and rated power with independent cove
 #### Scenario: Storage detail remains available
 - **WHEN** an operator looks up a registered storage resource
 - **THEN** storage remains accessible in device rows, detail and group summaries.
+
+### Requirement: Global configuration from the overview
+
+The overview SHALL expose a localized Global configuration entry. Operators SHALL see the global override state and effective Linux GPU tolerance with its source, and be able to save a numeric override or clear it.
+
+#### Scenario: Revert a global override
+- **WHEN** an operator clears the global setting
+- **THEN** the effective global value becomes 256 MiB from the built-in default and is reflected in subsequent samples that inherit it

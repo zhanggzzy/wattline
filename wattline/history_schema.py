@@ -6,7 +6,7 @@ from .groups import GROUP_SCHEMA
 from .resources import RESOURCE_SCHEMA
 
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 GPU_DESCRIPTOR_FIELDS = ('index','name','bus_id','memory_total_mib')
 GPU_SAMPLE_FIELDS = ('utilization_percent','memory_used_mib','temperature_c','power_w',
                      'power_kind','power_limit_w','state','process_visibility')
@@ -57,7 +57,7 @@ def prepare_schema(db):
     version = db.execute('PRAGMA user_version').fetchone()[0]
     if version == SCHEMA_VERSION:
         return
-    if version not in (0, 2, 3, 4, 5, 6, 7, 8, 9):
+    if version not in (0, 2, 3, 4, 5, 6, 7, 8, 9, 10):
         raise sqlite3.DatabaseError('监控历史库版本不受支持')
     db.execute('BEGIN IMMEDIATE')
     if version == 0:
@@ -88,6 +88,12 @@ def prepare_schema(db):
     if version < 10:
         for statement in GROUP_SCHEMA:
             db.execute(statement)
+    if version < 11:
+        db.execute('ALTER TABLE rooms ADD COLUMN idle_memory_tolerance_mib REAL')
+        db.execute('ALTER TABLE clusters ADD COLUMN idle_memory_tolerance_mib REAL')
+        db.execute("""CREATE TABLE global_configuration (
+            id INTEGER PRIMARY KEY CHECK(id=1), idle_memory_tolerance_mib REAL)""")
+        db.execute('INSERT INTO global_configuration(id) VALUES (1)')
     db.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
 
 

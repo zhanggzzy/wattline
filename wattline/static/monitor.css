@@ -212,7 +212,6 @@
 .device-details { margin-top: 15px; }
 .chart-error { color: var(--amber); padding: 0 15px 10px; font-size: 12px; }
 .title-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 9px 12px; }
-.machine-settings-actions { display: flex; gap: 8px; }
 .page-title h1 { overflow-wrap: anywhere; min-width: 0; }
 .page-title > div { min-width: 0; max-width: 100%; }
 .page-title p { overflow-wrap: anywhere; }
@@ -486,6 +485,12 @@ dialog::backdrop { overflow: hidden; overscroll-behavior: contain; }
 #group-members-field { margin-top: 10px; }
 #group-delete-preview { max-height: 45vh; overflow: auto; }
 #group-dialog select, #machine-dialog select { max-width: 100%; }
+.machine-dialog h3 { font-size: 14px; margin: 0; }
+.machine-dialog .dialog-actions { flex-wrap: wrap; }
+.machine-dialog .configuration-section:not([hidden]) { display: grid; gap: 6px; border-top: 1px solid var(--line); padding-block-start: 10px; }
+.machine-dialog .configuration-remove { margin-inline-end: auto; }
+#group-member-values { display: grid; gap: 6px; font-size: 12px; max-height: 175px; overflow: auto; padding-inline-start: 18px; }
+#group-member-values :is(strong,span) { display: block; overflow-wrap: anywhere; }
 .group-summary .resource-table td:nth-child(n+3) { font-variant-numeric: tabular-nums; }
 .overview-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .gpu-power-readings { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 8rem), 1fr)); gap: 8px 12px; margin: 5px 0; }

@@ -12,7 +12,7 @@ from zoneinfo import ZoneInfo
 
 from .archive_analysis import ARCHIVE_ANALYSIS_IDLE_SECONDS, ArchiveAnalysis, archive_bounds
 from .collector import CollectionError, Collector, cpu_percent
-from .config import DEFAULT_SSH_CONNECT_TIMEOUT, Machine, MachineSettings
+from .config import DEFAULT_IDLE_MEMORY_TOLERANCE_MIB, DEFAULT_SSH_CONNECT_TIMEOUT, Machine, MachineSettings
 from .groups import compute_key, group_history_data, storage_key, summarize_resources
 from .history import DAY_MS, GPU_FIELDS, History, HistoryInUse, MAX_POINTS, WARM_HOURS, WARM_MS, downsample
 from .resources import StorageAdapter, StorageObservation
@@ -23,6 +23,14 @@ DEVICE_FIELDS = ('uuid', 'index', 'name', 'bus_id')
 PROCESS_FIELDS = ('pid', 'type', 'name', 'uid', 'user', 'workload', 'used_memory_mib', 'started_at', 'elapsed_seconds')
 ARCHIVE_ZONE = ZoneInfo('UTC')
 PURGE_ERRORS = (OSError, sqlite3.Error, ValueError, KeyError, TypeError, EOFError, CompressionError)
+INHERITABLE_MACHINE_FIELDS = {'idle_memory_tolerance_mib', 'configuration_cluster_id'}
+
+
+def configuration_layer(override, scope, ids=(), *, inherited=None):
+    if override is not None:
+        return {'override':override, 'effective':override, 'source':{'scope':scope, 'ids':ids}}
+    return {'override':None, 'effective':inherited['effective'] if inherited else None,
+            'source':inherited['source'] if inherited else None}
 
 
 def milliseconds():
@@ -120,6 +128,7 @@ class Monitor:
         self.rooms = {}
         self.clusters = {}
         self.locations = {}
+        self.global_idle_override = None
         self.resource_order = {}
         self.storage_adapters = dict(storage_adapters or {})
         self.storage_latest = {}
@@ -147,6 +156,10 @@ class Monitor:
         for identity, registration, settings in await self.write(self.history.machine_settings):
             if registration is not None:
                 machine = Machine.model_validate_json(registration)
+                # The old registration API serialized its implicit zero and had no tolerance input.
+                if machine.idle_memory_tolerance_mib == 0:
+                    machine = Machine.model_validate(machine.model_dump(
+                        exclude_unset=True, exclude={'idle_memory_tolerance_mib'}))
                 if machine.id in machines or identity in identities or identity != machine.history_key:
                     raise ValueError('监控登记与配置文件中的机器身份冲突')
                 machines[machine.id] = machine
@@ -174,6 +187,7 @@ class Monitor:
         self.shared_users, self.storage = await self.write(self.history.load_resources)
         self.storage_last_seen = await self.write(self.history.storage_success_times, self.clock())
         self.rooms, self.clusters, self.locations, self.resource_order = await self.write(self.history.load_groups)
+        self.global_idle_override = await self.write(self.history.global_idle_tolerance)
         self.ssh_pins = pins
         self.machine_order = order
         self.machines = machines
@@ -592,10 +606,9 @@ class Monitor:
     @staticmethod
     def with_settings(machine, settings):
         values = settings.model_dump(exclude={'alias','room_id'})
-        if 'ssh_connect_timeout_seconds' not in settings.model_fields_set:
-            values.pop('ssh_connect_timeout_seconds')
-        if 'hardware_kind' not in settings.model_fields_set:
-            values.pop('hardware_kind')
+        for field in {'ssh_connect_timeout_seconds', 'hardware_kind'} | INHERITABLE_MACHINE_FIELDS:
+            if field not in settings.model_fields_set:
+                values.pop(field)
         if values.get('hardware_kind', machine.hardware_kind) == 'cpu':
             values['checks'] = tuple(check for check in values['checks'] if check not in ('gpu','processes'))
         return machine.model_copy(update=values)
@@ -673,7 +686,10 @@ class Monitor:
                 raise CollectionError('conflict', '此节点的历史归档正在清理，完成后可重新登记')
             if request.target_os == 'windows':
                 pins[machine.history_key] = identity.ssh_host_key
-            registration = machine.model_dump_json(exclude={'target_os'} if machine.target_os == 'linux' else None)
+            excluded = INHERITABLE_MACHINE_FIELDS.copy()
+            if machine.target_os == 'linux':
+                excluded.add('target_os')
+            registration = machine.model_dump_json(exclude=excluded)
             return await self.save_settings(machine, settings, registration=registration, pins=pins,
                                             assignment=(people, request.shared))
 
@@ -684,6 +700,9 @@ class Monitor:
     async def save_settings(self, machine, settings, registration=None, pins=None, assignment=None):
         if not self.registry_loaded:
             raise OSError('机器配置暂不可读')
+        selected = settings.configuration_cluster_id
+        if selected is not None and selected not in self.cluster_overrides(compute_key(machine.history_key)):
+            raise CollectionError('conflict', 'configuration_cluster_ineligible')
 
         async def save():
             updated = self.with_settings(machine, settings)
@@ -694,7 +713,8 @@ class Monitor:
                 order = {node.history_key:index for index,node in enumerate(machines)}
             persisted = settings.model_copy(update={'ssh_connect_timeout_seconds':updated.ssh_connect_timeout_seconds,
                                                     'hardware_kind':updated.hardware_kind})
-            stored = persisted.model_dump_json(exclude={'alias','room_id'})
+            excluded = {'alias', 'room_id'} | (INHERITABLE_MACHINE_FIELDS - settings.model_fields_set)
+            stored = persisted.model_dump_json(exclude=excluded)
             location = self.check_location(settings)
             restart = registration or (machine.enabled, machine.active_checks, self.interval(machine), machine.connect_timeout) != (
                 updated.enabled, updated.active_checks, self.interval(updated), updated.connect_timeout
@@ -852,6 +872,7 @@ class Monitor:
         while True:
             await self.sleep(max(0, next_due-self.monotonic()))
             async with self.slots:
+                machine = self.machines[machine.id]
                 snapshot = await self.observe(machine)
             self.latest[machine.id] = snapshot
             try:
@@ -879,6 +900,9 @@ class Monitor:
     async def observe(self, machine):
         started = self.clock()
         snapshot = {'observed_at':started, 'source':machine.mode, 'metrics':None}
+        configuration = self.machine_idle_configuration(machine)
+        snapshot['sample_idle_memory_configuration'] = configuration
+        machine = machine.model_copy(update={'idle_memory_tolerance_mib':configuration['effective']})
         stale = round(self.stale_seconds(machine)*1000)
         if stale != round(self.config.stale_seconds*1000):
             snapshot['stale_ms'] = stale
@@ -936,7 +960,9 @@ class Monitor:
 
     def machine_view(self, machine, now):
         result = self.latest.get(machine.id) or {}
-        view = {key:result[key] for key in ('status','reason','warnings','observed_at','received_at','metrics') if key in result}
+        view = {key:result[key] for key in ('status','reason','warnings','observed_at','received_at','metrics',
+                                           'sample_idle_memory_configuration') if key in result}
+        configuration = self.machine_idle_configuration(machine)
         default_name = self.default_name(machine)
         alias = self.aliases.get(machine.history_key)
         stale = round(self.stale_seconds(machine)*1000)
@@ -951,6 +977,7 @@ class Monitor:
                     last_success_at=self.last_seen.get(machine.id), devices=self.inventory.get(machine.id, []),
                     enabled=machine.enabled, checks=machine.active_checks, interval_seconds=self.interval(machine),
                     ssh_connect_timeout_seconds=machine.connect_timeout,
+                    idle_memory_tolerance_mib=configuration['effective'], idle_memory_configuration=configuration,
                     stale_ms=stale, metrics=view.get('metrics'))
         if not machine.enabled:
             view.update(status='disabled', metrics=None, reason=None, warnings=[])
@@ -971,6 +998,48 @@ class Monitor:
     def group_links(self, key):
         return {'room_id':self.locations.get(key),
                 'cluster_ids':[id for id, cluster in self.clusters.items() if key in cluster['keys']]}
+
+    def global_idle_configuration(self):
+        fallback = configuration_layer(DEFAULT_IDLE_MEMORY_TOLERANCE_MIB, 'default')
+        return configuration_layer(self.global_idle_override, 'global', inherited=fallback)
+
+    def room_idle_configuration(self, id):
+        override = self.rooms[id]['idle_memory_tolerance_mib'] if id else None
+        return configuration_layer(override, 'room', (id,), inherited=self.global_idle_configuration())
+
+    def cluster_overrides(self, key):
+        return {id:cluster['idle_memory_tolerance_mib'] for id, cluster in self.clusters.items()
+                if key in cluster['keys'] and cluster['idle_memory_tolerance_mib'] is not None}
+
+    def machine_idle_configuration(self, machine):
+        key = compute_key(machine.history_key)
+        candidates = self.cluster_overrides(key)
+        ids = tuple(sorted(candidates))
+        values = set(candidates.values())
+        selected = machine.configuration_cluster_id
+        conflict = len(values) > 1 and selected not in candidates
+        inherited = self.room_idle_configuration(self.locations.get(key))
+        if len(values) == 1:
+            inherited = configuration_layer(next(iter(values)), 'cluster', ids)
+        elif len(values) > 1 and not conflict:
+            inherited = configuration_layer(candidates[selected], 'cluster', (selected,))
+        override = machine.idle_memory_tolerance_mib if 'idle_memory_tolerance_mib' in machine.model_fields_set else None
+        return dict(configuration_layer(override, 'machine', (machine.id,), inherited=inherited),
+                    cluster_candidates=[{'id':id, 'value':candidates[id]} for id in ids],
+                    selected_cluster_id=selected, cluster_conflict=conflict,
+                    invalid_cluster_selection=selected is not None and selected not in candidates)
+
+    async def configure_global_idle(self, settings):
+        async with self.settings_lock:
+            if not self.registry_loaded:
+                raise OSError('registry_unavailable')
+
+            async def save():
+                await self.write(self.history.save_global_idle_tolerance, settings.idle_memory_tolerance_mib)
+                self.global_idle_override = settings.idle_memory_tolerance_mib
+                return self.global_idle_configuration()
+
+            return await wait_for_work(asyncio.create_task(save()))
 
     def forget_resource(self, key):
         self.locations.pop(key, None)
@@ -1002,6 +1071,7 @@ class Monitor:
             members = grouped[id]
             owner = self.people.get(room['owner_id'])
             rooms.append({**room, 'owner':owner,'members':[node['id'] for node in members],
+                          'idle_memory_configuration':self.room_idle_configuration(id),
                           'summary':summarize_resources(members)})
         clusters = []
         for id, cluster in self.clusters.items():
@@ -1011,6 +1081,8 @@ class Monitor:
                 room_counts[node['room_id']] += 1
             cluster_fields = {key:value for key,value in cluster.items() if key != 'keys'}
             clusters.append({**cluster_fields,'shared':bool(cluster['shared']),'person':self.people.get(cluster['person_id']),
+                             'idle_memory_configuration':configuration_layer(cluster['idle_memory_tolerance_mib'],
+                                                                             'cluster', (id,)),
                              'members':[node['id'] for node in members], 'summary':summarize_resources(members),
                              'rooms':[{'id':room,'count':count} for room,count in room_counts.items()]})
         return {'rooms':sorted(rooms,key=lambda group:group['name']),
@@ -1029,6 +1101,9 @@ class Monitor:
             if person is not None:
                 self.validate_people((person,))
             id = id or uuid.uuid4().hex
+            override = body.idle_memory_tolerance_mib
+            if 'idle_memory_tolerance_mib' not in body.model_fields_set and id in groups:
+                override = groups[id]['idle_memory_tolerance_mib']
             if kind == 'room':
                 record = dict(id=id,name=body.name,location=body.location,owner_id=body.owner_id)
                 operation = self.history.save_room
@@ -1041,6 +1116,7 @@ class Monitor:
                 record = dict(id=id,name=body.name,person_id=body.person_id,shared=body.shared,keys=members)
                 operation = self.history.save_cluster
                 args = (id,body,members)
+            record['idle_memory_tolerance_mib'] = override
 
             async def save():
                 await self.write(operation,*args)
@@ -1124,6 +1200,7 @@ class Monitor:
                 'storage':storage, 'groups':self.group_views(views),
                 'resource_order':self.ordered_resource_ids(), 'summary':summarize_resources(views.values(), overview=True),
                 'storage_adapters':sorted(self.storage_adapters),
+                'idle_memory_configuration':self.global_idle_configuration(),
                 'machines':machines}
 
     async def group_series(self, kind, selected, metric):

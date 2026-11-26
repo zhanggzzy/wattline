@@ -5,7 +5,7 @@ import math
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .config import MachineId, PersonId, normalize_person_name
+from .config import IdleMemoryTolerance, MachineId, PersonId, normalize_person_name
 
 GROUP_SCHEMA = (
     """CREATE TABLE rooms (
@@ -30,6 +30,7 @@ class GroupName(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
     name: str = Field(min_length=1, max_length=80)
+    idle_memory_tolerance_mib: IdleMemoryTolerance | None = None
 
     @model_validator(mode='after')
     def valid_name(self):

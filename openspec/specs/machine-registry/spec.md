@@ -8,7 +8,7 @@ Records durable operator-supplied registration metadata for each monitored machi
 
 ### Requirement: Optional assigned user per machine
 
-A registered machine SHALL support zero or more distinct people from the shared directory. Its detail view SHALL expose a multi-select assignee editor beside Configure regardless of collection status. The editor SHALL use native checkbox chips, report the current selection count, and support editing, saving, cancelling, clearing and directory maintenance.
+A registered machine SHALL support zero or more distinct people from the shared directory. Its detail view SHALL expose the assignee editor in the Configure dialog regardless of collection status. The editor SHALL use native checkbox chips, report the current selection count, and support editing, saving, cancelling, clearing and directory maintenance.
 
 #### Scenario: Record and clear a value
 - **WHEN** an operator selects several directory entries, saves, removes one and later saves an empty selection
@@ -169,3 +169,11 @@ The dashboard SHALL offer a single directory person, Shared or unset for new ope
 #### Scenario: Switch a legacy assignment explicitly
 - **WHEN** an operator saves Shared for a previously multi-assigned resource
 - **THEN** its assignment becomes Shared and future reloads show Shared.
+
+### Requirement: Unified machine detail configuration
+
+Machine details SHALL expose a single configuration entry for editable attributes, monitoring, room placement and assignment. Removal SHALL retain explicit confirmation and existing access checks.
+
+#### Scenario: Open an offline machine
+- **WHEN** an operator opens Configure on an offline machine
+- **THEN** properties and assignment are reachable and the removal action opens a separate confirmation before any delete request

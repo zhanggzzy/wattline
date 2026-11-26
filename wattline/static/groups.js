@@ -13,6 +13,75 @@ const groupPerson = (group,kind) => kind === 'room' ? group.owner : group.shared
 const groupCounts = () => state.snapshot?.alerts?.by_resource ?? {};
 const activeGroupAlerts = group => group.members.reduce((count,id) => count+(groupCounts()[id] ?? 0),0);
 
+const configurationValue = value => i18n.number(value, {maximumSignificantDigits:17}) + ' MiB';
+
+function effectiveConfiguration(policy) {
+  if (!policy?.source) return t('configuration_member_specific');
+  const {scope, ids} = policy.source;
+  const label = t({machine:'configuration_source_machine', cluster:'configuration_source_cluster',
+    room:'configuration_source_room', global:'configuration_source_global', default:'configuration_source_default'}[scope]);
+  const names = ['room','cluster'].includes(scope) ? ids.map(id => groupRecord(scope,id)?.name ?? id) : [];
+  const source = names.length ? label + ' · ' + new Intl.ListFormat(i18n.locale).format(names) : label;
+  return t('configuration_effective', {value:configurationValue(policy.effective),source});
+}
+
+function configurationSummary(policy) {
+  if (!policy) return '';
+  return t(policy.override == null ? 'configuration_inherited' : 'configuration_overridden')
+    + ' · ' + effectiveConfiguration(policy);
+}
+
+function initializeTolerance(field, policy) {
+  field.value = field.defaultValue = policy?.override ?? '';
+}
+
+function includeToleranceChange(body, field) {
+  if (!field.disabled && field.value !== field.defaultValue) {
+    body[field.name] = field.value === '' ? null : field.valueAsNumber;
+  }
+}
+
+function globalConfigurationButton() {
+  return `<button type="button" class="control" data-global-configuration ${configUnavailable() ? 'disabled' : ''}>${t('global_configuration')}</button>`;
+}
+
+function openGlobalConfiguration() {
+  const form = byId('global-configuration-form');
+  const policy = state.snapshot.idle_memory_configuration;
+  initializeTolerance(form.elements.idle_memory_tolerance_mib, policy);
+  byId('global-configuration-summary').textContent = configurationSummary(policy);
+  byId('global-configuration-error').hidden = true;
+  byId('global-configuration-dialog').showModal();
+}
+
+async function saveGlobalConfiguration(event) {
+  event.preventDefault();
+  const field = event.currentTarget.elements.idle_memory_tolerance_mib;
+  const dialog = byId('global-configuration-dialog');
+  const save = byId('global-configuration-save');
+  const cancel = byId('global-configuration-cancel');
+  const error = byId('global-configuration-error');
+  if (save.disabled) return;
+  const body = {[field.name]:field.value === '' ? null : field.valueAsNumber};
+  save.disabled = cancel.disabled = field.disabled = true;
+  setButtonLabel(save, 'saving');
+  error.hidden = true;
+  try {
+    const response = await fetch('/api/configuration', {method:'PUT', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body)});
+    if (!response.ok) throw new Error(t('configuration_save_failed'));
+    state.snapshot.idle_memory_configuration = await response.json();
+    dialog.close();
+    await refreshWorkspace();
+  } catch {
+    error.textContent = t('configuration_save_failed');
+    error.hidden = false;
+  } finally {
+    save.disabled = cancel.disabled = field.disabled = false;
+    setButtonLabel(save, 'save');
+  }
+}
+
 function tabs(keys,selected,area) {
   return `<div class="workspace-tabs" role="tablist" aria-label="${t(area === 'overview' ? 'overview_granularity' : 'group_management')}">
     ${keys.map(kind => `<button type="button" role="tab" id="${area}-tab-${kind}" aria-controls="${area}-tab-panel"
@@ -147,6 +216,7 @@ function groupOverviewPanel() {
 function workspaceOverview() {
   const disabled = configUnavailable() ? 'disabled' : '';
   return `<section class="page-title"><div>${heading(t('resource_overview'))}</div><div class="title-actions">
+    ${globalConfigurationButton()}
     <button type="button" class="control" data-workspace-manage ${disabled}>${t('group_management')}</button>
     <button type="button" class="control primary-control" data-add-machine ${disabled}>${t('add_resource')}</button></div></section>
     ${overviewCards()}<div class="overview-stack">${overviewAlerts(state.snapshot.alerts)}${groupOverviewPanel()}</div>`;
@@ -164,7 +234,7 @@ function groupDetailPage(group,kind) {
   return `<section class="page-title"><div>${heading(group.name)}
     <p>${groupLabel(kind)} · ${t(room ? 'room_owner' : 'resource_user_mode')} · ${escape(groupPerson(group,kind) || t('unassigned'))}
       ${group.location ? ' · '+escape(group.location) : ''}</p></div>
-    <div class="title-actions"><button type="button" class="control" data-edit-group="${kind}" data-edit-id="${escape(group.id)}">${t('configure')}</button>
+    <div class="title-actions"><button type="button" class="control" data-edit-group="${kind}" data-edit-id="${escape(group.id)}" ${configUnavailable() ? 'disabled' : ''}>${t('configure')}</button>
     ${room ? `<button type="button" class="control primary-control" data-add-machine>${t('add_resource')}</button>` : ''}</div></section>
     <section class="metrics">${cards.map(([label,key,scope]) => `<article class="metric"><p class="metric-name">${label}</p>
       <strong>${summaryCell(group,kind,key,scope)}</strong></article>`).join('')}</section>
@@ -310,6 +380,7 @@ function openGroupDialog(kind, id, remove = false) {
   byId('group-dialog-title').textContent = remove ? t('remove_group') : t(id ? 'configure' : kind === 'room' ? 'add_room' : 'add_cluster');
   byId('group-fields').disabled = byId('group-fields').hidden = remove;
   byId('group-delete-preview').hidden = !remove;
+  byId('group-remove').hidden = !id || remove;
   byId('group-error').hidden = true;
   fields.group_name.value = group?.name ?? '';
   fields.location.value = group?.location ?? '';
@@ -321,6 +392,14 @@ function openGroupDialog(kind, id, remove = false) {
   fields.member_search.value = '';
   const members = new Set(group?.members ?? []);
   const devices = nodes();
+  const policy = !remove && group?.idle_memory_configuration;
+  fields.idle_memory_tolerance_mib.disabled = byId('group-configuration').hidden = !policy;
+  initializeTolerance(fields.idle_memory_tolerance_mib, policy);
+  byId('group-configuration-summary').textContent = configurationSummary(policy);
+  byId('group-member-configuration').hidden = !policy;
+  byId('group-member-values').innerHTML = policy ? devices
+    .filter(node => members.has(node.id) && isLinuxGpu(node) && node.idle_memory_configuration)
+    .map(node => `<li><strong>${escape(node.name)}</strong><span>${escape(effectiveConfiguration(node.idle_memory_configuration))}</span></li>`).join('') : '';
   byId('group-member-options').innerHTML = kind === 'cluster' ? devices.map(node =>
     `<label><input type="checkbox" value="${escape(node.id)}" ${members.has(node.id) ? 'checked' : ''}>
     <span>${escape(node.name)} · ${hardwareLabel(node.hardware_kind)} · ${escape(roomName(node.room_id))}</span></label>`).join('') : '';
@@ -347,6 +426,7 @@ async function saveGroupForm(event) {
   else if (kind === 'room') Object.assign(body,{owner_id:personId,location:fields.location.value.trim() || null});
   else Object.assign(body,{person_id:personId,shared:person === 'shared',
     members:[...byId('group-member-options').querySelectorAll('input:checked')].map(input => input.value)});
+  if (!isRemoving) includeToleranceChange(body, fields.idle_memory_tolerance_mib);
   save.disabled = byId('group-cancel').disabled = true;
   error.hidden = true;
   try {
@@ -358,6 +438,7 @@ async function saveGroupForm(event) {
     }
     byId('group-dialog').close();
     await refreshWorkspace();
+    if (isRemoving && state.group?.id === id) openHost(null);
   } catch (failure) {
     error.textContent = failure instanceof TypeError ? t('group_save_failed') : failure.message;
     error.hidden = false;
@@ -382,7 +463,18 @@ function activateTab(area, tab) {
 }
 
 function setupGroupUI() {
+  const globalDialog = byId('global-configuration-dialog');
+  byId('global-configuration-form').addEventListener('submit',saveGlobalConfiguration);
+  byId('global-configuration-cancel').addEventListener('click', () => globalDialog.close());
+  globalDialog.addEventListener('cancel',event => {
+    if (byId('global-configuration-save').disabled) event.preventDefault();
+  });
   byId('group-cancel').addEventListener('click', () => byId('group-dialog').close());
+  byId('group-remove').addEventListener('click', () => {
+    if (byId('group-save').disabled) return;
+    const {kind,id} = byId('group-form').dataset;
+    openGroupDialog(kind,id,true);
+  });
   byId('group-dialog').addEventListener('cancel',event => {
     if (byId('group-save').disabled) event.preventDefault();
   });
@@ -410,6 +502,7 @@ function setupGroupUI() {
     if (workspaceTab) activateTab(tabArea,workspaceTab);
     else if (groupKind) setGroupPage(groupKind,groupId);
     else if (button.hasAttribute('data-workspace-manage')) openManagement();
+    else if (button.hasAttribute('data-global-configuration')) openGlobalConfiguration();
     else if (editGroup || deleteGroup) openGroupDialog(editGroup || deleteGroup,editId,Boolean(deleteGroup));
     else if (button.hasAttribute('data-clear-groups')) {
       state.groupFilters[state.tab] = {query:'',person:'',status:''};

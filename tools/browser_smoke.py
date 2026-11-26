@@ -139,8 +139,9 @@ def check_dialog_locales(browser):
                         test_page.locator('[data-add-machine]').click()
                     else:
                         test_page.locator('#rail-nav [data-host="'+machine_id+'"]').click()
-                        test_page.locator('[data-configure-machine]' if action == 'settings'
-                                          else '[data-remove-machine]').click()
+                        test_page.locator('[data-configure-machine]').click()
+                        if action == 'remove':
+                            test_page.locator('[data-remove-machine]').click()
 
                 open_dialog()
                 button = test_page.locator('#remove-confirm' if action == 'remove' else '#machine-save')
@@ -180,6 +181,8 @@ def check_dialog_locales(browser):
                 else:
                     expect(button).to_have_accessible_name(labels[source][idle_key])
                     test_page.keyboard.press('Escape')
+                    if action == 'remove':
+                        test_page.locator('#machine-cancel').click()
                 test_page.locator('#locale-select').select_option(target)
                 open_dialog('demo-2' if action == 'remove' and success else 'demo-1')
                 expect(button).to_have_text(labels[target][idle_key])
@@ -193,6 +196,64 @@ def check_dialog_locales(browser):
                 if action in ['add','remove'] and not success:
                     test_page.screenshot(path=str(OUT/f'dialog-{action}-{source}-to-{target}.png'))
                 test_page.close()
+    return results
+
+def check_gpu_tolerance_settings(browser):
+    global machines
+    linux = dict(node(1), target_os='linux', scope=None, idle_memory_tolerance_mib=256)
+    windows = dict(node(2), target_os='windows', idle_memory_tolerance_mib=256)
+    container = dict(node(3), scope='container', idle_memory_tolerance_mib=256)
+    cpu = dict(node(2), id='cpu-fixture', name='CPU fixture', hardware_kind='cpu', configured_hardware_kind='cpu',
+               require_gpu=False, checks=['cpu'], idle_memory_tolerance_mib=256)
+    machines = [linux, windows, container, cpu]
+    page = browser.new_page(viewport={'width':390, 'height':844})
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.route('**/*', handle)
+    page.goto('http://wattline.test')
+    dialog = page.locator('#machine-dialog')
+    url = 'http://wattline.test/api/machines/demo-1/settings'
+    results = {}
+
+    def configure(id, label):
+        page.locator(f'#rail-nav [data-host="{id}"]').click()
+        page.get_by_role('button', name=label, exact=True).click()
+
+    for locale, entry, label, previous, new in (
+        ('zh-CN', '配置', '空闲显存容差（MiB）', '256', '0'),
+        ('en', 'Configure', 'Idle VRAM tolerance (MiB)', '0', '512.5'),
+    ):
+        page.locator('#locale-select').select_option(locale)
+        configure('demo-1', entry)
+        tolerance = dialog.get_by_role('spinbutton', name=label, exact=True)
+        expect(tolerance).to_be_visible()
+        expect(tolerance).to_have_value(previous)
+        count = len(mutations)
+        tolerance.fill('-1')
+        page.locator('#machine-save').click()
+        assert tolerance.evaluate('(input) => input.validity.rangeUnderflow')
+        assert len(mutations) == count
+        tolerance.fill(new)
+        with page.expect_response(url) as saved:
+            page.locator('#machine-save').click()
+        response = saved.value
+        assert response.ok and response.request.post_data_json['idle_memory_tolerance_mib'] == float(new)
+        expect(dialog).to_be_hidden()
+        configure('demo-1', entry)
+        expect(tolerance).to_have_value(new)
+        with page.expect_response(url) as unchanged:
+            page.locator('#machine-save').click()
+        assert 'idle_memory_tolerance_mib' not in unchanged.value.request.post_data_json
+        expect(dialog).to_be_hidden()
+        for id in ('demo-2', 'demo-3', 'cpu-fixture'):
+            configure(id, entry)
+            field = dialog.locator('[name="idle_memory_tolerance_mib"]')
+            expect(field).to_be_hidden()
+            expect(field).to_be_disabled()
+            page.locator('#machine-cancel').click()
+        results[locale] = {'initial_mib':float(previous), 'saved_mib':float(new), 'inapplicable_hidden':True}
+    assert not errors, errors
+    page.close()
     return results
 
 def check_unlimited_container(browser):
@@ -1139,10 +1200,10 @@ def check_people_directory(browser):
         history = History(data_dir)
         history.prepare()
         for host in (first, second):
-            old = MachineSettings(enabled=host.enabled).model_dump(mode="json", exclude={"alias"})
+            old = MachineSettings(enabled=host.enabled).model_dump(mode="json", exclude={"alias"}, exclude_unset=True)
             history.save_machine(host.history_key, None, json.dumps(dict(old, assigned_user=initial_name)), None, {})
         with history.connect() as db:
-            for table in ("cluster_resources","resource_rooms","resource_order","clusters","rooms",
+            for table in ("global_configuration","cluster_resources","resource_rooms","resource_order","clusters","rooms",
                           "storage_ticks","storage_resources","alerts","shared_users"):
                 db.execute(f"DROP TABLE {table}")
             db.execute("DROP TABLE machine_assignees")
@@ -1232,7 +1293,9 @@ def check_people_directory(browser):
             expect(directory_dialog.get_by_text(initial_name, exact=True)).to_be_visible()
             page.locator("#people-close").click()
             row.locator(".row-open").click()
-            expect(page.locator("[data-configure-machine] + [data-edit-assignees]")).to_have_text("使用者")
+            expect(page.locator(".page-title [data-edit-assignees]")).to_have_count(0)
+            config_button.click()
+            expect(assign_button).to_have_text("编辑使用者")
             assign_button.click()
             expect(checkbox(initial_name)).to_be_checked()
             expect_count(1)
@@ -1332,7 +1395,7 @@ def check_people_directory(browser):
             assert set(assignments()[0]) == {literal_name, long_name}
             assert assignments()[1] == [literal_name]
 
-            config_button.click()
+            expect(page.locator("#machine-dialog")).to_be_visible()
             expect(page.locator("#machine-dialog textarea")).to_have_count(0)
             page.locator("#machine-dialog input[name=alias]").fill("Renamed fixture")
             settings = request(f"/api/machines/{first.id}/settings", "PUT", page.locator("#machine-save").click, 200)
@@ -1384,8 +1447,8 @@ def check_people_directory(browser):
                 for width in (1440, 320):
                     page.set_viewport_size({"width": width, "height": 900})
                     detail = inspect_summary(page.locator(".page-title .machine-assignees"), label, width)
-                    controls = config_button.bounding_box(), assign_button.bounding_box()
-                    assert controls[0]["y"] == controls[1]["y"] and controls[0]["x"] < controls[1]["x"], controls
+                    expect(config_button).to_be_visible()
+                    expect(assign_button).to_be_hidden()
                     if width == 320:
                         page.screenshot(path=str(OUT / f"assignees-detail-{locale}.png"), full_page=True)
                     page.locator("#breadcrumb [data-overview]").click()
@@ -1400,6 +1463,7 @@ def check_people_directory(browser):
                     layout_results.append({"locale": locale, "width": width, "detail": detail, "list": listing})
                     row.locator(".row-open").click()
 
+            config_button.click()
             assign_button.click()
             expect(picker.get_by_role("heading", name="Assignees")).to_be_visible()
             expect(checkbox(literal_name)).to_be_checked()
@@ -1414,13 +1478,15 @@ def check_people_directory(browser):
             expect(checkbox(literal_name)).not_to_be_checked()
             expect_count(1)
             save_assignments()
-            expect(page.locator(".page-title .machine-assignees")).not_to_contain_text(literal_name)
+            expect(page.locator("#machine-assignment-preview")).to_have_text(long_name)
             assert assignments() == [[long_name], [literal_name]]
             assign_button.click()
             expect_count(1)
             page.get_by_role("button", name="Clear selection").click()
             expect_count(0)
             save_assignments()
+            expect(page.locator("#machine-assignment-preview")).to_have_text("Not assigned")
+            page.locator("#machine-cancel").click()
             expect(page.locator(".page-title .machine-assignees")).to_have_count(0)
             page.locator("#breadcrumb [data-overview]").click()
             expect(row.locator(".assignee-cell .person-chip")).to_have_count(0)
@@ -1668,6 +1734,7 @@ def check_assignee_responsive(browser):
                         cell.screenshot(path=str(OUT / "assignee-chip-spacing.png"))
                     check_names(list_chips, width=70)
                     row.locator(".row-open").click()
+                    page.locator("[data-configure-machine]").click()
                     edit = page.locator("[data-edit-assignees]")
                     edit.click()
                     expect(picker.locator("input:checked")).to_have_count(len(names))
@@ -1683,6 +1750,7 @@ def check_assignee_responsive(browser):
                     check_names(picker_chips, width=56)
                     page.locator("#assignee-cancel").click()
                     expect(edit).to_be_focused()
+                    page.locator("#machine-cancel").click()
                     page.locator("#breadcrumb [data-overview]").click()
                     spacing.append({"locale": locale, "rail": rail, "list": list_spacing,
                                     "list_wrapped": list_wrapped, "picker": picker_spacing,
@@ -1965,10 +2033,12 @@ with sync_playwright() as p:
     expect(page.locator("#machine-dialog")).not_to_be_visible()
     expect(page.locator("#page-heading")).to_contain_text("合成训练节点")
     expect(page.locator(".page-title")).to_contain_text("使用者：张工")
+    page.get_by_role("button", name="配置", exact=True).click()
     page.get_by_role("button", name="移除节点", exact=True).click()
     expect(page.locator("#remove-cancel")).to_be_focused()
     page.keyboard.press("Escape")
     expect(page.get_by_role("button", name="移除节点", exact=True)).to_be_focused()
+    page.locator("#machine-cancel").click()
     page.screenshot(path=str(OUT/"detail.png"), full_page=True)
     page.get_by_role("button", name="机器总览", exact=True).first.click()
     page.wait_for_function("!state.machine && state.history?.machines?.length === 3")
@@ -2110,12 +2180,14 @@ with sync_playwright() as p:
     page.locator('input[name="checks"][value="cpu"]').check()
     page.get_by_role('button',name='Save',exact=True).click()
     expect(page.locator('#machine-dialog')).not_to_be_visible()
+    page.get_by_role('button',name='Configure',exact=True).click()
     page.get_by_role('button',name='Remove node',exact=True).click()
     expect(page.locator('#remove-description')).to_contain_text('This cannot be undone.')
     page.get_by_role('button',name='Confirm removal',exact=True).click()
     expect(page.locator('#remove-error')).to_contain_text('Could not remove.')
     expect(page.locator('#remove-error')).to_contain_text('合成验证错误')
     page.keyboard.press('Escape')
+    page.locator('#machine-cancel').click()
     page.get_by_role('button',name='Overview',exact=True).first.click()
     page.get_by_role('button',name='Add machine',exact=True).click()
     page.locator('[name="host"]').fill('unreachable.invalid')
@@ -2148,6 +2220,7 @@ with sync_playwright() as p:
 
     page.close()
     dialog_locales = check_dialog_locales(browser)
+    gpu_tolerance = check_gpu_tolerance_settings(browser)
     unlimited_container = check_unlimited_container(browser)
     windows_processes = check_windows_processes(browser)
     gpu_process_timing = check_gpu_process_timing(browser)
@@ -2161,6 +2234,6 @@ with sync_playwright() as p:
                       "metric_layouts":layout_results, "focus_refreshes":focus_results,
                       "people_directory":people_directory, "assignee_responsive":assignee_responsive,
                       "unlimited_container":unlimited_container,"gpu_process_timing":gpu_process_timing,
-                      "windows_processes":windows_processes, "overview_regressions":overview_regressions,
+                      "windows_processes":windows_processes, "gpu_tolerance":gpu_tolerance, "overview_regressions":overview_regressions,
                       "silhouettes":silhouettes, "rail_identity_edges":rail_identity_edges}, ensure_ascii=False))
     browser.close()

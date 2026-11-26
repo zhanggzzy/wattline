@@ -17,9 +17,15 @@
 - [x] 3.2 Add the control to the localized machine configuration dialog. Verify the Chinese and English labels, eligibility, validation, saving zero and readback in the synthetic browser checks.
 - [x] 3.3 Run repository checks and record the commands and results in verification.md. Verify both commits apply in order on the AN-211 baseline.
 
-## 4. Independent review
+## 4. Review follow-up
 
-- [ ] 4.1 AN-210 and AN-212 independently verify the default and dynamic settings handoffs before Mika integrates.
+- [x] 4.1 Verify the optional Linux XML count, preserving PID priority. Test matching, absent, mismatched and invalid counts with synthetic XML through collection alert evaluation.
+- [x] 4.2 Align the proposal, design and spec with the inventory gate, PID priority and partial container visibility. Verify both container states with synthetic samples and run OpenSpec strict validation.
+- [x] 4.3 Run the regression suite and record results in [verification.md](verification.md). Replay the complete three-commit handoff from the original baseline and compare the resulting trees.
+
+## 5. Independent review
+
+- [ ] 5.1 AN-212 independently verifies the complete handoff and retests AN-210 findings before Mika integrates.
 
 ## Workflow follow-up
 

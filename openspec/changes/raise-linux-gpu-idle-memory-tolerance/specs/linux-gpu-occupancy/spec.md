@@ -79,41 +79,71 @@ enumeration are complete, no valid PID is observed and used VRAM is at most the 
 tolerance. Any other case SHALL remain unknown. Utilization, power and temperature SHALL
 not affect this classification.
 
-#### Scenario: Inverse occupancy decision ladder
+#### Scenario: Valid PID establishes occupancy with incomplete evidence
 
-- **WHEN** a GPU reports a valid process PID, or reports no valid PID with used VRAM above
-  the tolerance
-- **THEN** the first case is occupied and the second is unknown, regardless of utilization
-  being 0 or above 0.
+- **WHEN** a GPU reports a valid process PID despite unavailable used VRAM, unverified
+  inventory or partial process visibility
+- **THEN** its occupancy is `occupied`.
 
 #### Scenario: Inclusive tolerance boundary
 
 - **WHEN** enumeration is complete, no valid PID is observed and used VRAM is exactly
   256 MiB under the default tolerance
-- **THEN** the GPU is free; used VRAM above 256 MiB keeps it unknown.
+- **THEN** the GPU is free. With the same evidence and used VRAM above 256 MiB, it is
+  unknown.
+
+### Requirement: Linux GPU inventory count verification
+
+When Linux NVIDIA XML supplies `attached_gpus`, Wattline SHALL require a single count
+in ASCII decimal digits matching the number of returned GPU records to verify inventory.
+Wattline SHALL apply the existing inventory checks when that field is absent or matches
+the returned count.
+
+#### Scenario: Reported count contradicts the GPU records
+
+- **WHEN** `attached_gpus` reports two GPUs and the XML returns one valid GPU record with
+  128 MiB used VRAM and an empty process table
+- **THEN** the inventory is unverified, that GPU is `unknown` and the occupancy warning
+  is emitted when enabled.
+
+#### Scenario: Reported count is invalid
+
+- **WHEN** the count is present but blank, malformed, negative, or repeated
+- **THEN** the inventory is unverified.
+
+#### Scenario: Reported count is absent or consistent
+
+- **WHEN** the XML omits the count or supplies a matching count and all other inventory
+  checks succeed
+- **THEN** the inventory is verified.
 
 ### Requirement: Unverifiable occupancy evidence
 
-Missing used VRAM, incomplete GPU inventory or incomplete process enumeration SHALL keep
-the affected GPU unknown and SHALL NOT assert idle. When any visible GPU remains unknown
-and occupancy warnings are enabled, Wattline SHALL report the existing “部分 GPU 占用状态
-无法核实” warning.
+When no valid PID is observed, missing used VRAM, incomplete GPU inventory or incomplete
+process enumeration SHALL keep the affected GPU unknown. When any visible GPU remains
+unknown and occupancy warnings are enabled, Wattline SHALL report the existing
+“部分 GPU 占用状态无法核实” warning.
 
 #### Scenario: Evidence cannot prove idle
 
-- **WHEN** the used VRAM reading is unavailable, the GPU inventory is incomplete, or the
-  process table cannot be fully enumerated
-- **THEN** the GPU state is unknown and the occupancy warning is emitted.
+- **WHEN** no valid PID is observed and any idle evidence is unavailable due to missing
+  used VRAM, incomplete inventory or incomplete process enumeration
+- **THEN** the GPU state is unknown and the occupancy warning is emitted when enabled.
 
-### Requirement: Unchanged Windows and container occupancy
+### Requirement: Windows and container occupancy
 
 Windows probes SHALL retain their existing occupancy rule and SHALL NOT use the idle
-memory tolerance. Container endpoints without complete host process visibility SHALL
-retain their existing unknown or partial occupancy behavior.
+memory tolerance. With process checks enabled, Linux container endpoints SHALL report
+`partial` process visibility and classify each visible GPU as `occupied` when a valid
+PID is observed or `unknown` otherwise, independently of used VRAM.
 
-#### Scenario: Other collection branches stay the same
+#### Scenario: Windows GPU with no process rows
 
-- **WHEN** a Windows GPU reports no process rows, or a container endpoint reports visible
-  GPUs with partial process visibility
-- **THEN** their occupancy states remain unknown and partial respectively, independent of
-  used VRAM.
+- **WHEN** a Windows GPU reports no process rows
+- **THEN** its occupancy is `unknown`.
+
+#### Scenario: Partial container process visibility
+
+- **WHEN** process checks are enabled and the container reports a visible GPU
+- **THEN** process visibility is `partial`. Occupancy is `occupied` if a valid PID is
+  observed and `unknown` otherwise.

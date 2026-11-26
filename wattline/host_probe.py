@@ -194,7 +194,13 @@ def monitor_gpus(config, proc, warnings, *, host_processes=True):
     devices = root.findall('gpu')
     uuids = {gpu.findtext('uuid', '').strip() for gpu in devices}
     expected = config.get('expected_gpu_count')
-    inventory_ok = (bool(devices) and (expected is None or expected == len(devices))
+    reported_counts = root.findall('attached_gpus')
+    count_matches = not reported_counts or (
+        len(reported_counts) == 1
+        and len(reported_counts[0]) == 0
+        and re.fullmatch(rf'0*{len(devices)}', (reported_counts[0].text or '').strip()) is not None
+    )
+    inventory_ok = (bool(devices) and count_matches and (expected is None or expected == len(devices))
                     and len(uuids) == len(devices) and all(uuid.startswith('GPU-') for uuid in uuids)
                     and set(config.get('allowed_gpu_uuids', ())) <= uuids)
     if not inventory_ok:

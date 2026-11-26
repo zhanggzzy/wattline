@@ -7,12 +7,14 @@ reads `idle_memory_tolerance_mib` from the probe options with a literal fallback
 collector builds those options from the `Machine` model and always includes the field
 when it is not `None`. The Windows probe (`windows.nvidia_metrics`) computes occupancy
 from process rows alone and never reads the tolerance. A container endpoint forces
-`host_processes=False`, so `visible` is always false there and the state stays unknown.
+`host_processes=False`, so with process checks enabled it reports partial visibility.
+A valid GPU PID establishes occupancy in that scope even without host process details.
 
 ## Goals / Non-Goals
 
 Use a 256 MiB default for Linux hosts and let operators adjust the threshold per machine
-from Configure. Keep the inclusive `<=` comparison and the existing evidence gates.
+from Configure. Keep the inclusive `<=` comparison and verify reported GPU counts
+before using the inventory as evidence of idle.
 
 ## Decisions
 
@@ -41,8 +43,14 @@ from Configure. Keep the inclusive `<=` comparison and the existing evidence gat
 - Keep the existing comparison `used <= tolerance`, which makes the boundary inclusive as
   required. Do not add an epsilon: memory values are already reported in MiB and an
   epsilon would silently move the documented boundary.
-- Leave the container `visible` gate and the Windows rule untouched. Both are the
-  mechanisms that already preserve their behavior.
+- Fold the optional Linux XML `attached_gpus` count into the existing inventory gate.
+  A present field must be a single scalar count that matches the number of direct
+  `gpu` records. A missing field leaves the configured count, UUID and allowlist checks
+  to determine completeness. The sampler continues using the existing inventory warning.
+- Check for a valid PID before applying the idle evidence gates. Without a valid PID,
+  an unverified inventory or incomplete process visibility leaves occupancy unknown.
+  Containers can still report a valid PID. When container resource monitoring is
+  enabled, the existing warning suppression for unknown occupancy applies.
 
 ## Risks / Trade-offs
 

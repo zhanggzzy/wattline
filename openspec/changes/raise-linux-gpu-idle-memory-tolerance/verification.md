@@ -88,3 +88,67 @@ through `Config.model_validate_json`:
 Verification used synthetic data and an isolated browser. The change remains active
 for independent review in AN-210 and AN-212. Rollback of an instance that has stored
 dynamic settings requires the pre-upgrade data backup described in the design.
+
+# AN-214 verification
+
+- The managed checkout started at `origin/main` `0123c748d9c628902105738a7e5a080aaf3e92d4`.
+  The AN-213 attachment SHA-256 matched the handoff
+  (`fcf9547e7302951d68775a38c93e2bc5d64b0b124d3182360e589a69f115c443`).
+  `git am an-211-an-213-linux-gpu-idle-vram.patch` imported both messages in order.
+  The resulting AN-211 tree `445b6bfc4c689dbb8607820497bda28ba3fa265e` matched
+  `0dfcace7941925b157f5473c8f51459482d8a8a2^{tree}`. The resulting AN-213 tree
+  `79274670e844444f5d83143e67405436ae15818e` matched
+  `34008b6f5b5726c384451d75c9cf25734a21e3f7^{tree}`.
+- The checkout had empty Git identity values. Import and commit used the
+  command-scoped `Executor-Codex <executor-codex@localhost>` identity, and
+  `git am` retained both patch authors. The local replay produced new commit IDs.
+- Verification used Python 3.11.17, OpenSpec 1.14.2 and Chromium 159.0.8154.6.
+
+## Reproduction
+
+The AN-210 script's `seed` command ran on the original baseline and stored the
+implicit 0 MiB default in a temporary SQLite registration. Running
+`PYTHONPATH=. .venv/bin/python ../attachments/an-210-repro.py check ../attachments/an-210-fixture`
+on AN-213 showed the count discrepancy before the script stopped at a `KeyError`.
+The script expected new registrations to store a threshold. AN-213 omits that field
+for inherited defaults. After the fix, the same script's `observe` helper sampled
+the seeded registration at its effective 256 MiB threshold and produced these results.
+
+| XML count / one returned GPU | Used VRAM | PID | Verified inventory | Occupancy | Occupancy warning |
+| --- | --- | --- | --- | --- | --- |
+| `1` | 128 MiB | none | yes | `free` | absent |
+| `2` | 128 MiB | none | no | `unknown` | present |
+| `N/A` | 128 MiB | none | no | `unknown` | present |
+| `2` | unavailable | 93 | no | `occupied` | absent |
+
+The committed pytest regression also checks present but invalid counts, compatibility
+with the missing field, partial process visibility with a valid PID, inventory and
+occupancy warnings in collection alert evidence, and both container occupancy states.
+
+## Commands and results
+
+| Command | Result |
+| --- | --- |
+| `.venv/bin/python -m pytest -q 'tests/test_monitor.py::test_linux_gpu_inventory_count_alert[mismatch]'` before the fix | Exit 1, the inventory was incorrectly verified |
+| `.venv/bin/python -m pytest -q tests/test_monitor.py -k 'linux_gpu_inventory_count_alert or linux_gpu_occupancy_tolerance or container_view_keeps_partial_process_visibility or gpu_tolerance_settings_apply_to_later_samples_and_persist'` | Exit 0, 25 passed |
+| `.venv/bin/python -m pytest -q` | Exit 0, 77 passed and one existing Starlette deprecation warning |
+| `.venv/bin/python tools/browser_smoke.py` | Exit 0, PASS, no page errors. Chinese settings saved 0 MiB and English settings saved 512.5 MiB. |
+| `.venv/bin/python tools/resource_browser_smoke.py` | Exit 0, PASS |
+| `node --check wattline/static/monitor.js` and `node tools/test_i18n.cjs` | Exit 0, 417 message keys and placeholder parity |
+| `OPENSPEC_TELEMETRY=0 npx --offline @fission-ai/openspec@1.14.2 validate raise-linux-gpu-idle-memory-tolerance --strict` | Exit 0, change is valid |
+| `git diff --check` and `git diff --cached --check` | Exit 0 |
+
+## Patch replay
+
+The local sequence is AN-211 `63dbd8377b2352c02c86df15aa7f347e81833033`, AN-213
+`45ce62c5c9c1a818c94f377fd576ae042f1e44ec`, then the AN-214 commit containing this record.
+Export with `git format-patch --stdout 0123c748d9c628902105738a7e5a080aaf3e92d4..HEAD`.
+From a clean detached worktree at that baseline, run
+`git am an-211-an-213-an-214-linux-gpu-idle-vram.patch` with a configured Git committer.
+Replay exited 0 and all three trees matched the export. Compare the three trees in
+each worktree with `git rev-parse 'HEAD~2^{tree}' 'HEAD~1^{tree}' 'HEAD^{tree}'`.
+
+## Scope
+
+Verification used synthetic XML, temporary SQLite data and an isolated browser. AN-212
+will independently review the complete patch series before integration.

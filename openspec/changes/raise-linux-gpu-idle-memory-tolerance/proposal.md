@@ -8,16 +8,20 @@ any used VRAM had unknown occupancy. Small residual allocations left by backgrou
 drivers and service processes therefore turn idle cards into “unknown occupancy” and
 produce frequent false alarms. Operators accept small residue and only care about large
 compute usage. AN-213 lets operators tune that same threshold on each Linux GPU machine
-from its existing configuration dialog.
+from its existing configuration dialog. AN-210 found that a Linux sample can report
+more GPUs than it returns and still qualify as complete. AN-214 corrects that check.
 
 ## What Changes
 
 - Raise the default Linux host `idle_memory_tolerance_mib` from 0 MiB to 256 MiB per
   card. A card with complete inventory, complete process enumeration, no valid GPU
   process PID and used VRAM from 0 through 256 MiB inclusive is classified free.
-- Keep the unknown classification and the existing warning for used VRAM above the effective tolerance,
-  for missing used-memory readings, for incomplete GPU inventory and for incomplete
-  process enumeration.
+- When no valid PID is observed, keep the unknown classification and the existing
+  warning for used VRAM above the effective tolerance, missing used-memory readings,
+  incomplete GPU inventory and incomplete process enumeration.
+- Check the Linux XML card count when `attached_gpus` is present. An invalid or
+  mismatched count leaves the inventory unverified. XML without that field still
+  uses the existing inventory checks.
 - Keep observed valid PIDs as occupied. GPU utilization, power and temperature stay out
   of the occupancy decision and keep their current behavior.
 - Keep explicit per-machine `idle_memory_tolerance_mib` values authoritative, including
@@ -29,9 +33,9 @@ from its existing configuration dialog.
 - Keep the configuration model default and the host probe fallback identical, so a
   directly invoked probe without the field matches a node without explicit
   configuration.
-- Preserve Windows and container collection behavior unchanged: the Windows probe has
-  its own occupancy rule and never reads this tolerance, and a container endpoint has
-  incomplete process visibility and therefore stays unknown.
+- Preserve the Windows occupancy rule. With process checks enabled, Linux container
+  endpoints report partial process visibility and classify visible GPUs as occupied
+  when a valid PID is observed or unknown otherwise.
 
 ## Capabilities
 
@@ -47,7 +51,7 @@ None.
 ## Impact
 
 - `wattline/config.py`: machine default and settings request validation.
-- `wattline/host_probe.py`: probe fallback for the same field.
+- `wattline/host_probe.py` applies the probe fallback and verifies the reported card count.
 - Existing snapshot, machine settings API and settings persistence carry the tolerance.
 - The machine settings dialog, API and synthetic collector checks cover saving and
   reading the effective value, invalid input and failed writes.

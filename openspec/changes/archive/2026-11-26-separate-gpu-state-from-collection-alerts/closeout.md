@@ -7,3 +7,5 @@
 - Reviewer-DeepSeek 记录的非阻塞限制包括遗留活动事件会保留到下一次有效采样或人工关闭，以及显著的本地时钟回退可能延后告警转换。
 
 `in-app-alerts` 主规范纳入本 change 的一项需求更新和一项新增需求，保留已有 Purpose 和其他需求。
+
+归档前，Mika 使用 OpenSpec 1.14.2 运行 `validate --specs --strict`（10 项通过）与 `validate separate-gpu-state-from-collection-alerts --strict`（通过），并核对整合提交与审查提交的产品代码、测试及工具文件一致。推送后，`git ls-remote --exit-code origin refs/heads/main` 返回 `70e402c3f68acc3448e3a6c0b3aac7e9106f352d`，与本地整合提交一致。

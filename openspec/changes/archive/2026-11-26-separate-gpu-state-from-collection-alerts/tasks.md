@@ -8,7 +8,7 @@
 ## 2. Independent review and integration
 
 - [x] 2.1 Review the implementation independently in AN-216 and record the reviewer result and reproduced checks in [closeout.md](closeout.md).
-- [ ] 2.2 Integrate through Mika after review and verify the resulting main SHA.
+- [x] 2.2 Integrate through Mika after review and verify the resulting main SHA. See [closeout.md](closeout.md).
 
 ## Workflow follow-up
 

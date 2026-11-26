@@ -25,7 +25,7 @@
 
 ## 5. Independent review
 
-- [ ] 5.1 AN-212 independently verifies the complete handoff and retests AN-210 findings before Mika integrates.
+- [x] 5.1 AN-212 independently verifies the complete handoff and retests AN-210 findings before Mika integrates.
 
 ## Workflow follow-up
 

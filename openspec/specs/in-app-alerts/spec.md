@@ -8,7 +8,7 @@ Store resource alert evidence for operators to locate devices and review inciden
 
 ### Requirement: Persistent alert lifecycle
 
-Wattline SHALL persist offline, stale and abnormal collection events and explicit storage health faults. At most one event per resource and rule SHALL be active. Events SHALL carry first and latest observation times and evidence, plus a recovery or administrative closure time where applicable.
+Wattline SHALL persist abnormal machine collection events and storage offline, stale, abnormal collection and explicit health events. At most one event per resource and rule SHALL be active. Events SHALL carry first and latest observation times and evidence, plus a recovery or administrative closure time where applicable.
 
 #### Scenario: Sustained fault, restart and verified recovery
 - **WHEN** the same rule triggers repeatedly, including after restart
@@ -25,3 +25,27 @@ The overview SHALL summarize active stored events. The alert center SHALL filter
 #### Scenario: Locate a device from persisted evidence
 - **WHEN** an operator selects an alert
 - **THEN** the event detail shows its lifecycle, last success when known and a link to the affected device if it still exists.
+
+### Requirement: Machine collection issues and GPU occupancy
+
+Wattline SHALL open a collection issue for machine sample failure, timeout or expiration of the most recent valid live sample. A new valid sample received within the machine's configured validity window SHALL resolve the collection issue. GPU occupancy SHALL be shown in the device status independently of sample validity.
+
+#### Scenario: Valid sample with idle or unconfirmed GPU occupancy
+- **WHEN** machine sampling succeeds and a GPU is idle or its occupancy is unconfirmed
+- **THEN** the GPU device shows its occupancy status and no collection issue opens for that sample.
+
+#### Scenario: Failed or timed out collection
+- **WHEN** the sampler fails to obtain a valid sample or exceeds the sampling timeout
+- **THEN** the collection issue records the failure or timeout evidence.
+
+#### Scenario: Valid sample expires
+- **WHEN** the most recent valid live sample reaches the machine's freshness limit
+- **THEN** the collection issue records expiry as evidence.
+
+#### Scenario: New valid sample recovers collection
+- **WHEN** a newer valid sample arrives within its validity window during an active collection issue
+- **THEN** the issue resolves even if GPU occupancy remains unconfirmed.
+
+#### Scenario: Expired or superseded sample cannot prove recovery
+- **WHEN** a sample arrives already past its freshness limit or is superseded by a newer stored sample
+- **THEN** the older sample does not resolve the current collection issue.

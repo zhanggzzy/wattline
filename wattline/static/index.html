@@ -38,6 +38,7 @@
     <h2 id="machine-dialog-title"><span data-i18n="add_machine">新增机器</span></h2>
     <p id="machine-target" class="mono" hidden></p>
     <fieldset id="machine-fields" aria-label="机器设置" data-i18n-aria-label="machine_settings_m174">
+      <h3 id="machine-properties-heading" data-i18n="configuration_properties" hidden>设备属性</h3>
       <label><span data-i18n="resource_kind">硬件类型</span><select name="hardware_kind">
         <option value="" data-i18n="automatic_type">自动识别</option><option value="cpu">CPU</option>
         <option value="gpu">GPU</option><option value="storage" data-i18n="storage_resource">存储</option>
@@ -63,10 +64,6 @@
         <label><span data-i18n="display_alias">显示别名</span><input name="alias" type="text" maxlength="80" placeholder="留空使用默认名称" data-i18n-placeholder="leave_blank_for_default_name" autocomplete="off"></label>
         <label><span data-i18n="check_interval_seconds">巡检间隔（秒）</span><input name="interval_seconds" type="number" min="1" max="300" step="any" required></label>
         <label id="ssh-timeout-field"><span data-i18n="ssh_connection_timeout_seconds">SSH 连接超时（秒）</span><input name="ssh_connect_timeout_seconds" type="number" min="1" max="60" step="1" required></label>
-        <div id="idle-memory-tolerance-field" class="full-width" hidden>
-          <label><span data-i18n="idle_memory_tolerance_mib">空闲显存容差（MiB）</span><input name="idle_memory_tolerance_mib" type="number" min="0" step="any" required disabled aria-describedby="idle-memory-tolerance-help"></label>
-          <p id="idle-memory-tolerance-help" data-i18n="idle_memory_tolerance_help">每张卡单独比较。GPU 清单和进程表完整、无 GPU 进程且已用显存不超过此值时，判为空闲。</p>
-        </div>
       </div>
       <label class="check-label"><input name="enabled" type="checkbox"><span data-i18n="enable_background_monitoring">启用后台巡检</span></label>
       <fieldset class="check-options">
@@ -78,11 +75,28 @@
         <label class="check-label"><input name="checks" type="checkbox" value="system"><span data-i18n="system_disk_and_uptime">系统盘与运行时长</span></label>
       </fieldset>
       </fieldset>
+      <h3 id="machine-placement-heading" data-i18n="configuration_placement" hidden>归属</h3>
       <label id="registration-room" hidden><span data-i18n="rooms">机房</span><select name="room_id" disabled></select></label>
+      <p id="machine-clusters" hidden></p>
       <label id="registration-user"><span data-i18n="assignees">使用人</span><select name="resource_user"></select></label>
+      <section id="idle-memory-tolerance-field" class="configuration-section" hidden>
+        <h3 data-i18n="configuration_gpu">Linux GPU 占用</h3>
+        <label><span data-i18n="idle_memory_tolerance_mib">空闲显存容差（MiB）</span><input name="idle_memory_tolerance_mib" type="number" min="0" step="any" disabled aria-describedby="idle-memory-tolerance-help" data-i18n-placeholder="configuration_inherit"></label>
+        <p id="idle-memory-tolerance-help" data-i18n="configuration_clear_help">留空可恢复继承，0 会明确覆盖本级。</p>
+        <p id="machine-configuration-summary"></p>
+        <p id="machine-sampled-configuration" hidden></p>
+        <label id="machine-source-field" hidden><span data-i18n="configuration_cluster_source">集群配置来源</span><select name="configuration_cluster_id" disabled></select></label>
+        <p id="machine-configuration-conflict" class="form-error" hidden></p>
+      </section>
+      <section id="machine-assignment-section" class="configuration-section" hidden>
+        <h3 data-i18n="assignees">使用者</h3>
+        <p id="machine-assignment-preview"></p>
+        <button type="button" class="control" data-edit-assignees data-i18n="configuration_edit_assignees">编辑使用者</button>
+      </section>
     </fieldset>
     <p id="machine-error" class="form-error" role="alert" hidden></p>
     <div class="dialog-actions">
+      <button type="button" class="control danger-control configuration-remove" data-remove-machine data-i18n="remove_node" hidden>移除节点</button>
       <button id="machine-cancel" type="button" class="control"><span data-i18n="cancel">取消</span></button>
       <button id="machine-save" type="submit" class="control primary-control" data-i18n="save">保存</button>
     </div>
@@ -152,6 +166,7 @@
   <form id="group-form">
     <h2 id="group-dialog-title"></h2>
     <fieldset id="group-fields">
+      <h3 data-i18n="configuration_properties">实体属性</h3>
       <label><span data-i18n="group_name">名称</span><input name="group_name" maxlength="80" required></label>
       <label id="group-location-field"><span data-i18n="room_location">位置</span><input name="location" maxlength="128"></label>
       <label><span id="group-person-label"></span><select name="person"></select></label>
@@ -160,11 +175,36 @@
         <input name="member_search" type="search" class="search" data-i18n-aria-label="group_member_search" data-i18n-placeholder="group_member_search">
         <div id="group-member-options"></div>
       </fieldset>
+      <section id="group-configuration" class="configuration-section" hidden>
+        <h3 data-i18n="configuration_gpu">Linux GPU 占用</h3>
+        <label><span data-i18n="idle_memory_tolerance_mib">空闲显存容差（MiB）</span><input name="idle_memory_tolerance_mib" type="number" min="0" step="any" data-i18n-placeholder="configuration_inherit" aria-describedby="group-configuration-help"></label>
+        <p id="group-configuration-help" data-i18n="configuration_clear_help">留空可恢复继承，0 会明确覆盖本级。</p>
+        <p id="group-configuration-summary"></p>
+        <div id="group-member-configuration" hidden>
+          <p data-i18n="configuration_member_help">成员机器的生效值会随本机覆盖、集群和所在机房而不同。</p>
+          <ul id="group-member-values"></ul>
+        </div>
+      </section>
     </fieldset>
     <div id="group-delete-preview" hidden></div>
     <p id="group-error" class="form-error" role="alert" hidden></p>
-    <div class="dialog-actions"><button id="group-cancel" type="button" class="control" data-i18n="cancel">取消</button>
+    <div class="dialog-actions"><button id="group-remove" type="button" class="control danger-control configuration-remove" data-i18n="remove_group" hidden>删除分组</button>
+      <button id="group-cancel" type="button" class="control" data-i18n="cancel">取消</button>
       <button id="group-save" type="submit" class="control primary-control" data-i18n="save">保存</button></div>
+  </form>
+</dialog>
+<dialog class="machine-dialog" id="global-configuration-dialog" aria-labelledby="global-configuration-title">
+  <form id="global-configuration-form">
+    <h2 id="global-configuration-title" data-i18n="global_configuration">全局配置</h2>
+    <section class="configuration-section">
+      <h3 data-i18n="configuration_gpu">Linux GPU 占用</h3>
+      <label><span data-i18n="idle_memory_tolerance_mib">空闲显存容差（MiB）</span><input name="idle_memory_tolerance_mib" type="number" min="0" step="any" data-i18n-placeholder="configuration_builtin" aria-describedby="global-configuration-help"></label>
+      <p id="global-configuration-help" data-i18n="configuration_global_clear">留空可恢复内置默认值。</p>
+      <p id="global-configuration-summary"></p>
+    </section>
+    <p id="global-configuration-error" class="form-error" role="alert" hidden></p>
+    <div class="dialog-actions"><button id="global-configuration-cancel" type="button" class="control" data-i18n="cancel">取消</button>
+      <button id="global-configuration-save" type="submit" class="control primary-control" data-i18n="save">保存</button></div>
   </form>
 </dialog>
 <script src="/static/locales.js" defer></script>

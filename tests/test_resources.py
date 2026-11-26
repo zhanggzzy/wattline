@@ -31,7 +31,7 @@ def test_resource_types_and_legacy_assignees_survive_upgrade(tmp_path):
     second = history.save_person(None, 'Second')
     history.save_assignees(cpu.history_key, (first, second))
     with history.connect() as db:
-        for table in ('cluster_resources','resource_rooms','resource_order','clusters','rooms',
+        for table in ('global_configuration','cluster_resources','resource_rooms','resource_order','clusters','rooms',
                       'storage_ticks','storage_resources','alerts','shared_users'):
             db.execute(f'DROP TABLE {table}')
         db.execute('PRAGMA user_version=8')

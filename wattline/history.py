@@ -212,17 +212,16 @@ class History:
 
     def save_machine(self, identity, registration, settings, alias, new_pins, order=None,
                      assignment=None, closure=None, location=None):
-        tolerance = 'idle_memory_tolerance_mib'
         with self.connect() as db:
             values = json.loads(settings)
-            if tolerance not in values:
-                # Read and preserve an existing override in the same write transaction.
+            omitted = {'idle_memory_tolerance_mib', 'configuration_cluster_id'} - values.keys()
+            if omitted:
+                # Preserve omitted settings, including an explicitly stored null.
                 db.execute('BEGIN IMMEDIATE')
                 row = db.execute('SELECT settings FROM machine_settings WHERE machine=?', (identity,)).fetchone()
                 previous = json.loads(row[0]) if row else {}
-                if tolerance in previous:
-                    values[tolerance] = previous[tolerance]
-                    settings = json.dumps(values)
+                values.update({field:previous[field] for field in omitted if field in previous})
+                settings = json.dumps(values)
             db.execute("""
                 INSERT INTO machine_settings(machine,registration,settings) VALUES (?,?,?)
                 ON CONFLICT(machine) DO UPDATE SET settings=excluded.settings
@@ -242,9 +241,9 @@ class History:
         with self.connect(read=True) as db:
             db.row_factory = sqlite3.Row
             rooms = {row['id']:dict(row) for row in db.execute(
-                'SELECT id,name,location,owner AS owner_id FROM rooms ORDER BY name')}
+                'SELECT id,name,location,owner AS owner_id,idle_memory_tolerance_mib FROM rooms ORDER BY name')}
             clusters = {row['id']:dict(row, keys=()) for row in db.execute(
-                'SELECT id,name,person AS person_id,shared FROM clusters ORDER BY name')}
+                'SELECT id,name,person AS person_id,shared,idle_memory_tolerance_mib FROM clusters ORDER BY name')}
             members = db.execute('SELECT cluster,resource FROM cluster_resources ORDER BY cluster,resource')
             for id, resources in groupby(members, key=lambda row:row['cluster']):
                 clusters[id]['keys'] = tuple(row['resource'] for row in resources)
@@ -254,17 +253,33 @@ class History:
 
     def save_room(self, id, room):
         with self.connect() as db:
-            db.execute("""INSERT INTO rooms VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET
-                          name=excluded.name,location=excluded.location,owner=excluded.owner""",
-                       (id,room.name,room.location,room.owner_id))
+            db.execute("""INSERT INTO rooms(id,name,location,owner,idle_memory_tolerance_mib)
+                          VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+                          name=excluded.name,location=excluded.location,owner=excluded.owner,
+                          idle_memory_tolerance_mib=CASE WHEN ? THEN excluded.idle_memory_tolerance_mib
+                                                        ELSE rooms.idle_memory_tolerance_mib END""",
+                       (id,room.name,room.location,room.owner_id,room.idle_memory_tolerance_mib,
+                        'idle_memory_tolerance_mib' in room.model_fields_set))
 
     def save_cluster(self, id, cluster, keys):
         with self.connect() as db:
-            db.execute("""INSERT INTO clusters VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET
-                          name=excluded.name,person=excluded.person,shared=excluded.shared""",
-                       (id,cluster.name,cluster.person_id,cluster.shared))
+            db.execute("""INSERT INTO clusters(id,name,person,shared,idle_memory_tolerance_mib)
+                          VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+                          name=excluded.name,person=excluded.person,shared=excluded.shared,
+                          idle_memory_tolerance_mib=CASE WHEN ? THEN excluded.idle_memory_tolerance_mib
+                                                        ELSE clusters.idle_memory_tolerance_mib END""",
+                       (id,cluster.name,cluster.person_id,cluster.shared,cluster.idle_memory_tolerance_mib,
+                        'idle_memory_tolerance_mib' in cluster.model_fields_set))
             db.execute('DELETE FROM cluster_resources WHERE cluster=?', (id,))
             db.executemany('INSERT INTO cluster_resources VALUES (?,?)', ((id,key) for key in keys))
+
+    def global_idle_tolerance(self):
+        with self.connect(read=True) as db:
+            return db.execute('SELECT idle_memory_tolerance_mib FROM global_configuration WHERE id=1').fetchone()[0]
+
+    def save_global_idle_tolerance(self, value):
+        with self.connect() as db:
+            db.execute('UPDATE global_configuration SET idle_memory_tolerance_mib=? WHERE id=1', (value,))
 
     def delete_group(self, kind, id):
         table = 'rooms' if kind == 'room' else 'clusters'

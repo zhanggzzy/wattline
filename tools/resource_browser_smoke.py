@@ -243,6 +243,102 @@ def check_groups(page, client):
     page.screenshot(path=OUT/'an164-cluster-320.png',full_page=True)
 
 
+def check_layered_configuration(browser):
+    field = 'idle_memory_tolerance_mib'
+    hosts = tuple(Machine(id=id, expected_host_id=identity*32, mode='ssh', ssh_alias=id,
+                          enabled=False, hardware_kind='gpu') for id,identity in (('east-gpu','a'),('west-gpu','b')))
+    with TemporaryDirectory() as directory:
+        config = Config(data_dir=Path(directory), machines=hosts)
+        with TestClient(create_app(config), base_url=ORIGIN) as client:
+            def seed(path, **body):
+                return client.post(path, json=body).raise_for_status().json()['id']
+
+            east = seed('/api/rooms', name='East Room', **{field:128})
+            west = seed('/api/rooms', name='West Room')
+            for machine,room in zip(hosts,(east,west)):
+                client.put(f'/api/resources/{machine.id}/room',json={'room_id':room}).raise_for_status()
+            across = seed('/api/clusters', name='Across Rooms', members=[host.id for host in hosts])
+            local = seed('/api/clusters', name='East Workloads', members=['east-gpu'])
+            page, errors = open_api_page(browser, client)
+            page.set_viewport_size({'width':390,'height':844})
+            deletes = []
+            page.on('request', lambda request: deletes.append(request) if request.method == 'DELETE' else None)
+            field_selector = f'[name={field}]'
+            group_dialog = page.locator('#group-dialog')
+            group_entry = page.locator('.page-title [data-edit-group]')
+            global_dialog = page.locator('#global-configuration-dialog')
+            machine_dialog = page.locator('#machine-dialog')
+
+            page.get_by_role('button',name='全局配置').click()
+            expect(global_dialog.locator(field_selector)).to_have_value('')
+            expect(global_dialog.locator('#global-configuration-summary')).to_contain_text('256 MiB')
+            global_dialog.locator(field_selector).fill('384')
+            page.locator('#global-configuration-save').click()
+            expect(global_dialog).to_be_hidden()
+
+            page.locator('.group-summary').get_by_role('button',name='West Room',exact=True).click()
+            group_entry.click()
+            expect(group_dialog.locator('#group-configuration-summary')).to_contain_text('全局')
+            expect(group_dialog.locator('#group-configuration-summary')).to_contain_text('384 MiB')
+            expect(group_dialog.locator('[name=person]')).to_be_visible()
+            page.locator('#group-cancel').click()
+            page.locator('.resource-panel').get_by_role('button',name='Across Rooms').click()
+            group_entry.click()
+            expect(group_dialog.locator('#group-configuration-summary')).to_contain_text('按成员机器')
+            rows = group_dialog.locator('#group-member-values li')
+            expect(rows.filter(has_text='east-gpu')).to_contain_text('128 MiB')
+            expect(rows.filter(has_text='east-gpu')).to_contain_text('East Room')
+            expect(rows.filter(has_text='west-gpu')).to_contain_text('384 MiB')
+            assert group_dialog.evaluate('dialog => dialog.scrollWidth <= dialog.clientWidth')
+            group_dialog.screenshot(path=OUT/'an219-cross-room-zh.png')
+            group_dialog.locator(field_selector).fill('512')
+            page.locator('#group-save').click()
+            expect(group_dialog).to_be_hidden()
+            assert client.get('/api/snapshot').json()['groups']['clusters'][0][field] == 512
+            client.put(f'/api/clusters/{local}',json={'name':'East Workloads','members':['east-gpu'],field:64}).raise_for_status()
+            page.wait_for_function("state.snapshot.machines.find(node => node.id === 'east-gpu').idle_memory_configuration.cluster_conflict")
+            page.locator('#host-rows [data-host=east-gpu]').first.click()
+            page.locator('#locale-select').select_option('en')
+            expect(page.locator('.page-title [data-remove-machine], .page-title [data-edit-assignees]')).to_have_count(0)
+            page.get_by_role('button',name='Configure',exact=True).click()
+            expect(machine_dialog.get_by_role('button',name='Edit assignees')).to_be_visible()
+            expect(machine_dialog.locator('[name=room_id]')).to_have_value(east)
+            expect(machine_dialog.locator('#machine-configuration-conflict')).to_contain_text('conflicting')
+            expect(machine_dialog.locator('#machine-configuration-summary')).to_contain_text('128 MiB')
+            machine_dialog.locator('[name=configuration_cluster_id]').select_option(across)
+            page.locator('#machine-save').click()
+            expect(machine_dialog).to_be_hidden()
+            page.get_by_role('button',name='Configure',exact=True).click()
+            expect(machine_dialog.locator('#machine-configuration-conflict')).to_be_hidden()
+            expect(machine_dialog.locator('#machine-configuration-summary')).to_contain_text('512 MiB')
+            expect(machine_dialog.locator('#machine-configuration-summary')).to_contain_text('Across Rooms')
+            machine_dialog.locator(field_selector).fill('0')
+            page.locator('#machine-save').click()
+            page.get_by_role('button',name='Configure',exact=True).click()
+            expect(machine_dialog.locator('#machine-configuration-summary')).to_contain_text('Local override')
+            expect(machine_dialog.locator(field_selector)).to_have_value('0')
+            machine_dialog.locator(field_selector).clear()
+            page.locator('#machine-save').click()
+            page.get_by_role('button',name='Configure',exact=True).click()
+            expect(machine_dialog.locator('#machine-configuration-summary')).to_contain_text('512 MiB')
+            assert machine_dialog.evaluate('dialog => dialog.scrollWidth <= dialog.clientWidth')
+            page.locator('[data-remove-machine]').click()
+            expect(page.locator('#remove-dialog')).to_be_visible()
+            assert not deletes
+            page.locator('#remove-cancel').click()
+            expect(machine_dialog).to_be_visible()
+            page.locator('#machine-cancel').click()
+            page.locator(f'.device-group-links [data-group-id="{across}"]').click()
+            group_entry.click()
+            page.locator('#group-remove').click()
+            expect(group_dialog.locator('#group-delete-preview')).to_contain_text('east-gpu')
+            expect(group_dialog.get_by_role('button',name='Confirm removal')).to_be_visible()
+            assert not deletes
+            page.locator('#group-cancel').click()
+            assert not deletes and not errors, errors
+            page.close()
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--browser')
@@ -251,6 +347,7 @@ if __name__ == '__main__':
         browser = playwright.chromium.launch(executable_path=args.browser)
         check_overview_power(browser)
         check_resources(browser)
+        check_layered_configuration(browser)
         browser.close()
     print('PASS: three overview cards, deduplicated current and rated GPU power, independent coverage, storage enrollment, synthetic capacity, persisted alerts, room/cluster management and navigation, '
-          '24-hour chart samples and coverage, keyboard tabs and sorting, filters and narrow layout')
+          '24-hour chart samples and coverage, keyboard tabs and sorting, filters, narrow layout, and localized layered configuration with explicit deletion confirmation')

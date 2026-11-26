@@ -15,7 +15,8 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .collector import CollectionError
 from .config import (
-    AliasUpdate, MachineAssignees, MachineId, MachineOrder, MachineRegistration, MachineRemoval, MachineSettings, PersonName,
+    AliasUpdate, GlobalConfiguration, MachineAssignees, MachineId, MachineOrder, MachineRegistration,
+    MachineRemoval, MachineSettings, PersonName,
 )
 from .groups import ClusterSettings, ResourceLocation, ResourceOrder, RoomSettings
 from .history import GPU_METRICS, HOST_METRICS, OVERVIEW_METRICS, WARM_HOURS
@@ -267,6 +268,10 @@ def create_app(config, *, monitor=None):
             raise HTTPException(409, str(error)) from error
         except (OSError, sqlite3.Error) as error:
             raise HTTPException(503, 'group_save_failed') from error
+
+    @app.put('/api/configuration', dependencies=[Depends(same_origin_json)])
+    async def global_configuration(body: GlobalConfiguration):
+        return await group_mutation(service.configure_global_idle, body)
 
     @app.post('/api/rooms', status_code=201, dependencies=[Depends(same_origin_json)])
     async def add_room(body: RoomSettings):

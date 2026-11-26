@@ -173,3 +173,115 @@ def test_live_overview_power_deduplicates_and_reports_independent_coverage(tmp_p
         assert json.loads(saved) == {'uuid':'GPU-shared','index':0,'power_w':80,'power_limit_w':200}
     finally:
         history.close()
+
+
+def test_layered_configuration_keeps_legacy_values_and_group_writes_atomic(tmp_path):
+    import json
+
+    from wattline.history import History
+
+    field = 'idle_memory_tolerance_mib'
+    first = machine('first','a').model_copy(update={field:0})
+    second, third = machine('second','b'), machine('third','c')
+    legacy = machine('legacy','d')
+    config = Config(data_dir=tmp_path, machines=(first,second,third))
+    history = History(tmp_path)
+    history.prepare()
+    try:
+        registration = legacy.model_copy(update={field:0}).model_dump_json()
+        history.save_machine(legacy.history_key, registration, json.dumps({'enabled':False}), None, {})
+        history.save_machine(third.history_key, None, json.dumps({'enabled':False, field:0}), None, {})
+        with history.connect() as db:
+            db.execute('ALTER TABLE rooms DROP COLUMN idle_memory_tolerance_mib')
+            db.execute('ALTER TABLE clusters DROP COLUMN idle_memory_tolerance_mib')
+            db.execute('DROP TABLE global_configuration')
+            db.execute("INSERT INTO rooms(id,name) VALUES ('east','East'), ('west','West')")
+            db.execute("INSERT INTO clusters(id,name,shared) VALUES ('across','Across',0)")
+            db.execute('INSERT INTO resource_rooms(resource,room) VALUES (?,?),(?,?)',
+                       ('compute:'+first.history_key,'east','compute:'+second.history_key,'west'))
+            db.execute('INSERT INTO cluster_resources(cluster,resource) VALUES (?,?),(?,?)',
+                       ('across','compute:'+first.history_key,'across','compute:'+second.history_key))
+            db.execute('PRAGMA user_version=10')
+    finally:
+        history.close()
+
+    def snapshot(client):
+        return client.get('/api/snapshot').json()
+
+    def policies(client):
+        return {node['id']:node['idle_memory_configuration'] for node in snapshot(client)['machines']}
+
+    def put(client, path, **values):
+        response = client.put(path,json=values)
+        response.raise_for_status()
+        return response.json()
+
+    first_settings = '/api/machines/first/settings'
+    with client_for(config) as client:
+        baseline = policies(client)
+        assert {id:policy['effective'] for id,policy in baseline.items()} == {
+            'first':0,'second':256,'third':0,'legacy':256}
+        assert snapshot(client)['groups']['clusters'][0]['members'] == ['first','second']
+        assert snapshot(client)['groups']['rooms'][0]['idle_memory_configuration']['override'] is None
+        put(client, '/api/configuration', **{field:380})
+        put(client, '/api/rooms/east', name='East', **{field:192})
+        assert put(client, first_settings, enabled=False, **{field:None})[field] == 192
+        assert put(client, first_settings, enabled=False, alias='Fixture')[field] == 192
+        current = policies(client)
+        assert current['first']['source'] == {'scope':'room','ids':['east']}
+        assert current['second']['effective'] == current['legacy']['effective'] == 380
+        assert current['third']['effective'] == 0
+        primary = '/api/clusters/across'
+        put(client, primary, name='Across', members=['first','second'], **{field:64})
+        other = client.post('/api/clusters',json={'name':'Other','members':['first'],field:64}).json()['id']
+        consensus = policies(client)['first']
+        assert consensus['effective'] == 64
+        assert consensus['source'] == {'scope':'cluster','ids':sorted(['across',other])}
+        put(client, '/api/clusters/'+other, name='A renamed cluster', members=['first'])
+        assert policies(client)['first'] == consensus
+        put(client, '/api/clusters/'+other, name='A renamed cluster', members=['first'], **{field:0})
+        assert policies(client)['first']['cluster_conflict']
+        assert policies(client)['first']['effective'] == 192
+        invalid = client.put(first_settings,json={'enabled':False,'configuration_cluster_id':'missing'})
+        assert invalid.status_code == 409
+        chosen = put(client, first_settings, enabled=False, configuration_cluster_id=other)
+        assert chosen[field] == 0 and chosen['idle_memory_configuration']['override'] is None
+        assert put(client, first_settings, enabled=False, **{field:10})[field] == 10
+        assert put(client, first_settings, enabled=False, **{field:None})[field] == 0
+        assert put(client, first_settings, enabled=False)[field] == 0
+        assert client.put('/api/configuration', content='{"idle_memory_tolerance_mib":NaN}',
+                          headers={'Content-Type':'application/json'}).status_code == 422
+        assert client.put('/api/configuration', json={field:192},
+                          headers={'Sec-Fetch-Site':'cross-site'}).status_code == 403
+        with history.connect() as db:
+            db.execute("""CREATE TRIGGER reject_cluster_membership BEFORE INSERT ON cluster_resources
+                          WHEN NEW.cluster='across' BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END""")
+        before = snapshot(client)['groups']
+        assert client.put(primary,json={'name':'Should roll back','members':['second'],field:600}).status_code == 503
+        assert snapshot(client)['groups'] == before
+        with history.connect() as db:
+            db.execute("""CREATE TRIGGER reject_global_configuration BEFORE UPDATE ON global_configuration
+                          BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END""")
+        assert client.put('/api/configuration',json={field:400}).status_code == 503
+        assert policies(client)['legacy']['effective'] == 380
+
+    with client_for(config) as client:
+        current = policies(client)
+        assert current['first']['source'] == {'scope':'cluster','ids':[other]}
+        assert current['first']['override'] is None and current['first']['effective'] == 0
+        assert current['second']['effective'] == 64 and current['legacy']['effective'] == 380
+        group, = [group for group in snapshot(client)['groups']['clusters'] if group['id'] == 'across']
+        assert group['name'] == 'Across' and group['members'] == ['first','second'] and group[field] == 64
+        assert client.request('DELETE', '/api/clusters/'+other, json={'confirm':True}).status_code == 204
+        current = policies(client)['first']
+        assert current['invalid_cluster_selection'] and current['effective'] == 64
+        assert put(client, first_settings, enabled=False, configuration_cluster_id=None)[field] == 64
+        with history.connect() as db:
+            db.execute('DROP TRIGGER reject_cluster_membership')
+            db.execute('DROP TRIGGER reject_global_configuration')
+        put(client, primary, name='Across', members=['first','second'], **{field:None})
+        put(client, '/api/rooms/east', name='East', **{field:None})
+        assert policies(client)['first']['effective'] == 380
+        put(client, '/api/configuration', **{field:None})
+        current = policies(client)
+        assert current['first']['effective'] == 256 and current['third']['effective'] == 0

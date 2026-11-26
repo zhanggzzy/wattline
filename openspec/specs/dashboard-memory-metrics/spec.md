@@ -52,12 +52,12 @@ Defines how Wattline presents machine memory usage in the overview and machine d
 
 ### Requirement: Capacity and percentage by observation scope
 
-Device and group views SHALL expose used bytes, comparable total bytes and percentage when measured. Group machine statistics SHALL use host observations and express coverage against the member machines. Container memory SHALL retain its measured scope in machine details and scope-specific API queries. Group percent SHALL divide summed used by summed total over the same valid pairs.
+Device and group views SHALL expose used bytes, comparable total bytes and percentage when measured. Each machine SHALL contribute one selected memory observation and coverage SHALL be measured against member machines. Group percent SHALL divide summed used by summed total over the same valid pairs. Scope-specific API queries SHALL retain their measured scope.
 
 #### Scenario: Container with unbounded memory
-- **WHEN** an observation has used memory but no limit
-- **THEN** observed usage remains available, and no limit or ratio is fabricated or borrowed from the host.
+- **WHEN** the selected observation has used memory but no limit
+- **THEN** measured usage is shown and counts toward used-memory coverage. Capacity and percent remain missing and the observation contributes no pair to group percent coverage.
 
 #### Scenario: Host and container capacities are both available
-- **WHEN** both views report memory for a verified machine
-- **THEN** group memory totals count only the host capacity once and a container-only machine contributes no capacity to the group host total
+- **WHEN** both views report valid memory for a verified machine
+- **THEN** the machine contributes only the host memory pair. For a machine with just valid container memory, its selected used and total bytes participate as a pair.

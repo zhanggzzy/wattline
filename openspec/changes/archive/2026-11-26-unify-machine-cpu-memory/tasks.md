@@ -15,7 +15,7 @@
 ## 4. Integration and handoff
 
 - [x] 4.1 Record the baseline, actual diff and local test results in `verification.md` after running pytest, the README synthetic browser checks, strict OpenSpec validation and Git diff checks.
-- [ ] 4.2 Record the independent review of the actual delivery commit.
+- [x] 4.2 Record the independent review of the actual delivery commit.
 
 ## Workflow follow-up
 

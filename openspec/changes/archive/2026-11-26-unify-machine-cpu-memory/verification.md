@@ -31,3 +31,11 @@
 - 合成观测覆盖宿主与容器共存、仅宿主、仅容器、同机多容器、分指标回退、真实零值和缺失。加权 CPU 统计以所选 CPU 观测提供的容量计权。无可用容量的内存观测可提供用量，百分比统计采用同源有效配对并有独立覆盖计数。
 - 机器近期趋势、总览序列和冷归档依时间桶选择，核对跨来源断线和显式 `source` / `scope`。历史数据库与 gzip 格式兼容，合成归档读取前后字节一致。
 - 验证范围为临时 SQLite、合成 API 与 Chromium。真实 SSH、容器运行时、生产数据和其他浏览器运行效果仍需对应环境验证。独立审查及整合由 AN-231 和 Mika 后续处理。
+
+## Independent review and integration
+
+Reviewer-DeepSeek (DeepSeek 4.1 Flash) independently passed implementation commit `bd08fe43e05b581fe84e2fff0f371fe34d874390` on 2026-11-26. AN-231 contains the detailed review. It reproduced 91 passing pytest cases, both Chromium smoke checks, JavaScript syntax and localization checks, strict OpenSpec validation and clean diff checks. Independent probes also checked per-metric fallback and breaks when the reading source changes.
+
+An observation with usage and no capacity does not borrow capacity from another source. The latest invalid observation in a bucket can leave a chart gap. For CPU and memory, the optional overview per-machine API field `valid` now indicates availability per point (0 or 1). No repository caller uses that field as a source count. Validation used synthetic data. Real SSH, container runtimes and production data were outside its coverage.
+
+Mika synced the three specification deltas and archived the completed change on 2026-11-26. OpenSpec 1.14.2 strict validation passed for the change and all 12 main specs. The integration run of `.venv/bin/python -m pytest -q` reported 91 passed with one existing Starlette/httpx deprecation warning.

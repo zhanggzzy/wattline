@@ -229,7 +229,8 @@ def monitor_gpus(config, proc, warnings, *, host_processes=True):
         state = 'unknown'
         if processes:
             state = 'occupied'
-        elif inventory_ok and visible and used is not None and used <= config.get('idle_memory_tolerance_mib', 0):
+        # Default matches Machine.idle_memory_tolerance_mib for direct probe payloads.
+        elif inventory_ok and visible and used is not None and used <= config.get('idle_memory_tolerance_mib', 256):
             state = 'free'
         gpus[uuid] = {
             **gpu_measurements(gpu, uuid, warnings),

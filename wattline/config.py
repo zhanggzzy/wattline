@@ -158,7 +158,8 @@ class Machine(BaseModel):
     ssh_connect_timeout_seconds: int = Field(default=DEFAULT_SSH_CONNECT_TIMEOUT, ge=1, le=60)
     require_gpu: bool = True
     expected_gpu_count: int | None = Field(default=None, ge=1, le=256)
-    idle_memory_tolerance_mib: float = Field(default=0, ge=0, allow_inf_nan=False)
+    # Mirrors the host probe fallback, which runs as standalone source over SSH.
+    idle_memory_tolerance_mib: float = Field(default=256, ge=0, allow_inf_nan=False)
     host_proc: Path | None = None
     host_machine_id: Path | None = None
 

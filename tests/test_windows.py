@@ -128,7 +128,7 @@ def test_windows_gpu_partial_measurements_and_empty_inventory():
                          process_evidence={'10':{'started_at':95_000,'user':'测试域\\巡检','name':'训练.exe'},
                                            '11':{'started_at':101_000,'user':'fixture-reused'}},
                          gpu_observed_at=100_000)
-    options = {'checks':['gpu','processes']}
+    options = {'checks':['gpu','processes'], 'idle_memory_tolerance_mib':256}
     metrics = windows.metrics(source, options)
     full, unseen = metrics['gpus']
     assert metrics['gpu_inventory_complete'] is True
@@ -144,7 +144,7 @@ def test_windows_gpu_partial_measurements_and_empty_inventory():
     assert reused['name'] == 'example.exe'
     assert unseen['state'] == 'unknown' and unseen['process_visibility'] == 'partial'
     assert metrics['warnings'] == []
-    disabled = windows.metrics(source, {'checks':['gpu']})['gpus'][0]
+    disabled = windows.metrics(source, {'checks':['gpu'], 'idle_memory_tolerance_mib':256})['gpus'][0]
     assert disabled['processes'] == [] and disabled['state'] == 'unknown'
     for query in (nvidia(), {'empty':True}):
         empty = windows.metrics(wire_sample(nvidia=query), options)

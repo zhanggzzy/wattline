@@ -132,6 +132,64 @@ def test_monitor_probe_nvidia_power_and_host_fields(tmp_path, monkeypatch):
     assert any('nvidia-smi' in warning for warning in waiting['warnings'])
 
 
+def test_idle_memory_tolerance_configuration_defaults():
+    def load(**settings):
+        payload = {'data_dir':'data', 'machines':[{
+            'id':'lab-01', 'mode':'ssh', 'ssh_alias':'lab-01', 'expected_host_id':ID, **settings}]}
+        return Config.model_validate_json(json.dumps(payload)).machines[0]
+
+    assert load().idle_memory_tolerance_mib == 256
+    assert load(idle_memory_tolerance_mib=0).idle_memory_tolerance_mib == 0
+    assert load(idle_memory_tolerance_mib=512).idle_memory_tolerance_mib == 512
+
+
+def idle_gpu_xml(used='0 MiB', *, processes='None', mig=None):
+    memory = (f'<fb_memory_usage><used>{used}</used><total>98304 MiB</total></fb_memory_usage>'
+              if used else '')
+    mig_xml = f'<mig_mode><current_mig>{mig}</current_mig></mig_mode>' if mig else ''
+    return (f'<nvidia_smi_log><gpu><uuid>{GPU}</uuid>{mig_xml}{memory}'
+            f'<processes>{processes}</processes></gpu></nvidia_smi_log>').encode()
+
+
+@pytest.mark.parametrize(('options', 'xml', 'state', 'warned'), [
+    ({}, idle_gpu_xml('0 MiB'), 'free', False),
+    ({}, idle_gpu_xml('256 MiB'), 'free', False),
+    ({}, idle_gpu_xml('256.5 MiB'), 'unknown', True),
+    ({'idle_memory_tolerance_mib':0}, idle_gpu_xml('128 MiB'), 'unknown', True),
+    ({'idle_memory_tolerance_mib':2048}, idle_gpu_xml('1024 MiB'), 'free', False),
+    ({}, idle_gpu_xml('0 MiB', processes='<process_info><pid>93</pid></process_info>'), 'occupied', False),
+    ({}, idle_gpu_xml(''), 'unknown', True),
+    ({}, idle_gpu_xml('0 MiB', processes='N/A'), 'unknown', True),
+    ({}, idle_gpu_xml('0 MiB', mig='Enabled'), 'unknown', True),
+    ({'expected_gpu_count':2}, idle_gpu_xml('0 MiB'), 'unknown', True),
+], ids=['default-zero', 'default-boundary', 'above-boundary', 'explicit-zero',
+        'explicit-high', 'occupied-process', 'missing-used', 'partial-enumeration',
+        'mig-partial', 'incomplete-inventory'])
+def test_linux_gpu_occupancy_tolerance(tmp_path, monkeypatch, options, xml, state, warned):
+    proc = tmp_path/'proc'
+    proc.mkdir()
+    (proc/'uptime').write_text('1000.00 0')
+    monkeypatch.setattr(host_probe.subprocess, 'run',
+                        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=xml))
+    warnings = []
+    gpu = host_probe.monitor_gpus(dict(options), proc, warnings)['gpus'][0]
+    assert gpu['state'] == state
+    assert ('部分 GPU 占用状态无法核实' in warnings) is warned
+
+
+def test_container_view_keeps_occupancy_unknown(tmp_path, monkeypatch):
+    proc = tmp_path/'proc'
+    proc.mkdir()
+    (proc/'uptime').write_text('1000.00 0')
+    monkeypatch.setattr(host_probe.subprocess, 'run',
+                        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=idle_gpu_xml()))
+    warnings = []
+    gpu = host_probe.monitor_gpus({'idle_memory_tolerance_mib':256}, proc, warnings,
+                                  host_processes=False, warn_on_unknown=False)['gpus'][0]
+    assert (gpu['state'], gpu['process_visibility']) == ('unknown', 'partial')
+    assert '部分 GPU 占用状态无法核实' not in warnings
+
+
 @pytest.mark.parametrize(('case', 'verified'), [
     ('valid', True),
     ('subsecond', True),

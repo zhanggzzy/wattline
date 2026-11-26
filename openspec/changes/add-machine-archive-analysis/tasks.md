@@ -11,7 +11,7 @@
 ## 3. Verification and handoff
 
 - [x] 3.1 执行仓库 pytest、JS、浏览器、OpenSpec strict 和 diff 检查，将基准、实测结果和范围写入 [verification.md](verification.md)。
-- [ ] 3.2 AN-221 独立核对实际提交、规范及可复现验证证据，记录审查结论。
+- [x] 3.2 AN-221 独立核对实际提交、规范及可复现验证证据，见 [验证记录](verification.md#独立审查)。
 - [ ] 3.3 Mika 在审查通过后整合并核验远端 main。
 
 ## Workflow follow-up

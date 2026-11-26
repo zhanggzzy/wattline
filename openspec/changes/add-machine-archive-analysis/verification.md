@@ -92,3 +92,27 @@ PY
 ## 边界
 
 归档库在空闲 15 分钟后到期。解压与压缩、节点归档移除争用现有归档锁，首次分析时需扫描已发布的共享 gzip。生产规模耗时、其他浏览器、Linux/Docker 异常退出和合入新远端基线后的运行结果未覆盖。真实节点、用户部署配置和实例数据未用于验证。
+
+## 独立审查
+
+2026-11-26 12:35 UTC，AN-221 的 Reviewer-DeepSeek（运行模型 `deepseek-flash`）对实现提交 `5eb022d05c99a5a72999b4be8cfd9a9a9ef71802` 给出通过结论，无需返工。审查者对照 AN-220、OpenSpec 与 Git diff，核对了机器身份和入口隔离、日期与夏令时边界、真实进度、历史图表语义、失败重试、归档完整性及并发回收。审查保持实现和规范文件只读。
+
+审查者复跑了上表中的完整 pytest（59 项）、两套 Chromium 检查、JS 语法、双语检查（427 键）、OpenSpec 1.14.2 strict 和 Git diff 检查，均退出 0。另以 `git merge-tree --write-tree 5eb022d deaa326` 生成组合树 `bedf215c409d2c2a31e27a2bff76e11b59e6e7c3`，在该树的临时副本复跑完整 pytest，87 项通过。组合树的浏览器和双语检查留给整合验证。
+
+审查指出共享归档扫描期间，后续分析作业和日维护需等待。生产规模耗时、其他浏览器及 Linux/Docker 异常退出未覆盖。
+
+## 主干整合验证
+
+2026-11-26，Mika 在固定开发目录使用 `git fetch --no-tags origin main` 和 `git -c merge.autostash=false merge --no-ff --no-edit origin/main`，均退出 0。远端基准为 `deaa3269f158d1da33219e077d0176c1ef520ef2`。合并提交 `d24df306439b327edfee176d5571731525508e78` 的树与审查者的组合树一致。以 `git diff deaa326 d24df30` 查看面向远端基准的实际改动。工作树中的本地注入块在合并前后相同，索引只含通用仓库约定。
+
+| 命令 | 退出码 | 实测摘要 |
+| --- | ---: | --- |
+| `.venv/bin/python -m pytest -q` | 0 | 87 passed，1 条现有 Starlette/httpx 弃用提示 |
+| `.venv/bin/python tools/browser_smoke.py` | 0 | Chromium 159.0.8154.6，PASS，页面错误为空。归档实际中间进度 49%，按 `Asia/Shanghai` 筛选的单日范围返回 2 个样本，失败重试、无归档、区间无样本和入口范围通过 |
+| `.venv/bin/python tools/resource_browser_smoke.py` | 0 | PASS，覆盖资源总览、存储、告警、分组、图表、窄屏和分层配置 |
+| `node --check wattline/static/monitor.js` | 0 | 无输出 |
+| `node tools/test_i18n.cjs` | 0 | PASS，456 个双语键 |
+| `OPENSPEC_TELEMETRY=0 npx --offline @fission-ai/openspec@1.14.2 validate add-machine-archive-analysis --strict` | 0 | Change is valid |
+| `git diff --check`、`git diff --cached --check`、`git diff --check origin/main HEAD` | 0 | 无输出 |
+
+验证使用合成数据。生产规模性能、非 Chromium 浏览器和 Linux/Docker 进程异常退出仍未实测。整合与归档的远端交付见 [任务 3.3](tasks.md)。

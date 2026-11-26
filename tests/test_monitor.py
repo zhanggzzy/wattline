@@ -7,6 +7,7 @@ import time
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 import pytest
 
 from wattline.app import create_app
@@ -1369,3 +1370,114 @@ async def test_settings_replace_sampler_without_overlap_and_disabled_hosts_stay_
         assert service.snapshot()['machines'][0]['status'] == 'disabled'
     finally:
         await service.close()
+
+
+async def test_gpu_tolerance_settings_apply_to_later_samples_and_persist(tmp_path, monkeypatch):
+    field = 'idle_memory_tolerance_mib'
+    warning = '部分 GPU 占用状态无法核实'
+    settings = {'checks':['gpu', 'processes'], 'interval_seconds':10}
+    host = machine(checks=tuple(settings['checks']))
+    file_override = machine('lab-02', 'b'*32, enabled=False, idle_memory_tolerance_mib=0)
+    legacy_registration = machine('lab-03', 'c'*32, idle_memory_tolerance_mib=0)
+    config = Config(data_dir=tmp_path, machines=(host, file_override))
+    history = History(tmp_path)
+    history.prepare()
+    try:
+        for node, registration in ((file_override, None), (legacy_registration, legacy_registration.model_dump_json())):
+            history.save_machine(node.history_key, registration, json.dumps({'enabled':False}), None, {})
+    finally:
+        history.close()
+
+    (tmp_path/'uptime').write_text('1000.00 0')
+    used = '256 MiB'
+    monkeypatch.setattr(host_probe.subprocess, 'run',
+                        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout=idle_gpu_xml(used)))
+    thresholds = []
+
+    async def transport(argv, payload, timeout):
+        options = json.loads(payload)
+        assert options['checks'] == settings['checks']
+        thresholds.append(options[field])
+        warnings = []
+        measured = host_probe.monitor_gpus(options, tmp_path, warnings)
+        return 0, json.dumps({'data':dict(data(), **measured, warnings=warnings)}).encode(), b''
+
+    clock = ManualTime()
+    service = Monitor(config, Collector(config, transport), clock.clock, clock.sleep, lambda: clock.seconds)
+    url = f'/api/machines/{host.id}/settings'
+
+    async def read_nodes(client):
+        response = await client.get('/api/snapshot')
+        assert response.status_code == 200
+        return {node['id']:node for node in response.json()['machines']}
+
+    async def expect_sample(client, at, tolerance, state):
+        await eventual(lambda: service.latest.get(host.id, {}).get('observed_at') == at)
+        node = (await read_nodes(client))[host.id]
+        assert thresholds[-1] == node[field] == tolerance
+        assert node['metrics']['gpus'][0]['state'] == state
+        assert (warning in node['warnings']) == (state == 'unknown')
+
+    app = create_app(config, monitor=service)
+    async with app.router.lifespan_context(app), AsyncClient(
+        transport=ASGITransport(app=app), base_url='http://127.0.0.1'
+    ) as client:
+        await expect_sample(client, clock.clock(), 256, 'free')
+        sampler = service.samplers[host.id]
+        nodes = await read_nodes(client)
+        assert nodes[file_override.id][field] == 0
+        assert nodes[legacy_registration.id][field] == 256
+        for node, expected in ((file_override, 0), (legacy_registration, 256)):
+            response = await client.put(f'/api/machines/{node.id}/settings', json={'enabled':False})
+            assert response.status_code == 200 and response.json()[field] == expected
+
+        tolerance = 300.50000000000006
+        response = await client.put(url, json=dict(settings, **{field:tolerance}))
+        assert response.status_code == 200 and response.json()[field] == tolerance
+        assert (await read_nodes(client))[host.id][field] == tolerance
+        assert thresholds == [256] and service.samplers[host.id] is sampler
+        assert (await client.put(url, json=settings)).json()[field] == tolerance
+        stored = {identity:json.loads(values) for identity, _, values in service.history.machine_settings()}
+        assert stored[host.history_key][field] == tolerance
+        assert field not in stored[file_override.history_key]
+        assert field not in stored[legacy_registration.history_key]
+        used = f'{tolerance} MiB'
+        clock.advance(10)
+        await expect_sample(client, clock.clock(), tolerance, 'free')
+        used = '300.75 MiB'
+        clock.advance(10)
+        await expect_sample(client, clock.clock(), tolerance, 'unknown')
+
+        assert (await client.put(url, json=dict(settings, **{field:0}))).json()[field] == 0
+        assert (await client.put(url, json=settings)).json()[field] == 0
+        used = '0 MiB'
+        clock.advance(10)
+        await expect_sample(client, clock.clock(), 0, 'free')
+        saved_rows = service.history.machine_settings()
+        for raw_value in ('-1', '1e309', 'NaN', 'Infinity', '-Infinity', 'null', 'true', '"12"', '{"value": NaN}'):
+            body = json.dumps(dict(settings, **{field:'value'})).replace('"value"', raw_value)
+            response = await client.put(url, content=body, headers={'Content-Type':'application/json'})
+            assert response.status_code == 422
+            assert response.json()['detail'][0]['loc'] == ['body', field]
+
+        # Fail after the transaction has already attempted to update the settings row.
+        with service.history.connect() as db:
+            db.execute("""CREATE TRIGGER reject_alias BEFORE INSERT ON machine_aliases
+                          BEGIN SELECT RAISE(ABORT, 'synthetic settings failure'); END""")
+        response = await client.put(url, json=dict(settings, alias='will fail', **{field:800}))
+        assert response.status_code == 503
+        assert service.history.machine_settings() == saved_rows
+        assert service.samplers[host.id] is sampler
+        used = '1 MiB'
+        clock.advance(10)
+        await expect_sample(client, clock.clock(), 0, 'unknown')
+
+    service = Monitor(config, Collector(config, transport), clock.clock, clock.sleep, lambda: clock.seconds)
+    app = create_app(config, monitor=service)
+    async with app.router.lifespan_context(app), AsyncClient(
+        transport=ASGITransport(app=app), base_url='http://127.0.0.1'
+    ) as client:
+        await expect_sample(client, clock.clock(), 0, 'unknown')
+        nodes = await read_nodes(client)
+        assert nodes[file_override.id][field] == 0
+        assert nodes[legacy_registration.id][field] == 256

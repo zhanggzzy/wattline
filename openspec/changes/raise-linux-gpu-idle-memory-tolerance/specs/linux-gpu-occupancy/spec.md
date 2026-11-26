@@ -26,6 +26,51 @@ capacity.
   non-negative value
 - **THEN** that value is used instead of the 256 MiB default.
 
+### Requirement: Edit the effective Linux GPU tolerance
+
+Wattline SHALL show the effective per-card tolerance in Machine details → Configure
+for Linux GPU hosts and accept a finite non-negative number of MiB, including zero.
+The settings API SHALL report the effective value.
+
+#### Scenario: Localized setting and saved readback
+
+- **WHEN** an operator opens the settings in either supported language and saves a valid
+  tolerance
+- **THEN** the localized control shows the current value, the save response and
+  subsequent reads report the new value, and later samples use it without a service restart
+
+#### Scenario: Inapplicable device
+
+- **WHEN** the operator opens settings for Windows, a known container endpoint, a CPU
+  machine or a storage device
+- **THEN** the tolerance control is hidden
+
+### Requirement: Preserve the tolerance across settings updates
+
+A successfully saved override SHALL take precedence over the base configuration and
+survive service restart. An omitted field SHALL preserve the effective value and its
+inheritance. An invalid value or failed write SHALL preserve both the effective and
+stored settings.
+
+#### Scenario: Existing machine or client
+
+- **WHEN** an old settings row or a settings request omits the threshold
+- **THEN** Wattline uses any stored override, the explicit base configuration if present,
+  or the 256 MiB default
+
+#### Scenario: Existing registration serialized the old default
+
+- **WHEN** a machine registered before AN-211 has 0 MiB in its registration record
+  and its settings omit the threshold
+- **THEN** the machine inherits the 256 MiB default
+
+#### Scenario: Rejected update
+
+- **WHEN** the service receives a negative or non-finite value, or the settings
+  transaction fails
+- **THEN** the API returns an error and later samples and reads use the previously
+  effective threshold, including after restart
+
 ### Requirement: Linux GPU occupancy classification
 
 Wattline SHALL classify each visible Linux GPU as occupied when at least one valid GPU

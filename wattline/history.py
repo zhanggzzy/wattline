@@ -212,7 +212,17 @@ class History:
 
     def save_machine(self, identity, registration, settings, alias, new_pins, order=None,
                      assignment=None, closure=None, location=None):
+        tolerance = 'idle_memory_tolerance_mib'
         with self.connect() as db:
+            values = json.loads(settings)
+            if tolerance not in values:
+                # Read and preserve an existing override in the same write transaction.
+                db.execute('BEGIN IMMEDIATE')
+                row = db.execute('SELECT settings FROM machine_settings WHERE machine=?', (identity,)).fetchone()
+                previous = json.loads(row[0]) if row else {}
+                if tolerance in previous:
+                    values[tolerance] = previous[tolerance]
+                    settings = json.dumps(values)
             db.execute("""
                 INSERT INTO machine_settings(machine,registration,settings) VALUES (?,?,?)
                 ON CONFLICT(machine) DO UPDATE SET settings=excluded.settings

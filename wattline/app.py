@@ -7,6 +7,8 @@ import sqlite3
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Path as PathParameter, Query, Request, Response
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -51,6 +53,15 @@ def create_app(config, *, monitor=None):
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=['127.0.0.1','localhost'], www_redirect=False)
     app.mount('/static', StaticFiles(directory=STATIC), name='static')
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, error: RequestValidationError):
+        errors = error.errors()
+        if any(item['loc'] == ('body', 'idle_memory_tolerance_mib') for item in errors):
+            # An invalid tolerance can contain non-finite values that JSON cannot echo.
+            error = RequestValidationError([{key: value for key, value in item.items() if key != 'input'}
+                                            for item in errors])
+        return await request_validation_exception_handler(request, error)
 
     @app.middleware('http')
     async def access(request: Request, call_next):

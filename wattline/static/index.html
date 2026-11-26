@@ -63,6 +63,10 @@
         <label><span data-i18n="display_alias">显示别名</span><input name="alias" type="text" maxlength="80" placeholder="留空使用默认名称" data-i18n-placeholder="leave_blank_for_default_name" autocomplete="off"></label>
         <label><span data-i18n="check_interval_seconds">巡检间隔（秒）</span><input name="interval_seconds" type="number" min="1" max="300" step="any" required></label>
         <label id="ssh-timeout-field"><span data-i18n="ssh_connection_timeout_seconds">SSH 连接超时（秒）</span><input name="ssh_connect_timeout_seconds" type="number" min="1" max="60" step="1" required></label>
+        <div id="idle-memory-tolerance-field" class="full-width" hidden>
+          <label><span data-i18n="idle_memory_tolerance_mib">空闲显存容差（MiB）</span><input name="idle_memory_tolerance_mib" type="number" min="0" step="any" required disabled aria-describedby="idle-memory-tolerance-help"></label>
+          <p id="idle-memory-tolerance-help" data-i18n="idle_memory_tolerance_help">每张卡单独比较。GPU 清单和进程表完整、无 GPU 进程且已用显存不超过此值时，判为空闲。</p>
+        </div>
       </div>
       <label class="check-label"><input name="enabled" type="checkbox"><span data-i18n="enable_background_monitoring">启用后台巡检</span></label>
       <fieldset class="check-options">

@@ -12,6 +12,7 @@ ComputeKind = Literal['cpu', 'gpu']
 PersonId = Annotated[int, Field(strict=True, gt=0, le=2**53-1)]
 TargetOS = Literal['linux', 'windows']
 DEFAULT_CHECKS = ('gpu', 'processes', 'cpu', 'memory', 'system')
+DEFAULT_IDLE_MEMORY_TOLERANCE_MIB = 256
 SSH_USER = r'^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,63}$'
 HOST_KEY = r'SHA256:[A-Za-z0-9+/]{43}'
 MachineId = Annotated[str, Field(pattern=r'^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,63}$')]
@@ -37,6 +38,8 @@ class MachineSettings(AliasUpdate):
     checks: tuple[Check, ...] = Field(default=DEFAULT_CHECKS, max_length=len(DEFAULT_CHECKS))
     interval_seconds: float = Field(default=10, ge=1, le=300)
     ssh_connect_timeout_seconds: int = Field(default=DEFAULT_SSH_CONNECT_TIMEOUT, ge=1, le=60)
+    idle_memory_tolerance_mib: float = Field(default=DEFAULT_IDLE_MEMORY_TOLERANCE_MIB,
+                                            ge=0, allow_inf_nan=False, strict=True)
 
     @model_validator(mode='before')
     @classmethod
@@ -159,7 +162,8 @@ class Machine(BaseModel):
     require_gpu: bool = True
     expected_gpu_count: int | None = Field(default=None, ge=1, le=256)
     # Mirrors the host probe fallback, which runs as standalone source over SSH.
-    idle_memory_tolerance_mib: float = Field(default=256, ge=0, allow_inf_nan=False)
+    idle_memory_tolerance_mib: float = Field(default=DEFAULT_IDLE_MEMORY_TOLERANCE_MIB,
+                                            ge=0, allow_inf_nan=False)
     host_proc: Path | None = None
     host_machine_id: Path | None = None
 

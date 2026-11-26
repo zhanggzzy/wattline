@@ -191,6 +191,64 @@ def check_dialog_locales(browser):
                 test_page.close()
     return results
 
+def check_gpu_tolerance_settings(browser):
+    global machines
+    linux = dict(node(1), target_os='linux', scope=None, idle_memory_tolerance_mib=256)
+    windows = dict(node(2), target_os='windows', idle_memory_tolerance_mib=256)
+    container = dict(node(3), scope='container', idle_memory_tolerance_mib=256)
+    cpu = dict(node(2), id='cpu-fixture', name='CPU fixture', hardware_kind='cpu', configured_hardware_kind='cpu',
+               require_gpu=False, checks=['cpu'], idle_memory_tolerance_mib=256)
+    machines = [linux, windows, container, cpu]
+    page = browser.new_page(viewport={'width':390, 'height':844})
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.route('**/*', handle)
+    page.goto('http://wattline.test')
+    dialog = page.locator('#machine-dialog')
+    url = 'http://wattline.test/api/machines/demo-1/settings'
+    results = {}
+
+    def configure(id, label):
+        page.locator(f'#rail-nav [data-host="{id}"]').click()
+        page.get_by_role('button', name=label, exact=True).click()
+
+    for locale, entry, label, previous, new in (
+        ('zh-CN', '配置', '空闲显存容差（MiB）', '256', '0'),
+        ('en', 'Configure', 'Idle VRAM tolerance (MiB)', '0', '512.5'),
+    ):
+        page.locator('#locale-select').select_option(locale)
+        configure('demo-1', entry)
+        tolerance = dialog.get_by_role('spinbutton', name=label, exact=True)
+        expect(tolerance).to_be_visible()
+        expect(tolerance).to_have_value(previous)
+        count = len(mutations)
+        tolerance.fill('-1')
+        page.locator('#machine-save').click()
+        assert tolerance.evaluate('(input) => input.validity.rangeUnderflow')
+        assert len(mutations) == count
+        tolerance.fill(new)
+        with page.expect_response(url) as saved:
+            page.locator('#machine-save').click()
+        response = saved.value
+        assert response.ok and response.request.post_data_json['idle_memory_tolerance_mib'] == float(new)
+        expect(dialog).to_be_hidden()
+        configure('demo-1', entry)
+        expect(tolerance).to_have_value(new)
+        with page.expect_response(url) as unchanged:
+            page.locator('#machine-save').click()
+        assert 'idle_memory_tolerance_mib' not in unchanged.value.request.post_data_json
+        expect(dialog).to_be_hidden()
+        for id in ('demo-2', 'demo-3', 'cpu-fixture'):
+            configure(id, entry)
+            field = dialog.locator('[name="idle_memory_tolerance_mib"]')
+            expect(field).to_be_hidden()
+            expect(field).to_be_disabled()
+            page.locator('#machine-cancel').click()
+        results[locale] = {'initial_mib':float(previous), 'saved_mib':float(new), 'inapplicable_hidden':True}
+    assert not errors, errors
+    page.close()
+    return results
+
 def check_unlimited_container(browser):
     """A container without a cgroup limit shows used GiB once, never a fabricated percent or zero."""
     global machines
@@ -2013,6 +2071,7 @@ with sync_playwright() as p:
 
     page.close()
     dialog_locales = check_dialog_locales(browser)
+    gpu_tolerance = check_gpu_tolerance_settings(browser)
     unlimited_container = check_unlimited_container(browser)
     windows_processes = check_windows_processes(browser)
     gpu_process_timing = check_gpu_process_timing(browser)
@@ -2025,6 +2084,6 @@ with sync_playwright() as p:
                       "metric_layouts":layout_results, "focus_refreshes":focus_results,
                       "people_directory":people_directory, "assignee_responsive":assignee_responsive,
                       "unlimited_container":unlimited_container,"gpu_process_timing":gpu_process_timing,
-                      "windows_processes":windows_processes, "overview_regressions":overview_regressions,
+                      "windows_processes":windows_processes, "gpu_tolerance":gpu_tolerance, "overview_regressions":overview_regressions,
                       "silhouettes":silhouettes, "rail_identity_edges":rail_identity_edges}, ensure_ascii=False))
     browser.close()

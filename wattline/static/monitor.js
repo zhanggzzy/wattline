@@ -1269,6 +1269,8 @@ function openMachineDialog(host) {
   byId('ssh-timeout-field').hidden = local;
   fields.ssh_connect_timeout_seconds.disabled = local;
   fields.ssh_connect_timeout_seconds.value = host?.ssh_connect_timeout_seconds ?? state.snapshot.default_ssh_connect_timeout_seconds;
+  const tolerance = fields.idle_memory_tolerance_mib;
+  tolerance.value = tolerance.defaultValue = host?.idle_memory_tolerance_mib ?? '';
   fields.enabled.checked = host?.enabled ?? true;
   for (const input of checkboxes) input.checked = !host || checks(host).includes(input.value);
   fields.hardware_kind.value = host?.storage_kind ? 'storage' : host?.configured_hardware_kind ?? '';
@@ -1287,7 +1289,6 @@ function openMachineDialog(host) {
   byId('registration-user').hidden = Boolean(host) || !typedResources();
   fields.resource_user.innerHTML = personOptions(true);
   updateResourceForm();
-  updateProcessCheck();
   machineError.hidden = true;
   machineDialog.showModal();
   (host?.storage_kind ? fields.storage_name : host ? fields.alias : fields.host).focus();
@@ -1299,17 +1300,22 @@ function personOptions(shared = false) {
 }
 
 function updateResourceForm() {
-  const {hardware_kind} = machineForm.elements;
+  const {hardware_kind, idle_memory_tolerance_mib} = machineForm.elements;
   const storage = hardware_kind.value === 'storage';
   byId('storage-fields').hidden = byId('storage-fields').disabled = !storage;
   byId('compute-fields').hidden = byId('compute-fields').disabled = storage;
   gpuCheck.disabled = hardware_kind.value === 'cpu';
   if (gpuCheck.disabled) gpuCheck.checked = false;
   updateProcessCheck();
+  const host = machineForm.dataset.machine ? getHost() : null;
+  const gpu = hardware_kind.value === 'gpu' || (!hardware_kind.value && (host?.require_gpu || gpuCheck.checked));
+  const showTolerance = host && gpu && !windowsHost(host) && host.scope !== 'container'
+    && Number.isFinite(host.idle_memory_tolerance_mib);
+  byId('idle-memory-tolerance-field').hidden = idle_memory_tolerance_mib.disabled = !showTolerance;
 }
 
 machineForm.elements.hardware_kind.addEventListener('change', updateResourceForm);
-gpuCheck.addEventListener('change', updateProcessCheck);
+gpuCheck.addEventListener('change', updateResourceForm);
 machineCancel.addEventListener('click', () => machineDialog.close());
 machineDialog.addEventListener('cancel', event => {
   if (machineSave.disabled) event.preventDefault();
@@ -1333,6 +1339,10 @@ machineForm.addEventListener('submit', async event => {
   };
   if (fields.has('ssh_connect_timeout_seconds')) {
     settings.ssh_connect_timeout_seconds = Number(fields.get('ssh_connect_timeout_seconds'));
+  }
+  const tolerance = machineForm.elements.idle_memory_tolerance_mib;
+  if (fields.has(tolerance.name) && tolerance.valueAsNumber !== Number(tolerance.defaultValue)) {
+    settings.idle_memory_tolerance_mib = tolerance.valueAsNumber;
   }
   if (!storage && settings.enabled && !settings.checks.length) {
     machineError.textContent = t('select_at_least_one_check_when_monitoring_is_enabled');

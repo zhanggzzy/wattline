@@ -11,7 +11,7 @@ from zlib import error as CompressionError
 from zoneinfo import ZoneInfo
 
 from .collector import CollectionError, Collector, cpu_percent
-from .config import DEFAULT_SSH_CONNECT_TIMEOUT, Machine, MachineSettings
+from .config import DEFAULT_IDLE_MEMORY_TOLERANCE_MIB, DEFAULT_SSH_CONNECT_TIMEOUT, Machine, MachineSettings
 from .groups import compute_key, group_history_data, storage_key, summarize_resources
 from .history import DAY_MS, GPU_FIELDS, History, HistoryInUse, MAX_POINTS, WARM_HOURS, WARM_MS, downsample
 from .resources import StorageAdapter, StorageObservation
@@ -145,6 +145,9 @@ class Monitor:
         for identity, registration, settings in await self.write(self.history.machine_settings):
             if registration is not None:
                 machine = Machine.model_validate_json(registration)
+                # The old registration API serialized its implicit zero and had no tolerance input.
+                if machine.idle_memory_tolerance_mib == 0:
+                    machine = machine.model_copy(update={'idle_memory_tolerance_mib': DEFAULT_IDLE_MEMORY_TOLERANCE_MIB})
                 if machine.id in machines or identity in identities or identity != machine.history_key:
                     raise ValueError('监控登记与配置文件中的机器身份冲突')
                 machines[machine.id] = machine
@@ -583,10 +586,9 @@ class Monitor:
     @staticmethod
     def with_settings(machine, settings):
         values = settings.model_dump(exclude={'alias','room_id'})
-        if 'ssh_connect_timeout_seconds' not in settings.model_fields_set:
-            values.pop('ssh_connect_timeout_seconds')
-        if 'hardware_kind' not in settings.model_fields_set:
-            values.pop('hardware_kind')
+        for field in ('ssh_connect_timeout_seconds', 'hardware_kind', 'idle_memory_tolerance_mib'):
+            if field not in settings.model_fields_set:
+                values.pop(field)
         if values.get('hardware_kind', machine.hardware_kind) == 'cpu':
             values['checks'] = tuple(check for check in values['checks'] if check not in ('gpu','processes'))
         return machine.model_copy(update=values)
@@ -664,7 +666,10 @@ class Monitor:
                 raise CollectionError('conflict', '此节点的历史归档正在清理，完成后可重新登记')
             if request.target_os == 'windows':
                 pins[machine.history_key] = identity.ssh_host_key
-            registration = machine.model_dump_json(exclude={'target_os'} if machine.target_os == 'linux' else None)
+            excluded = {'idle_memory_tolerance_mib'}
+            if machine.target_os == 'linux':
+                excluded.add('target_os')
+            registration = machine.model_dump_json(exclude=excluded)
             return await self.save_settings(machine, settings, registration=registration, pins=pins,
                                             assignment=(people, request.shared))
 
@@ -685,7 +690,10 @@ class Monitor:
                 order = {node.history_key:index for index,node in enumerate(machines)}
             persisted = settings.model_copy(update={'ssh_connect_timeout_seconds':updated.ssh_connect_timeout_seconds,
                                                     'hardware_kind':updated.hardware_kind})
-            stored = persisted.model_dump_json(exclude={'alias','room_id'})
+            excluded = {'alias', 'room_id'}
+            if 'idle_memory_tolerance_mib' not in settings.model_fields_set:
+                excluded.add('idle_memory_tolerance_mib')
+            stored = persisted.model_dump_json(exclude=excluded)
             location = self.check_location(settings)
             restart = registration or (machine.enabled, machine.active_checks, self.interval(machine), machine.connect_timeout) != (
                 updated.enabled, updated.active_checks, self.interval(updated), updated.connect_timeout
@@ -767,6 +775,7 @@ class Monitor:
         while True:
             await self.sleep(max(0, next_due-self.monotonic()))
             async with self.slots:
+                machine = self.machines[machine.id]
                 snapshot = await self.observe(machine)
             self.latest[machine.id] = snapshot
             try:
@@ -866,6 +875,7 @@ class Monitor:
                     last_success_at=self.last_seen.get(machine.id), devices=self.inventory.get(machine.id, []),
                     enabled=machine.enabled, checks=machine.active_checks, interval_seconds=self.interval(machine),
                     ssh_connect_timeout_seconds=machine.connect_timeout,
+                    idle_memory_tolerance_mib=machine.idle_memory_tolerance_mib,
                     stale_ms=stale, metrics=view.get('metrics'))
         if not machine.enabled:
             view.update(status='disabled', metrics=None, reason=None, warnings=[])

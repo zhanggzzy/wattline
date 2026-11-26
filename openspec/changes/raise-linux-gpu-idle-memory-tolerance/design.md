@@ -11,10 +11,8 @@ from process rows alone and never reads the tolerance. A container endpoint forc
 
 ## Goals / Non-Goals
 
-Goals: one authoritative default of 256 MiB for Linux hosts, explicit per-machine
-override precedence, an inclusive `<=` boundary, and no change to Windows or container
-results. Non-goals: changing the alert text, adding a UI control, tuning individual
-deployed nodes, or changing Windows/container collection.
+Use a 256 MiB default for Linux hosts and let operators adjust the threshold per machine
+from Configure. Keep the inclusive `<=` comparison and the existing evidence gates.
 
 ## Decisions
 
@@ -24,10 +22,22 @@ deployed nodes, or changing Windows/container collection.
   the model and probe defaults. A shared constant would be unusable in the injected
   source, and adding a second configuration key would create a compatibility surface for
   no benefit.
-- Keep the tolerance on the shared `Machine` model instead of conditioning it on
-  `target_os`. Windows ignores the field by construction, so a Linux-scoped default needs
-  no new field, migration or API shape. Conditioning the default would add a special case
-  with no observable effect.
+- Expose the effective tolerance in the machine view used by the snapshot and settings
+  response. The dialog shows it for GPU-capable Linux machines, including those awaiting
+  their first sample, and hides it for known container endpoints, Windows, CPU and
+  storage. The form submits a changed value through the existing settings endpoint.
+- Layer an explicit override in the existing settings JSON on top of the file or
+  registration value. The settings merge uses field presence so 0 is explicit. An
+  omitted field preserves any previous override in the same SQLite transaction and
+  continues to inherit the base value if there was none.
+- Registrations created before AN-211 serialized the implicit 0 MiB default. The old
+  registration API had no tolerance input, so this stored zero inherits the current
+  default. File-configured zero and zero saved through the settings API remain explicit.
+  New registrations store tolerance only in their settings when explicitly supplied.
+- Publish the new machine configuration after the settings write commits. The sampler
+  reads the current machine just before collecting in its normal slot, so a change to
+  tolerance alone preserves cadence and the CPU baseline. A collection already underway
+  can finish with the value it started with.
 - Keep the existing comparison `used <= tolerance`, which makes the boundary inclusive as
   required. Do not add an epsilon: memory values are already reported in MiB and an
   epsilon would silently move the documented boundary.
@@ -46,9 +56,10 @@ deployed nodes, or changing Windows/container collection.
 
 ## Migration Plan
 
-No data or configuration migration. Existing files remain valid; nodes without the field
-adopt 256 MiB on restart. Rollback is reverting the default and restarting, or setting
-`idle_memory_tolerance_mib: 0` explicitly on affected nodes.
+Existing files and settings rows need no migration. On startup a row with an override
+takes precedence, and a row without one inherits the file, registration or 256 MiB
+default. To run a binary from before AN-213 after using this setting, use a consistent
+pre-upgrade data backup. Its settings model rejects unknown keys in persisted rows.
 
 ## Open Questions
 

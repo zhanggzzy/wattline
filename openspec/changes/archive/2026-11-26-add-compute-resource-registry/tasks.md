@@ -7,7 +7,7 @@
 ## 2. Verification and handoff
 
 - [x] 2.1 Record local checks, baseline, actual diff and coverage in [verification.md](verification.md).
-- [ ] 2.2 Record independent review and integration.
+- [x] 2.2 Record independent review and integration in the [closeout record](../2026-11-26-add-room-cluster-overview/closeout.md).
 
 ## Workflow follow-up
 

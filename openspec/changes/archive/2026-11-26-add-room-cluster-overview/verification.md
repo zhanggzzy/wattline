@@ -4,7 +4,7 @@
 
 The fixed checkout was on `main` at `bede7a15e1a14cbf36c3d8a8f3a5da467d4f4b64`. The local tracking ref and `git ls-remote origin refs/heads/main` matched that baseline. Reviewed integration and its commit are pending with Mika.
 
-The combined implementation and OpenSpec planning diff is in `artifacts/an-164-design/implementation.patch` in the local checkout. Its SHA-256 is `85632400ff4cd5c93db9c047933cf33d05213dd7d157b03de10fcf9127ad4d97`. It contains 33 files and excludes the two verification reports and the local AGENTS.md runtime block. `git apply --reverse --check --whitespace=error-all artifacts/an-164-design/implementation.patch` exited 0 against the actual working tree. The earlier phase 1 patch is described in [phase 1 verification](../add-compute-resource-registry/verification.md).
+The combined implementation and OpenSpec planning diff is in `artifacts/an-164-design/implementation.patch` in the local checkout. Its SHA-256 is `85632400ff4cd5c93db9c047933cf33d05213dd7d157b03de10fcf9127ad4d97`. It contains 33 files and excludes the two verification reports and the local AGENTS.md runtime block. `git apply --reverse --check --whitespace=error-all artifacts/an-164-design/implementation.patch` exited 0 against the actual working tree. The earlier phase 1 patch is described in [phase 1 verification](../2026-11-26-add-compute-resource-registry/verification.md).
 
 ## Baseline checks on 2026-11-25
 

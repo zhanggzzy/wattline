@@ -49,3 +49,11 @@ Defines how Wattline presents machine memory usage in the overview and machine d
 #### Scenario: Locale switch
 - **WHEN** 操作者切换中文与英文
 - **THEN** 内存标签、已用/总量文案和数字格式使用当前语言
+
+### Requirement: Capacity and percentage by observation scope
+
+Device and group views SHALL expose used bytes, comparable total bytes and percentage when measured. Group host and container observations SHALL be displayed separately. Group percent SHALL divide summed used by summed total over the same valid pairs.
+
+#### Scenario: Container with unbounded memory
+- **WHEN** an observation has used memory but no limit
+- **THEN** observed usage remains available, and no limit or ratio is fabricated or borrowed from the host.

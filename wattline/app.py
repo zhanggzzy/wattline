@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 import base64
 import binascii
+from datetime import date
 import hmac
 from pathlib import Path
 import sqlite3
@@ -327,5 +328,28 @@ def create_app(config, *, monitor=None):
             return await service.series(key, gpu, metric, hours)
         except (OSError, sqlite3.Error) as error:
             raise HTTPException(503, '历史指标库暂时不可读') from error
+
+    @app.post('/api/machines/{machine}/archive-analysis', dependencies=[Depends(same_origin_json)])
+    @app.get('/api/machines/{machine}/archive-analysis')
+    async def archive_analysis(machine: MachineId, request: Request):
+        try:
+            return service.archive_analysis(machine, start=request.method == 'POST')
+        except KeyError as error:
+            raise HTTPException(404, 'archive_analysis_missing') from error
+        except OSError as error:
+            raise HTTPException(503, 'historical_metrics_unavailable') from error
+
+    @app.get('/api/machines/{machine}/archive-analysis/series')
+    async def archive_analysis_series(machine: MachineId, start: date, end: date, metric: str = 'cpu'):
+        if machine not in service.machines:
+            raise HTTPException(404, 'archive_analysis_missing')
+        if start > end or metric not in HOST_METRICS:
+            raise HTTPException(422, 'archive_analysis_invalid_range_or_metric')
+        try:
+            return await service.archive_analysis_series(machine, metric, start, end)
+        except KeyError as error:
+            raise HTTPException(409, 'archive_analysis_missing') from error
+        except (OSError, sqlite3.Error, TypeError, ValueError) as error:
+            raise HTTPException(503, 'historical_metrics_unavailable') from error
 
     return app

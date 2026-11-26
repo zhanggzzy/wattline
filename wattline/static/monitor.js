@@ -9,9 +9,14 @@ const fmt = (value, unit = '', digits = 0) => Number.isFinite(value) ? i18n.numb
 const gib = bytes => bytes == null ? null : bytes / 1024 ** 3;
 const vram = mib => mib == null ? null : mib / 1024;
 const time = value => Number.isFinite(value) ? i18n.date(value, {hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}) : '—';
-const shortTime = ({format:value => i18n.date(value, {hour:'2-digit', minute:'2-digit', hour12:false})});
-const shortDate = ({format:value => i18n.date(value, {month:'2-digit', day:'2-digit'})});
-const tooltipTime = ({format:value => i18n.date(value, {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', hour12:false})});
+const chartDate = (value, options) => i18n.date(value, {...options,timeZone:state.archive?.timezone});
+const shortTime = ({format:value => chartDate(value, {hour:'2-digit', minute:'2-digit', hour12:false})});
+const shortDate = ({format:value => chartDate(value, {month:'2-digit', day:'2-digit'})});
+const tooltipTime = ({format:value => {
+  const options = {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'};
+  return chartDate(value,state.archive
+    ? {...options,year:'numeric',second:'2-digit',hourCycle:'h23'} : {...options,hour12:false});
+}});
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const escape = value => String(value ?? '').replace(/[&<>"']/g, character =>
   ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'})[character]);
@@ -50,6 +55,7 @@ const machineDashes = [
   [12,4,2,4,2,4], [5,7], [12,8], [3,8], [12,4,6,4], [6,4,6,8], [6,8,2,4], [12,4,2,8]
 ];
 const overviewMetrics = ['gpu','cpu','memory','power'];
+const archiveMetrics = ['cpu','memory','memory_used','gpu','power'];
 const modelRules = [
   ['b300', /\bB300\b/i],
   ['pro6000', /(?:^|[^\p{L}\p{M}\p{N}\p{Pc}])PRO\s*6000(?![\p{L}\p{M}\p{N}\p{Pc}])/iu],
@@ -131,7 +137,7 @@ const state = {snapshot:null, received:0, syncFailed:false, machine:null, gpu:nu
   tab:'room', manageTab:'room', group:null, trail:[], overviewScroll:0, routeReady:false, hiddenGroups:new Set(),
   groupFilters:{room:{query:'',person:'',status:''},cluster:{query:'',person:'',status:''}}, groupMetric:'cpu',
   deviceFilters:{query:'',kind:'',room:'',user:'',status:'all'}, detailFilters:{query:'',kind:'',room:'',user:'',status:'all'},
-  page:null, event:null, alerts:null, directAlert:null, alertError:false, alertLoading:false, alertQuery:'', alertFilter:'all', alertKind:'all',
+  page:null, archive:null, event:null, alerts:null, directAlert:null, alertError:false, alertLoading:false, alertQuery:'', alertFilter:'all', alertKind:'all',
   overviewMetric:'gpu', hours:24, filter:'all', query:'', history:null, historyError:false,
   focused:false, focusMetrics:[], histories:{}, historyErrors:{}};
 let layoutKey = '';
@@ -229,6 +235,10 @@ function navigation(hosts, host) {
 }
 
 function renderPage(force = false) {
+  if (state.archive && state.page !== 'archive') {
+    state.archive.controller.abort();
+    state.archive = null;
+  }
   if (rowDrag || document.querySelector('dialog[open]')) return;
   const hosts = nodes();
   const host = hosts.find(node => node.id === state.machine);
@@ -274,6 +284,7 @@ function renderPage(force = false) {
   const group = detailGroup();
   content.innerHTML = state.focused ? focusPage(host, device) : state.page === 'alerts' ? alertCenter()
     : state.page === 'manage' ? managementPage() : state.page === 'group' && group ? groupDetailPage(group,state.group.kind)
+    : state.archive && host ? archivePage(host)
     : host?.storage_kind ? storagePage(host) : host ? hostPage(host, device) : groupedOverview() ? workspaceOverview() : overviewPage(hosts);
   if (byId('host-search') && !state.focused) {
     byId('host-search').value = groupedOverview() ? deviceFilterState().query : state.query;
@@ -529,14 +540,16 @@ function chartPlot(host, key = null, index = 0) {
     ${key ? `<h2 class="chart-title">${descriptors[key][0]} <small>${descriptors[key][1].trim()}</small></h2>` : ''}
     <div class="plot ${host ? 'large' : ''}"><canvas id="trend-chart${suffix}" tabindex="0" role="img"
       aria-label="${key ? descriptors[key][0]+' · ' : ''}${t('resource_timeline_focus_and_use_left_and_right_arrows_to_inspect_')}" aria-describedby="chart-summary${suffix}"></canvas><div class="chart-tip" id="chart-tip${suffix}" hidden></div></div>
-    <p class="chart-summary" id="chart-summary${suffix}"></p><div class="sr-only" id="chart-announcement${suffix}" role="status"></div><div class="chart-legend" id="chart-legend${suffix}"></div><p class="chart-error" id="chart-error${suffix}" hidden>${t('historical_metrics_unavailable')}</p>
+    <p class="chart-summary" id="chart-summary${suffix}"></p><div class="sr-only" id="chart-announcement${suffix}" role="status"></div><div class="chart-legend" id="chart-legend${suffix}"></div><p class="chart-error" id="chart-error${suffix}" hidden>${t(state.archive ? 'archive_chart_failed' : 'historical_metrics_unavailable')}</p>
     <details class="chart-values" id="chart-data${suffix}"><summary>${t('view_chart_data')}</summary><div class="scroll" tabindex="0" role="region" aria-label="${t('view_chart_data')}"></div></details>
   </section>`;
 }
 
 function chartPanel(host, device) {
   return `<section class="panel chart-panel"><div class="panel-head"><div><h2>${host ? t('resource_trends') : t('last_24_hours')}</h2><small>${host ? device ? 'GPU '+device.index : host.scope === 'container' ? t('container_scope') : t('whole_machine') : t(groupChartContext() ? 'current_group_membership' : 'overview_trend_scope')}</small></div>
-    <div class="title-actions">${device ? `<button type="button" class="control" data-all-gpus>${t('back_to_machine')}</button>` : ''}<button type="button" id="focus-trends" class="control" data-focus-trends>${t('focus_charts')}</button></div></div>
+    <div class="title-actions">${device ? `<button type="button" class="control" data-all-gpus>${t('back_to_machine')}</button>` : ''}
+      ${host && !host.storage_kind && !device ? `<button type="button" id="open-archive" class="control" ${configUnavailable() ? 'disabled' : ''}>${t('archive_analysis')}</button>` : ''}
+      <button type="button" id="focus-trends" class="control" data-focus-trends>${t('focus_charts')}</button></div></div>
     ${chartControls(host,device)}${chartPlot(host)}
   </section>`;
 }
@@ -559,6 +572,117 @@ function focusPage(host, device) {
     <button type="button" id="exit-trends" class="control" data-exit-focus>${t('return_to_dashboard')}</button></section>
     ${chartControls(host,device)}<div class="trend-stack" style="--chart-count:${state.focusMetrics.length}">
       ${state.focusMetrics.map((key,index) => `<div class="panel">${chartPlot(host,key,index)}</div>`).join('')}</div>`;
+}
+
+function archivePage(host) {
+  const archive = state.archive;
+  const title = `<section class="page-title"><div>${heading(t('archive_analysis'))}<p>${escape(host.name)}</p></div>
+    <button type="button" id="exit-archive" class="control">${t('back_to_machine')}</button></section>`;
+  if (archive.status === 'preparing') {
+    return title+`<section class="panel archive-preparation"><p role="status">${t('archive_preparing')}</p>
+      <div class="archive-progress"><progress id="archive-progress" max="100" value="${archive.progress}"
+        aria-label="${t('archive_preparing')}"></progress><span id="archive-percent">${archive.progress}%</span></div></section>`;
+  }
+  if (archive.status !== 'ready') {
+    const message = {empty:'archive_empty', failed:'archive_failed', expired:'archive_expired'}[archive.status];
+    return title+`<section class="panel archive-preparation"><p role="status">${t(message)}</p>
+      ${archive.status === 'empty' ? '' : `<button type="button" id="retry-archive" class="control">${t('archive_retry')}</button>`}</section>`;
+  }
+  return title+`<section class="panel chart-panel">
+    <div class="panel-head"><h2>${t('resource_trends')}</h2><small>${t('archive_timezone_label',{zone:escape(archive.timezone)})}</small></div>
+    <form class="archive-filters" id="archive-filters">
+      <label for="archive-start">${t('archive_start_date')}<input type="date" id="archive-start" value="${escape(archive.start)}" required></label>
+      <label for="archive-end">${t('archive_end_date')}<input type="date" id="archive-end" value="${escape(archive.end)}" required></label>
+      <label for="archive-metric">${t('trend_metric')}<select id="archive-metric">
+        ${archiveMetrics.map(key => `<option value="${key}" ${archive.metric === key ? 'selected' : ''}>${descriptors[key][0]}</option>`).join('')}</select></label>
+      <button type="submit" class="control primary-control">${t('archive_apply_range')}</button>
+    </form><p id="archive-range-error" class="chart-error" role="alert" ${archive.invalidRange ? '' : 'hidden'}>${t('archive_invalid_range')}</p>
+    ${chartPlot(host)}</section>`;
+}
+
+function exitArchive() {
+  const scroll = state.archive.scroll;
+  state.page = null;
+  renderPage(true);
+  paint();
+  void refreshHistory();
+  window.scrollTo(0,scroll);
+  byId('open-archive')?.focus({preventScroll:true});
+}
+
+async function openArchive() {
+  const previous = state.archive;
+  previous?.controller.abort();
+  const host = getHost();
+  const archive = state.archive = {path:resourcePath(host)+'/archive-analysis', controller:new AbortController(),
+    status:'preparing', progress:0, scroll:previous?.scroll ?? window.scrollY,
+    start:previous?.start ?? '', end:previous?.end ?? '', metric:previous?.metric ?? state.metric};
+  state.page = 'archive';
+  renderPage(true);
+  window.scrollTo(0,0);
+  byId('page-heading')?.focus({preventScroll:true});
+  const {controller,path} = archive;
+  const signal = () => AbortSignal.any([controller.signal,AbortSignal.timeout(5000)]);
+  try {
+    const response = await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:'{}',signal:signal()});
+    if (!response.ok) throw new Error('HTTP '+response.status);
+    let info = await response.json();
+    while (info.status === 'preparing' && !controller.signal.aborted) {
+      archive.progress = info.progress;
+      const progress = byId('archive-progress');
+      if (progress) progress.value = info.progress;
+      const percent = byId('archive-percent');
+      if (percent) percent.textContent = info.progress+'%';
+      await new Promise(resolve => setTimeout(resolve,350));
+      if (controller.signal.aborted) return;
+      info = await get(path,signal());
+    }
+    if (controller.signal.aborted) return;
+    archive.status = info.status;
+    archive.timezone = info.timezone;
+    archive.start ||= info.first_date;
+    archive.end ||= info.last_date;
+    renderPage(true);
+    if (archive.status === 'ready') void refreshArchiveChart(archive);
+  } catch {
+    if (controller.signal.aborted) return;
+    archive.status = 'failed';
+    renderPage(true);
+  }
+}
+
+async function refreshArchiveChart(archive) {
+  archive.invalidRange = archive.start > archive.end;
+  byId('archive-range-error').hidden = !archive.invalidRange;
+  if (archive.invalidRange) return;
+  archive.query?.abort();
+  const request = archive.query = new AbortController();
+  const signal = AbortSignal.any([archive.controller.signal,request.signal]);
+  const params = new URLSearchParams({metric:archive.metric,start:archive.start,end:archive.end});
+  archive.history = null;
+  archive.chartError = false;
+  archive.singleDay = archive.start === archive.end;
+  chart.metric = archive.chartMetric = archive.metric;
+  chart.pointer = chart.keyboardAt = null;
+  byId('chart-announcement').textContent = '';
+  drawChart();
+  try {
+    const response = await fetch(archive.path+'/series?'+params,{signal});
+    if (request.signal.aborted || archive.controller.signal.aborted) return;
+    if (response.status === 409) {
+      archive.status = 'expired';
+      renderPage(true);
+      return;
+    }
+    if (!response.ok) throw new Error('HTTP '+response.status);
+    const history = await response.json();
+    if (request.signal.aborted || archive.controller.signal.aborted) return;
+    archive.history = history;
+  } catch {
+    if (request.signal.aborted || archive.controller.signal.aborted) return;
+    archive.chartError = true;
+  }
+  drawChart();
 }
 
 function hostPage(host, device) {
@@ -886,9 +1010,11 @@ async function get(path, signal = AbortSignal.timeout(5000)) {
   return response.json();
 }
 
-const activeMetrics = () => state.focused ? state.focusMetrics : [state.machine ? state.metric : groupChartContext() ? state.groupMetric : state.overviewMetric];
+const activeMetrics = () => state.focused ? state.focusMetrics : [state.archive?.chartMetric ??
+  (state.machine ? state.metric : groupChartContext() ? state.groupMetric : state.overviewMetric)];
 const historyHours = () => state.machine ? state.hours : 24;
 async function refreshHistory(reset = false) {
+  if (state.archive) return;
   if (reset) {
     historyRequest?.abort();
     state.history = null;
@@ -973,6 +1099,8 @@ function countLabels(labels) {
   return counts;
 }
 
+const chartHistory = metric => state.archive ? state.archive.history : state.histories[metric];
+
 function chartSeries(instance, history) {
   if (groupChartContext()) {
     const [,unit] = descriptors[instance.metric];
@@ -1005,7 +1133,7 @@ function chartSeries(instance, history) {
   const keys = history?.keys || [instance.metric];
   return keys.map(key => {
     const [title,unit] = descriptors[key];
-    const label = key === 'power' && !state.gpu
+    const label = key === 'power' && !state.gpu && !state.archive
       ? (getHost()?.scope === 'container' ? t('visible_gpu_power') : t('total_gpu_power')) : title;
     return {key,label,unit,color:colors[key],dash:[]};
   });
@@ -1039,7 +1167,7 @@ function bindChart() {
       drawChart(instance);
       const point = instance.points[instance.keyboardAt];
       byId('chart-announcement'+instance.suffix).textContent = point
-        ? tooltipTime.format(point.time)+' · '+chartSeries(instance,state.histories[instance.metric]).flatMap((item,i) => item.hidden ? [] : [item.label+' '+chartReading(point,i,item,1)]).join(' · ') : '';
+        ? tooltipTime.format(point.time)+' · '+chartSeries(instance,chartHistory(instance.metric)).flatMap((item,i) => item.hidden ? [] : [item.label+' '+chartReading(point,i,item,1)]).join(' · ') : '';
     });
     canvas.addEventListener('blur',() => {
       if (!canvas.isConnected) return;
@@ -1133,10 +1261,10 @@ function drawChart(instance) {
   if (!ctx) return;
   ctx.setTransform(ratio,0,0,ratio,0,0);
   ctx.clearRect(0,0,width,height);
-  const history = state.histories[chart.metric];
-  const historyError = state.historyErrors[chart.metric];
+  const history = chartHistory(chart.metric);
+  const historyError = state.archive ? state.archive.chartError : state.historyErrors[chart.metric];
   const end = history?.to ?? state.snapshot?.server_time ?? Date.now();
-  const hours = historyHours();
+  const hours = state.archive && history ? (history.to-history.from)/3600000 : historyHours();
   const start = history?.from ?? end-hours*3600000;
   const points = (history?.points || []).map(point => ({...point, values:point.values.map((value,i) =>
     history.keys?.[i] === 'vram' ? vram(value) : history.keys?.[i] === 'memory_used' ? gib(value) : value)}));
@@ -1171,7 +1299,7 @@ function drawChart(instance) {
   const right = width-12;
   const top = 13;
   const bottom = height-25;
-  const x = timestamp => left+(timestamp-start)/(end-start)*(right-left);
+  const x = timestamp => left+(timestamp-start)/Math.max(1,end-start)*(right-left);
   const y = value => bottom-value/ceiling*(bottom-top);
   const layout = {bottom,left,right,top,x,y};
   ctx.font = '10.5px system-ui, sans-serif';
@@ -1189,22 +1317,23 @@ function drawChart(instance) {
     ctx.lineTo(right,y(value));
     ctx.stroke();
   }
-  const intervals = hours > 24 ? Math.min(hours/24,width >= 550 ? 6 : 3)
+  const dateTicks = state.archive && history ? !state.archive.singleDay : hours > 24;
+  const intervals = dateTicks ? Math.min(Math.ceil(hours/24),width >= 550 ? 6 : 3)
     : width >= 540 ? 6 : width >= 355 ? 4 : 3;
-  const tickFormat = hours > 24 ? shortDate : shortTime;
+  const tickFormat = dateTicks ? shortDate : shortTime;
   for (let i=0;i<=intervals;i++) {
     const timestamp = start+(end-start)*i/intervals;
     ctx.textAlign = i === 0 ? 'left' : i === intervals ? 'right' : 'center';
     ctx.fillText(tickFormat.format(timestamp),x(timestamp),bottom+13);
   }
   const valid = points.filter(point => visible.some(({index}) => Number.isFinite(point.values[index])));
-  summary.textContent = historyError ? t('could_not_load_history_retrying_automatically')
+  summary.textContent = historyError ? (state.archive ? '' : t('could_not_load_history_retrying_automatically'))
     : !history ? t('loading_historical_samples') : !valid.length ? t('no_valid_samples_in_this_window')
     : state.machine ? t('history_summary',{count:i18n.number(valid.length),latest:series.map((item,i) =>
       item.label+' '+fmt(valid.at(-1).values[i],item.unit,1)).join(' / ')})
     : groupChartContext() ? t('group_count',{count:new Set(visible.map(({item}) => item.id)).size})
     : t('overview_history_summary',{count:i18n.number(valid.length),machines:i18n.number(series.length)});
-  if (!valid.length) {
+  if (!valid.length && (!state.archive || !historyError)) {
     ctx.font = '12px system-ui, sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText(history ? t('no_valid_samples_in_this_window_m159') : t('waiting_for_historical_samples'),(left+right)/2,(top+bottom)/2);
@@ -1675,7 +1804,9 @@ document.addEventListener('click',event => {
   const button = event.target.closest('button');
   if (!button) return;
   const {host,gpu,filter,metric,range,overviewMetric} = button.dataset;
-  if (button.hasAttribute('data-alert-center')) openAlerts();
+  if (button.id === 'open-archive' || button.id === 'retry-archive') void openArchive();
+  else if (button.id === 'exit-archive') exitArchive();
+  else if (button.hasAttribute('data-alert-center')) openAlerts();
   else if (button.hasAttribute('data-more-alerts')) void loadAlerts(true);
   else if (button.dataset.event && state.page === 'alerts') {
     state.event = Number(button.dataset.event);
@@ -1741,12 +1872,18 @@ document.addEventListener('click',event => {
   }
 });
 document.addEventListener('keydown',event => {
-  if (event.key === 'Escape' && state.focused && !document.querySelector('dialog[open]')) {
+  if (event.key !== 'Escape' || document.querySelector('dialog[open]')) return;
+  if (state.archive) {
+    event.preventDefault();
+    exitArchive();
+  } else if (state.focused) {
     event.preventDefault();
     setTrendFocus(false);
   }
 });
 document.addEventListener('input',event => {
+  if (event.target.id === 'archive-start') state.archive.start = event.target.value;
+  if (event.target.id === 'archive-end') state.archive.end = event.target.value;
   if (event.target.id === 'alert-search') {
     state.alertQuery = event.target.value;
     state.event = null;
@@ -1757,6 +1894,16 @@ document.addEventListener('input',event => {
   else state.query = event.target.value;
   drawRows(membersForPanel(nodes()));
   paint();
+});
+
+document.addEventListener('submit',event => {
+  if (event.target.id !== 'archive-filters') return;
+  event.preventDefault();
+  const archive = state.archive;
+  archive.start = byId('archive-start').value;
+  archive.end = byId('archive-end').value;
+  archive.metric = byId('archive-metric').value;
+  void refreshArchiveChart(archive);
 });
 
 function paintSeries(ctx, points, layout, series) {
@@ -2042,6 +2189,7 @@ function openAlerts(id = null, remember = true) {
 }
 
 document.addEventListener('change', event => {
+  if (event.target.id === 'archive-metric') state.archive.metric = event.target.value;
   if (event.target.id === 'alert-status') state.alertFilter = event.target.value;
   else if (event.target.id === 'alert-kind') state.alertKind = event.target.value;
   else return;

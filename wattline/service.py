@@ -10,6 +10,7 @@ import uuid
 from zlib import error as CompressionError
 from zoneinfo import ZoneInfo
 
+from .archive_analysis import ARCHIVE_ANALYSIS_IDLE_SECONDS, ArchiveAnalysis, archive_bounds
 from .collector import CollectionError, Collector, cpu_percent
 from .config import DEFAULT_SSH_CONNECT_TIMEOUT, Machine, MachineSettings
 from .groups import compute_key, group_history_data, storage_key, summarize_resources
@@ -105,6 +106,7 @@ class Monitor:
         self.registry_loaded = False
         self.settings_lock = asyncio.Lock()
         self.archive_lock = asyncio.Lock()
+        self.archive_analyses = {}
         self.samplers = {}
         self.archive_task = None
         self.removal_task = None
@@ -209,10 +211,16 @@ class Monitor:
         self.start_sampler(machine)
 
     async def close(self):
-        tasks = self.tasks
+        jobs = tuple(self.archive_analyses.values())
+        tasks = [*self.tasks, *(job.task for job in jobs)]
+        for identity in tuple(self.archive_analyses):
+            self.discard_archive_analysis(identity)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        for job in jobs:
+            async with job.read_lock:
+                job.close()
         self.history.close()
 
     async def write(self, fn, *args):
@@ -255,6 +263,7 @@ class Monitor:
             raise
         self.pending_removals.add(identity)
         self.machines.pop(machine.id)
+        self.discard_archive_analysis(identity)
         self.forget_resource(compute_key(identity))
         self.shared_users.discard(identity)
         for index in (self.ssh_pins,self.machine_order,self.aliases,self.machine_assignees):
@@ -724,6 +733,82 @@ class Monitor:
             log.warning('监控指标库不可写 (%s)', type(error).__name__)
         self.history_ok = False
         self.history_error_reported = True
+
+    def archive_analysis(self, machine, *, start=False):
+        identity = self.machines[machine].history_key
+        if not self.registry_loaded:
+            raise OSError('指标库暂不可读')
+        job = self.archive_analyses.get(identity)
+        if start and (job is None or job.status == 'failed'):
+            self.discard_archive_analysis(identity)
+            job = self.archive_analyses[identity] = ArchiveAnalysis()
+            job.task = asyncio.create_task(self.prepare_archive_analysis(identity, job))
+        if job is None:
+            raise KeyError(machine)
+        if start and job.status != 'preparing':
+            self.keep_archive_analysis(identity, job)
+        return job.view(self.archive_zone)
+
+    async def prepare_archive_analysis(self, identity, job):
+        loop = asyncio.get_running_loop()
+
+        def progress(percent):
+            loop.call_soon_threadsafe(setattr, job, 'progress', percent)
+
+        try:
+            async with self.archive_lock:
+                if job.stopped.is_set():
+                    return
+                await offload(job.prepare, self.history, identity, self.archive_zone, progress)
+                job.status = 'ready' if job.workspace is not None else 'empty'
+                job.progress = 100
+        except asyncio.CancelledError:
+            job.close()
+            raise
+        except (*PURGE_ERRORS, OverflowError) as error:
+            job.status = 'failed'
+            log.warning('监控归档分析未完成 (%s)', type(error).__name__)
+        self.keep_archive_analysis(identity, job)
+
+    def keep_archive_analysis(self, identity, job):
+        if job.expiry is not None:
+            job.expiry.cancel()
+        job.expiry = asyncio.get_running_loop().call_later(
+            ARCHIVE_ANALYSIS_IDLE_SECONDS, self.expire_archive_analysis, identity, job)
+
+    def expire_archive_analysis(self, identity, job):
+        if self.archive_analyses.get(identity) is job and not job.read_lock.locked():
+            self.discard_archive_analysis(identity)
+
+    def discard_archive_analysis(self, identity):
+        job = self.archive_analyses.pop(identity, None)
+        if job is not None:
+            job.stopped.set()
+            if job.expiry is not None:
+                job.expiry.cancel()
+            if not job.read_lock.locked():
+                job.close()
+
+    async def archive_analysis_series(self, machine, metric, first, last):
+        identity = self.machines[machine].history_key
+        job = self.archive_analyses.get(identity)
+        if job is None or job.status != 'ready':
+            raise KeyError(machine)
+        start, end = archive_bounds(first, last, self.archive_zone)
+        stale = round(self.config.stale_seconds * 1000)
+        async with job.read_lock:
+            if self.archive_analyses.get(identity) is not job:
+                raise KeyError(machine)
+            try:
+                result = await offload(job.series, metric, start, end, stale)
+                if self.archive_analyses.get(identity) is not job:
+                    raise KeyError(machine)
+                return result
+            finally:
+                if self.archive_analyses.get(identity) is job:
+                    self.keep_archive_analysis(identity, job)
+                else:
+                    job.close()
 
     async def archive(self):
         while True:

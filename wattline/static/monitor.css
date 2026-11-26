@@ -151,6 +151,16 @@
   .chart-note { margin-left: auto; }
   .chart-tip { position: absolute; z-index: 2; background: #183b32; color: #f6fffa; font-size: 12px; padding: 7px 9px; border-radius: 7px; width: max-content; max-width: min(28rem, calc(100% - 4px)); pointer-events: none; box-shadow: 0 4px 13px #11251e22; overflow-wrap: anywhere; }
   .chart-tip time { display: block; color: #c5dfd5; }
+  .archive-preparation { display: grid; gap: 12px; justify-items: start; padding: 16px; }
+  .archive-progress { display: flex; align-items: center; gap: 12px; width: min(100%, 30rem); }
+  .archive-progress progress { flex: 1; min-width: 0; height: 14px; accent-color: var(--accent-deep); }
+  #archive-percent { min-width: 4ch; text-align: end; font-variant-numeric: tabular-nums; }
+  .archive-filters { display: flex; flex-wrap: wrap; align-items: end; gap: 10px 14px; padding: 12px 14px; }
+  .archive-filters label { display: grid; gap: 5px; font-size: 13px; font-weight: 600; }
+  .archive-filters :is(input, select) {
+    min-height: 40px; max-width: 100%; padding: 7px 9px; border: 1px solid #ced9e8;
+    border-radius: 7px; background: var(--white); color: var(--ink); font: inherit;
+  }
   .message { border-radius: 8px; background: #fff4e1; border: 1px solid #f1dfb9; color: #78501b; padding: 10px 12px; margin-bottom: 14px; font-size: 12px; }
   .message.scope-note { background: #edf6f2; border-color: #d6e7de; color: #315f50; }
   .facts { color: var(--muted); display: flex; flex-wrap: wrap; gap: 9px 19px; padding: 11px 15px; font-size: 12px; margin: -4px 0 15px; }

@@ -9,13 +9,18 @@ import hashlib
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event
 import time
+from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
+from zoneinfo import ZoneInfo
 from fastapi.testclient import TestClient
 from playwright.sync_api import sync_playwright, expect
 
 from wattline.app import create_app
+from wattline.archive_analysis import ArchiveAnalysis
 from wattline.config import Config, Machine, MachineSettings
-from wattline.history import History
+from wattline.history import History, WARM_MS
 from wattline.service import Monitor
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,7 +80,6 @@ def handle(route):
             history_writable=True, archive_ok=True, machines=[] if mode=="empty" else machines))
     if path == "/api/history":
         now = int(time.time()*1000)
-        from urllib.parse import parse_qs, urlsplit
         q = parse_qs(urlsplit(route.request.url).query)
         metric = q.get("metric", ["gpu"])[0]
         hours = int(q.get("hours", [24])[0])
@@ -1688,6 +1692,137 @@ def check_assignee_responsive(browser):
             context.close()
     return {"spacing": spacing, "layouts": layouts, "boundaries": boundaries}
 
+def check_archive_analysis(browser):
+    zone = ZoneInfo('Asia/Shanghai')
+    midnight = int(datetime(2026, 10, 2, tzinfo=zone).timestamp()) * 1000
+    day = 86400000
+    with patch.dict(globals(), machines=[node(1), node(2), node(3, 'offline')], mode='normal'), TemporaryDirectory() as directory:
+        hosts = tuple(Machine(id=f'demo-{index}', mode='ssh', ssh_alias=f'demo-{index}',
+                              expected_host_id=str(index)*32, enabled=False) for index in (1, 2, 3))
+        config = Config(data_dir=Path(directory), machines=hosts, archive_timezone=zone.key)
+        store = History(config.data_dir)
+        store.prepare()
+
+        def append(host, at, value):
+            store.append(host.history_key, 'fixture', dict(observed_at=at, received_at=at,
+                         boot='fixture', status='normal', source='ssh', metrics={'cpu_percent':value}))
+
+        def publish(cutoff):
+            slot = store.begin_archive(cutoff + WARM_MS)
+            store.pack(cutoff)
+            exported = store.export(cutoff)
+            store.finish_archive(slot, cutoff, exported)
+            return store.cold_directory / exported.filename
+
+        append(hosts[0], midnight, 21)
+        append(hosts[1], midnight, 98)
+        first = publish(midnight + 3600000)
+        append(hosts[0], midnight + day - 1, 24)
+        append(hosts[0], midnight + day, 35)
+        second = publish(midnight + 2 * day)
+        store.close()
+        original = second.read_bytes()
+        second.write_bytes(original[:-4])
+        release = Event()
+        rows = ArchiveAnalysis.rows
+
+        def hold_first_progress(job, files, identity, notify):
+            def progress(value):
+                notify(value)
+                if not release.is_set():
+                    assert release.wait(10)
+            yield from rows(job, files, identity, progress)
+
+        monitor = Monitor(config, clock=lambda: midnight + 2 * day + WARM_MS)
+        app = create_app(config, monitor=monitor)
+        with patch.object(ArchiveAnalysis, 'rows', hold_first_progress), TestClient(
+                app, base_url='http://127.0.0.1') as client:
+            context = browser.new_context(viewport={'width':390, 'height':844}, timezone_id='America/Los_Angeles')
+            page = context.new_page()
+            errors, requests = [], []
+            page.on('pageerror', lambda error: errors.append(str(error)))
+
+            def route_archive(route):
+                url = urlsplit(route.request.url)
+                if '/archive-analysis' not in url.path:
+                    return handle(route)
+                method = route.request.method
+                requests.append((method, url.path))
+                options = {'json':route.request.post_data_json} if method == 'POST' else {}
+                response = client.request(method, url.path + ('?' + url.query if url.query else ''), **options)
+                route.fulfill(status=response.status_code, json=response.json())
+
+            page.route('**/*', route_archive)
+            try:
+                page.goto('http://wattline.test')
+                expect(page.locator('#host-rows tr')).to_have_count(3)
+                expect(page.locator('#open-archive')).to_have_count(0)
+                assert requests == []
+                page.locator('#rail-nav [data-host="demo-1"]').click()
+                entry = page.locator('#open-archive')
+                expect(entry).to_have_accessible_name('历史归档分析')
+                page.locator('#focus-trends').click()
+                expect(entry).to_have_count(0)
+                page.keyboard.press('Escape')
+                page.get_by_role('button', name='查看 GPU 0', exact=True).click()
+                page.locator('[data-gpu-trends]').click()
+                expect(entry).to_have_count(0)
+                page.locator('[data-all-gpus]').click()
+                expect(page.locator('#chart-summary')).to_contain_text('CPU')
+                page.locator('#locale-select').select_option('en')
+                expect(entry).to_have_accessible_name('Archive analysis')
+                entry.click()
+                expect(page.get_by_role('heading', name='Archive analysis')).to_be_focused()
+                bar = page.get_by_role('progressbar', name='Decompressing history archives')
+                partial = first.stat().st_size * 100 // (first.stat().st_size + second.stat().st_size)
+                expect(bar).to_have_attribute('value', str(partial))
+                expect(page.locator('#archive-percent')).to_have_text(f'{partial}%')
+                release.set()
+
+                expect(page.get_by_text('The archive could not be prepared. You can retry.')).to_be_visible()
+                assert second.read_bytes() == original[:-4]
+                second.write_bytes(original)
+                page.get_by_role('button', name='Decompress again').click()
+                expect(page.locator('#archive-start')).to_have_value('2026-10-02')
+                expect(page.locator('#archive-end')).to_have_value('2026-10-03')
+                expect(page.get_by_text('Archive time zone Asia/Shanghai')).to_be_visible()
+                expect(page.locator('#chart-summary')).to_contain_text('35.0%')
+                page.locator('#archive-end').fill('2026-10-02')
+                apply = page.get_by_role('button', name='Apply filters')
+                apply.click()
+                expect(page.locator('#chart-summary')).to_contain_text('24.0%')
+                page.get_by_text('View chart data', exact=True).click()
+                rows_on_page = page.locator('#chart-data tbody tr')
+                expect(rows_on_page).to_have_count(2)
+                expect(rows_on_page.first).to_contain_text('10/02/2026, 00:00:00')
+                expect(rows_on_page.first).to_contain_text('21.0%')
+                expect(rows_on_page.last).to_contain_text('23:59:59')
+                expect(rows_on_page.last).to_contain_text('24.0%')
+                expect(page.locator('#chart-data')).not_to_contain_text('98.0%')
+                page.screenshot(path=str(OUT/'archive-analysis.png'), full_page=True)
+                assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+
+                page.locator('#archive-start').fill('2026-10-04')
+                apply.click()
+                expect(page.get_by_text('The start date must be on or before the end date.')).to_be_visible()
+                page.locator('#archive-end').fill('2026-10-04')
+                apply.click()
+                expect(page.locator('#chart-summary')).to_have_text('No valid samples in this window.')
+                page.get_by_role('button', name='Back to machine').click()
+                expect(entry).to_be_focused()
+                expect(page.locator('#chart-summary')).to_contain_text('CPU')
+                page.locator('#rail-nav [data-host="demo-3"]').click()
+                entry.click()
+                expect(page.get_by_text('This machine has no archived history.')).to_be_visible()
+                assert not errors, errors
+                assert first.exists() and second.read_bytes() == original
+                return {'progress':partial, 'range_rows':2, 'timezone':zone.key, 'retry':True,
+                        'no_archive':True, 'no_samples':True, 'entry_only':True, 'requests':len(requests)}
+            finally:
+                release.set()
+                context.close()
+
+
 with sync_playwright() as p:
     browser = p.chromium.launch(**({"executable_path":args.browser} if args.browser else {}))
     people_directory = check_people_directory(browser)
@@ -2020,6 +2155,7 @@ with sync_playwright() as p:
     overview_regressions = check_overview_regressions(browser)
     silhouettes = check_machine_silhouettes(browser)
     rail_identity_edges = check_rail_identity_edges(browser)
+    print(json.dumps({"archive_analysis":check_archive_analysis(browser)}, ensure_ascii=False))
     print(json.dumps({"focus_layout":focus_layout,"result":"PASS", "browser":browser.version, "page_errors":errors,
                       "mutations":len(mutations), "history_queries":len(history_queries), "screenshots":28, "locales":["zh-CN","en"], "dialog_locales":dialog_locales,
                       "metric_layouts":layout_results, "focus_refreshes":focus_results,

@@ -30,6 +30,14 @@ def sync_directory(directory):
         os.close(descriptor)
 
 
+def read_cold_header(source):
+    header = source.readline()
+    fields = json.loads(header)
+    if not isinstance(fields, dict) or fields.get('format') != 'compute-monitor-history' or fields.get('version') != 1:
+        raise ValueError('无法识别冷归档格式')
+    return header
+
+
 def export_cold(db, cutoff, directory):
     column_list = ','.join('g.'+field for field in GPU_SAMPLE_FIELDS)
     hosts = db.execute("""
@@ -95,10 +103,7 @@ def prune_cold(target, identity):
             dir=target.parent, prefix='.purge-', delete=False
         ) as stage:
             temporary = Path(stage.name)
-            header = source.readline()
-            fields = json.loads(header)
-            if not isinstance(fields, dict) or fields.get('format') != 'compute-monitor-history' or fields.get('version') != 1:
-                raise ValueError('无法识别冷归档格式')
+            header = read_cold_header(source)
             with gzip.GzipFile(filename='', fileobj=stage, mode='wb', compresslevel=3, mtime=0) as output:
                 output.write(header)
                 for line in source:

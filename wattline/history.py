@@ -380,6 +380,17 @@ class History:
         with self.connect(read=True) as db:
             return export_cold(db, cutoff, self.cold_directory)
 
+    def published_archives(self):
+        with self.connect(read=True) as db:
+            names = [name for (name,) in db.execute('SELECT filename FROM cold_archives ORDER BY cutoff')]
+        files = []
+        for name in names:
+            if not name.startswith('before-') or '/' in name or not name.endswith('.jsonl.gz'):
+                raise ValueError('无效的冷归档文件名')
+            path = self.cold_directory/name
+            files.append((path, path.stat().st_size))
+        return files
+
     def finish_archive(self, slot, cutoff, exported):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')

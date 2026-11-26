@@ -116,3 +116,22 @@ PY
 | `git diff --check`、`git diff --cached --check`、`git diff --check origin/main HEAD` | 0 | 无输出 |
 
 验证使用合成数据。生产规模性能、非 Chromium 浏览器和 Linux/Docker 进程异常退出仍未实测。整合与归档的远端交付见 [任务 3.3](tasks.md)。
+
+## 远端交付
+
+`git push origin HEAD:refs/heads/main` 退出 0，将远端从 `deaa326` 快进到 `bf3129846ab20d640328deb60a182f861ff7cc58`。`git ls-remote --exit-code origin refs/heads/main` 退出 0，回读同一完整 SHA。该提交包含已验证的功能合并和审查记录。后续归档提交只更新 OpenSpec 文档和主规范，最终交付 SHA 记录在 AN-220。此任务未部署用户实例。
+
+## 规范同步与归档
+
+2026-11-26，Mika 按仓库内 OpenSpec sync/archive 技能收尾。固定 CLI 1.14.2 确认 schema 为 `spec-driven`，四项规划产物完成，五项任务均已完成。新主规范 `openspec/specs/machine-archive-analysis/spec.md` 同步了 delta 的 Purpose 和四条要求。
+
+| 命令 | 退出码 | 实测摘要 |
+| --- | ---: | --- |
+| `openspec validate --specs` | 0 | 12 passed，0 failed |
+| `openspec validate machine-archive-analysis --type spec --strict` | 0 | Specification is valid |
+| `openspec validate add-machine-archive-analysis --strict` | 0 | Change is valid |
+| `diff -u` 比较主规范和转换为主规范标题格式的 delta | 0 | 无差异 |
+| `mv openspec/changes/add-machine-archive-analysis openspec/changes/archive/2026-11-26-add-machine-archive-analysis` | 0 | 完整移动 change，保留 `.openspec.yaml` |
+| `openspec list --json` | 0 | 活动 change 列表为空 |
+
+表中的 OpenSpec 命令统一使用 `OPENSPEC_TELEMETRY=0 npx --offline @fission-ai/openspec@1.14.2` 执行。

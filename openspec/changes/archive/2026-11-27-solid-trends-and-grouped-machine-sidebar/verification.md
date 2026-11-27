@@ -51,3 +51,7 @@ git diff --binary --no-ext-diff HEAD -- wattline/static/index.html wattline/stat
 ## Mika 整合复查
 
 2026-11-27，重新计算六文件工作树差异哈希，与执行和独立审查记录一致。复跑 `.venv/bin/python -m pytest -q`（91 通过，1 条既有弃用警告）、`.venv/bin/python tools/browser_smoke.py`（PASS，Chromium 159.0.8154.6，脚本报告页面错误为空）、`.venv/bin/python tools/resource_browser_smoke.py`（PASS）、`node tools/test_i18n.cjs`（465 条）、`node --check`（monitor.js 和 locales.js）、`git diff --check` 和 `git diff --cached --check`。命令均退出 0。实际同步 `overview` 既有颜色情景与 `dashboard-focus-layout` 两条新增要求，逐项比对主规范与 delta。OpenSpec 1.14.2 的变更 strict 和 `validate --specs --strict` 分别通过，主规范 12 项。
+
+## 主干核验与归档
+
+2026-11-27，`git push origin HEAD:refs/heads/main` 退出 0，远端从基准 `b5b77ba842b5af17b09dc566d8b18eaf54af4189` 更新到功能及规范提交 `c711b911ae871687cf13f586b884056b82116f34`。`git ls-remote --exit-code origin refs/heads/main` 退出 0 并返回该 SHA。核验后勾选 4.2，OpenSpec 列表确认 5/5，严格校验再次通过，按仓内官方归档技能把完整 change 移入 `openspec/changes/archive/2026-11-27-solid-trends-and-grouped-machine-sidebar/`。归档提交只整理 OpenSpec 记录。

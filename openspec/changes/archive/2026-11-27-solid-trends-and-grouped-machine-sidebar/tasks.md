@@ -15,7 +15,7 @@
 ## 4. Review and integration
 
 - [x] 4.1 Independently review the candidate and record the findings and checks in AN-235.
-- [ ] 4.2 Mika verifies the candidate after review, integrates the approved work and verifies the remote main SHA.
+- [x] 4.2 Mika verifies the candidate after review, integrates the approved work and verifies the remote main SHA.
 
 ## Workflow follow-up
 

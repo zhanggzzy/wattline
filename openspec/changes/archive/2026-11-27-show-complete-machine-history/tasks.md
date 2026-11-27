@@ -6,8 +6,8 @@
 ## 2. 验证与交接
 
 - [x] 2.1 记录基线复现、完整 pytest、JS 语法、README 浏览器检查、strict 校验和 diff 检查，附可复核证据入口 `verification.md`。
-- [ ] 2.2 AN-239 独立审查实际实现提交、OpenSpec 和验证证据，记录审查结论。
-- [ ] 2.3 Mika 整合并核验远端 main SHA。
+- [x] 2.2 AN-239 独立审查实际实现提交、OpenSpec 和验证证据，记录审查结论。
+- [x] 2.3 Mika 整合并核验远端 main SHA。
 
 ## Workflow follow-up
 

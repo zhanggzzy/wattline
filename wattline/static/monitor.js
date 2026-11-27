@@ -29,12 +29,15 @@ function localizeLabels() {
   descriptors = {cpu:[t('cpu_usage'),'%'], memory:[t('memory_usage'),'%'], memory_used:[t('memory_used'),' GiB'], gpu:[t('gpu_utilization'),'%'],
     power:[t('gpu_power'),' W'], vram:[t('vram_used'),' GiB'], temp:[t('gpu_temperature'),' °C'],
     storage:[t('storage_ratio'),'%'], storage_read:[t('storage_read'),' MiB/s'], storage_write:[t('storage_write'),' MiB/s']};
-  colors = {cpu:'#0b836a', memory:'#456ab4', memory_used:'#456ab4', gpu:'#506dc3', power:'#0b836a', temp:'#b16e23', vram:'#8b57a2', storage:'#0b836a', storage_read:'#456ab4', storage_write:'#8b57a2'};
+  colors = {cpu:'#0b836a', memory:'#456ab4', memory_used:'#853b64', gpu:'#506dc3', power:'#a53c30',
+    temp:'#a26816', vram:'#8b57a2', storage:'#596c13', storage_read:'#006b9b', storage_write:'#674a2c'};
   powerModes = {average:t('average_power'), instantaneous:t('instantaneous_power'), reported:t('driver_reported_power')};
 }
 localizeLabels();
 let railCollapsed = false;
+let railGrouped = false;
 try { railCollapsed = localStorage.getItem('wattline.railCollapsed') === 'true'; } catch {}
+try { railGrouped = localStorage.getItem('wattline.railOrder') === 'cluster'; } catch {}
 function updateRail() {
   document.querySelector('.shell').classList.toggle('rail-collapsed', railCollapsed);
   const button = byId('rail-toggle');
@@ -49,11 +52,18 @@ byId('rail-toggle').addEventListener('click', () => {
   updateRail();
 });
 updateRail();
-const machineColors = ['#506dc3','#0b836a','#b16e23','#8b57a2','#c14953','#2f7f9e','#7d8b2f','#a35d2c'];
-const machineDashes = [
-  [], [8,4], [2,4], [12,4], [8,4,2,4], [8,4,2,4,2,4], [2,4,2,8], [12,4,4,4],
-  [12,4,2,4,2,4], [5,7], [12,8], [3,8], [12,4,6,4], [6,4,6,8], [6,8,2,4], [12,4,2,8]
+function updateRailOrder() {
+  const control = byId('rail-order-control');
+  control.querySelector('span').textContent = railGrouped ? '▦' : '↕';
+  control.title = t(railGrouped ? 'rail_order_cluster' : 'rail_order_manual');
+  byId('rail-order').value = railGrouped ? 'cluster' : 'manual';
+}
+updateRailOrder();
+const trendPalette = [
+  '#365bc5','#a53c30','#08724d','#833bb0','#a26816','#006b9b','#a43976','#596c13',
+  '#243557','#007e7a','#bf510e','#792540','#65609d','#674a2c','#b03653','#405e63',
 ];
+const trendColors = {machine:new Map(), room:new Map(), cluster:new Map()};
 const overviewMetrics = ['gpu','cpu','memory','power'];
 const archiveMetrics = ['cpu','memory','memory_used','gpu','power'];
 const modelRules = [
@@ -149,6 +159,7 @@ let snapshotRevision = 0;
 let rowDrag = null;
 let orderSaving = false;
 let orderMessage = '';
+let orderListId = 'host-rows';
 
 const status = (tone, label) => `<span class="status ${escape(tone)}"><span class="status-dot" aria-hidden="true"></span>${escape(label)}</span>`;
 const field = key => `<span data-value="${escape(key)}" class="value">—</span>`;
@@ -221,29 +232,86 @@ function omittedProcesses(count) {
 const processShape = gpu => [gpu?.uuid, gpu?.state, gpu?.process_visibility,
   gpu?.processes.map(proc => [proc.pid, proc.name, proc.uid, proc.user, proc.workload, proc.used_memory_mib])];
 
-function navigation(hosts, host) {
+function sortHandle(node, sortable, horizontal = false) {
+  const hint = horizontal ? 'rail_reorder_hint' : 'drag_to_reorder_or_use_up_and_down_arrow_keys';
+  const label = horizontal ? t('rail_reorder_machine',{name:node.name}) : t('reorder')+' '+node.name;
+  return `<button type="button" class="sort-handle" data-sort-host="${escape(node.id)}"
+    aria-label="${escape(label)}" title="${t(hint)}"
+    aria-keyshortcuts="ArrowUp ArrowDown${horizontal ? ' ArrowLeft ArrowRight' : ''}" ${sortable ? '' : 'disabled'}></button>`;
+}
+
+function groupedRail(hosts, machineButton) {
+  const clusters = new Map(groupList('cluster').map(cluster => [cluster.id, {name:cluster.name, rooms:new Map()}]));
+  clusters.set(null, {name:t('no_cluster'), rooms:new Map()});
+  const rooms = new Map(groupList('room').map(room => [room.id, room.name]));
+  for (const node of hosts) {
+    const memberships = (node.cluster_ids ?? []).filter(id => clusters.has(id) && id !== null);
+    for (const clusterId of memberships.length ? new Set(memberships) : [null]) {
+      const cluster = clusters.get(clusterId);
+      const roomId = rooms.has(node.room_id) ? node.room_id : null;
+      if (!cluster.rooms.has(roomId)) cluster.rooms.set(roomId, []);
+      cluster.rooms.get(roomId).push(node);
+    }
+  }
+  return [...clusters].filter(([, cluster]) => cluster.rooms.size).map(([id, cluster]) => {
+    const name = escape(cluster.name);
+    return `<section class="rail-cluster" aria-label="${name}">
+      <h2 class="rail-cluster-name" title="${name}">${name}</h2>
+      ${[...cluster.rooms].map(([roomId, members]) => {
+        const room = rooms.get(roomId) ?? t('no_room');
+        return `<div class="rail-room" role="group" aria-label="${escape(room)}">
+          <h3 class="rail-room-name" title="${escape(room)}">${escape(room)}</h3>
+          ${members.map(node => machineButton(node, {id, cluster:cluster.name, room})).join('')}</div>`;
+      }).join('')}</section>`;
+  }).join('');
+}
+
+function railMachines(hosts, host) {
   const nameCounts = countLabels(hosts.map(instanceNameKey));
   const suffixes = machineSuffixes(hosts, nameCounts);
-  byId('rail-nav').innerHTML = `<button class="rail-nav" type="button" data-overview aria-label="${t('overview')}" title="${t('overview')}" ${host || state.page ? '' : 'aria-current="page"'}>
+  const machineButton = (node, placement) => {
+    const suffix = suffixes.get(node.id);
+    const identity = machineIdentity(node, nameCounts.get(instanceNameKey(node)) > 1 ? suffix : null);
+    const label = placement ? [identity,placement.cluster,placement.room].join(' · ') : identity;
+    return `<button class="rail-nav rail-machine" type="button" data-host="${escape(node.id)}"
+      ${placement ? `data-rail-cluster="${escape(placement.id)}"` : ''}
+      aria-label="${escape(label)}" title="${escape(label)}" ${node.id === host?.id ? 'aria-current="page"' : ''}>
+      ${machineGlyph(node)}<strong>${escape(node.name)}</strong>${suffix ? `<span class="machine-suffix" aria-hidden="true">${escape(suffix)}</span>` : ''}<span class="status-dot ${escape(node.status)}" aria-hidden="true"></span>
+    </button>`;
+  };
+  const list = byId('rail-machines');
+  const layout = railGrouped ? 'rail-grouped' : 'rail-manual';
+  const scroll = list.className === layout ? {top:list.scrollTop,left:list.scrollLeft} : {top:0,left:0};
+  const sortable = hosts.length > 1 && !configUnavailable();
+  list.className = layout;
+  list.innerHTML = railGrouped ? groupedRail(hosts, machineButton) : hosts.map(node => `<div class="rail-sort-row" data-rail-sort-row>
+    ${sortable && (groupedOverview() || !node.storage_kind) ? sortHandle(node, true, true) : ''}
+    ${machineButton(node)}</div>`).join('');
+  list.scrollTo(scroll);
+}
+
+function navigation(hosts, host) {
+  byId('rail-links').innerHTML = `<button class="rail-nav" type="button" data-overview aria-label="${t('overview')}" title="${t('overview')}" ${host || state.page ? '' : 'aria-current="page"'}>
       <span class="overview-icon" aria-hidden="true"></span><strong>${t('overview')}</strong></button>
     ${typedResources() ? `<button type="button" class="rail-nav" data-alert-center aria-label="${t('alerts_center')}" ${state.page === 'alerts' ? 'aria-current="page"' : ''}>
       <span aria-hidden="true">!</span><strong>${t('alerts_center')}</strong></button>` : ''}
     ${groupedOverview() ? `<button type="button" class="rail-nav" data-workspace-manage aria-label="${t('group_management')}"
-      ${state.page === 'manage' ? 'aria-current="page"' : ''}><span aria-hidden="true">≡</span><strong>${t('group_management')}</strong></button>` : ''}
-    <p class="rail-label">${t('machine')}</p>${hosts.map(node => {
-      const suffix = suffixes.get(node.id);
-      const identity = machineIdentity(node, nameCounts.get(instanceNameKey(node)) > 1 ? suffix : null);
-      return `<button class="rail-nav rail-machine" type="button"
-      data-host="${escape(node.id)}" aria-label="${escape(identity)}" title="${escape(identity)}" ${node.id === host?.id ? 'aria-current="page"' : ''}>
-      ${machineGlyph(node)}<strong>${escape(node.name)}</strong>${suffix ? `<span class="machine-suffix" aria-hidden="true">${escape(suffix)}</span>` : ''}<span class="status-dot ${escape(node.status)}" aria-hidden="true"></span>
-    </button>`;
-    }).join('')}`;
+      ${state.page === 'manage' ? 'aria-current="page"' : ''}><span aria-hidden="true">≡</span><strong>${t('group_management')}</strong></button>` : ''}`;
+  railMachines(hosts, host);
   byId('breadcrumb').innerHTML = state.page === 'alerts'
     ? `<button type="button" data-overview class="crumb-button">${t('overview')}</button><span aria-hidden="true">›</span><strong>${t('alerts_center')}</strong>`
     : groupBreadcrumb() ?? (host
     ? `<button type="button" data-overview class="crumb-button">${t('overview')}</button><span aria-hidden="true">›</span><strong>${escape(host.name)}</strong>`
     : `<strong>${t('overview')}</strong>`);
 }
+
+byId('rail-order').addEventListener('change', event => {
+  railGrouped = event.target.value === 'cluster';
+  try { localStorage.setItem('wattline.railOrder', event.target.value); } catch {}
+  updateRailOrder();
+  const hosts = nodes();
+  railMachines(hosts, machineForId(state.machine, hosts));
+});
 
 function renderPage(force = false) {
   if (state.archive && state.page !== 'archive') {
@@ -279,7 +347,7 @@ function renderPage(force = false) {
   const focusClass = focused?.className;
   const focusData = focused?.tagName === 'BUTTON' ? Object.entries(focused.dataset) : [];
   const inputFocused = ['host-search','group-search','alert-search'].includes(focusId);
-  const focusedSort = document.activeElement?.dataset.sortHost;
+  const focusedSort = focused?.closest('#host-rows') ? focused.dataset.sortHost : null;
   const caret = inputFocused ? document.activeElement.selectionStart : null;
   for (const instance of charts) instance.observer.disconnect();
   charts = [];
@@ -321,12 +389,14 @@ function renderPage(force = false) {
     const replacement = (focusId && byId(focusId)) || [...controls].find(button =>
       button.className === focusClass && focusData.length &&
       Object.keys(button.dataset).length === focusData.length &&
-      focusData.every(([key,value]) => button.dataset[key] === value));
+      focusData.every(([key,value]) => button.dataset[key] === value)) ||
+      (focusContainerId === 'rail-machines' && focused.dataset.host
+        ? [...controls].find(button => button.dataset.host === focused.dataset.host) : null);
     replacement?.focus({preventScroll:true});
     if (inputFocused && caret != null && replacement) replacement.setSelectionRange(caret,caret);
     if (replacement) {
       const rect = replacement.getBoundingClientRect();
-      if (rect.top < 0 || rect.bottom > innerHeight || rect.left < 0 || rect.right > innerWidth) {
+      if (replacement.closest('#rail-nav') || rect.top < 0 || rect.bottom > innerHeight || rect.left < 0 || rect.right > innerWidth) {
         replacement.scrollIntoView({block:'nearest', inline:'nearest'});
       }
     }
@@ -383,7 +453,7 @@ function machinePanel(detail = false) {
           ${filters.map(([key,label]) => toggle(label, 'data-filter', key, selectedStatus === key)).join('')}
           </div><input class="search" id="host-search" type="search" aria-label="${t('search_machines')}" placeholder="${t('search_name_or_address')}"></div>
         ${groupedOverview() ? deviceFilters() : ''}
-        <p id="order-message" class="order-message" role="status" ${orderMessage ? '' : 'hidden'}>${escape(orderMessage)}</p>
+        <p id="order-message" class="order-message" role="status" ${orderListId === 'host-rows' && orderMessage ? '' : 'hidden'}>${orderListId === 'host-rows' ? escape(orderMessage) : ''}</p>
         <div class="scroll machine-scroll" tabindex="0" role="region" aria-label="${t('machines')}"><table class="machine-table ${groupedOverview() ? 'resource-device-table' : ''}">
           <thead><tr><th>${t('machine')}</th><th>${t('status')}</th><th>${t('assignees')}</th><th><span class="wide-label">${t('gpu_utilization')}</span><span class="compact-label" title="${t('average_gpu_utilization')}">GPU</span></th>
           <th aria-label="${t('gpu_power')}"><span class="power-label">${t('gpu_power')}</span><span class="narrow-power-label">${t('power')}</span></th><th>CPU</th><th>${t('memory')}</th>
@@ -430,9 +500,7 @@ function drawRows(hosts) {
   const sortable = filtered.length > 1 && !configUnavailable();
   byId('host-rows').innerHTML = filtered.length ? filtered.map(node => `<tr data-machine-row="${escape(node.id)}">
     <td><div class="machine-cell">
-      <button type="button" class="sort-handle" data-sort-host="${escape(node.id)}"
-        aria-label="${t('reorder')} ${escape(node.name)}" title="${t('drag_to_reorder_or_use_up_and_down_arrow_keys')}"
-        aria-keyshortcuts="ArrowUp ArrowDown" ${sortable && (groupedOverview() || !node.storage_kind) ? '' : 'disabled'}></button>
+      ${sortHandle(node, sortable && (groupedOverview() || !node.storage_kind))}
       <div class="machine-identity"><button type="button" class="row-open" data-host="${escape(node.id)}" aria-label="${t('view')} ${escape(node.name)}">
       ${machineGlyph(node)}<span><strong>${escape(node.name)}</strong><small class="mono">${escape(node.address)}${node.hardware_kind ? ` · ${hardwareLabel(node.hardware_kind)}` : ''}</small>
       ${node.scope === 'container' ? `<small>${t('container_scope')}</small>` : ''}</span></button>
@@ -449,16 +517,21 @@ function drawRows(hosts) {
 
 function showOrderMessage(message) {
   orderMessage = message;
-  const notice = byId('order-message');
-  if (notice) {
-    notice.textContent = message;
-    notice.hidden = !message;
+  for (const [listId, noticeId] of [['host-rows','order-message'],['rail-machines','rail-order-message']]) {
+    const notice = byId(noticeId);
+    if (!notice) continue;
+    notice.textContent = orderListId === listId ? message : '';
+    notice.hidden = !notice.textContent;
   }
 }
 
-async function moveMachine(from, target, after) {
+const orderRow = '[data-machine-row], [data-rail-sort-row]';
+const enabledSort = '[data-sort-host]:enabled';
+const sortableId = row => row.querySelector(enabledSort)?.dataset.sortHost;
+
+async function moveMachine(list, from, target, after) {
   if (orderSaving || from === target) return;
-  const visible = [...byId('host-rows').querySelectorAll('[data-machine-row]:has([data-sort-host]:enabled)')].map(row => row.dataset.machineRow);
+  const visible = [...list.querySelectorAll(enabledSort)].map(handle => handle.dataset.sortHost);
   const remaining = visible.filter(id => id !== from);
   const slot = remaining.indexOf(target);
   if (!visible.includes(from) || slot < 0) return;
@@ -471,6 +544,7 @@ async function moveMachine(from, target, after) {
   const all = mixed ? nodes() : state.snapshot.machines;
   const ids = all.map(node => visibleSet.has(node.id) ? moved.next().value : node.id);
   orderSaving = true;
+  orderListId = list.id;
   showOrderMessage(t('saving_order'));
   try {
     const response = await fetch(mixed ? '/api/resources/order' : '/api/machines/order', {
@@ -496,36 +570,39 @@ async function moveMachine(from, target, after) {
 }
 
 document.addEventListener('pointerdown', event => {
-  const handle = event.target.closest('[data-sort-host]:enabled');
+  const handle = event.target.closest(enabledSort);
   if (!handle || orderSaving || rowDrag || !event.isPrimary || event.button !== 0) return;
+  const from = handle.closest(orderRow);
+  const list = from.parentElement;
+  const horizontal = list.id === 'rail-machines' && getComputedStyle(list).flexDirection === 'row';
   handle.setPointerCapture(event.pointerId);
-  rowDrag = {pointer:event.pointerId, from:handle.closest('tr'), start:event.clientY, target:null, after:false};
+  rowDrag = {pointer:event.pointerId, from, list, horizontal,
+    start:horizontal ? event.clientX : event.clientY, target:null, after:false};
 });
 
 document.addEventListener('pointermove', event => {
   if (rowDrag?.pointer !== event.pointerId) return;
-  const {from,start,target} = rowDrag;
-  if (!from.classList.contains('sorting') && Math.abs(event.clientY-start) < 5) return;
+  const {from,list,horizontal,start,target} = rowDrag;
+  const position = horizontal ? event.clientX : event.clientY;
+  if (!from.classList.contains('sorting') && Math.abs(position-start) < 5) return;
   from.classList.add('sorting');
   target?.classList.remove('drop-before','drop-after');
-  const row = document.elementFromPoint(event.clientX,event.clientY)?.closest('[data-machine-row]');
-  rowDrag.target = row && row !== from ? row : null;
+  const row = document.elementFromPoint(event.clientX,event.clientY)?.closest(orderRow);
+  rowDrag.target = row?.parentElement === list && row !== from && sortableId(row) ? row : null;
   if (rowDrag.target) {
     const bounds = row.getBoundingClientRect();
-    rowDrag.after = event.clientY > bounds.top + bounds.height/2;
+    rowDrag.after = position > (horizontal ? bounds.left + bounds.width/2 : bounds.top + bounds.height/2);
     row.classList.add(rowDrag.after ? 'drop-after' : 'drop-before');
   }
 });
 
 function finishDrag(event) {
   if (rowDrag?.pointer !== event.pointerId) return;
-  const {from,target,after} = rowDrag;
+  const {from,list,target,after} = rowDrag;
   rowDrag = null;
   from.classList.remove('sorting');
   target?.classList.remove('drop-before','drop-after');
-  if (event.type === 'pointerup' && target && byId('host-rows')) {
-    void moveMachine(from.dataset.machineRow,target.dataset.machineRow,after);
-  }
+  if (event.type === 'pointerup' && target) void moveMachine(list,sortableId(from),sortableId(target),after);
   renderPage();
   paint();
 }
@@ -534,13 +611,17 @@ document.addEventListener('pointerup',finishDrag);
 document.addEventListener('pointercancel',finishDrag);
 document.addEventListener('lostpointercapture',finishDrag);
 document.addEventListener('keydown', event => {
-  const handle = event.target.closest('[data-sort-host]:enabled');
-  if (!handle || !['ArrowUp','ArrowDown'].includes(event.key) || rowDrag) return;
+  const handle = event.target.closest(enabledSort);
+  if (!handle || rowDrag) return;
+  const row = handle.closest(orderRow);
+  const list = row.parentElement;
+  const arrows = list.id === 'rail-machines'
+    ? ['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'] : ['ArrowUp','ArrowDown'];
+  if (!arrows.includes(event.key)) return;
   event.preventDefault();
-  const row = handle.closest('tr');
-  const down = event.key === 'ArrowDown';
-  const target = down ? row.nextElementSibling : row.previousElementSibling;
-  if (target) void moveMachine(row.dataset.machineRow,target.dataset.machineRow,down);
+  const after = ['ArrowDown','ArrowRight'].includes(event.key);
+  const target = after ? row.nextElementSibling : row.previousElementSibling;
+  if (target && sortableId(target)) void moveMachine(list,handle.dataset.sortHost,sortableId(target),after);
 });
 
 function chartControls(host, device) {
@@ -572,7 +653,7 @@ function chartPanel(host, device) {
     <div class="title-actions">${device ? `<button type="button" class="control" data-all-gpus>${t('back_to_machine')}</button>` : ''}
       ${host && !host.storage_kind && !device ? `<button type="button" id="open-archive" class="control" ${configUnavailable() ? 'disabled' : ''}>${t('archive_analysis')}</button>` : ''}
       <button type="button" id="focus-trends" class="control" data-focus-trends>${t('focus_charts')}</button></div></div>
-    ${host?.sources?.length > 1 ? `<div class="tools"><label>${t('trend_source')}
+    ${host?.sources?.length > 1 ? `<div class="tools"><label class="trend-source">${t('trend_source')}
       <select id="trend-source"><option value="">${t('whole_machine')}</option>
       ${host.sources.map(item => `<option value="${escape(item.id)}" ${item === source ? 'selected' : ''}>${escape(sourceLabel(item))}</option>`).join('')}</select>
       </label>${scope ? `<small>${t(scope === 'container' ? 'container_scope' : 'host_scope_label')}</small>` : ''}</div>` : ''}
@@ -1183,15 +1264,41 @@ function countLabels(labels) {
 
 const chartHistory = metric => state.archive ? state.archive.history : state.histories[metric];
 
+function extendedTrendColor(index) {
+  // Use hex so the same color can also supply the alpha stops for single-series fills.
+  const sector = (index * 137.508 % 360) / 60;
+  const lightness = [0.36,0.45,0.28][index % 3];
+  const chroma = (1-Math.abs(2*lightness-1))*0.74;
+  const between = chroma*(1-Math.abs(sector % 2-1));
+  const channels = [[chroma,between,0], [between,chroma,0], [0,chroma,between],
+    [0,between,chroma], [between,0,chroma], [chroma,0,between]][Math.floor(sector)];
+  return '#'+channels.map(value => Math.round(255*(value+lightness-chroma/2))
+    .toString(16).padStart(2,'0')).join('');
+}
+
+function assignTrendColors(kind, ids) {
+  const assigned = trendColors[kind];
+  // API order, display names and series visibility can all change during polling.
+  for (const id of [...new Set(ids)].sort()) {
+    if (assigned.has(id)) continue;
+    const index = assigned.size;
+    assigned.set(id, trendPalette[index] ?? extendedTrendColor(index-trendPalette.length));
+  }
+  return assigned;
+}
+
 function chartSeries(instance, history) {
-  if (groupChartContext()) {
+  const group = groupChartContext();
+  if (group) {
     const [,unit] = descriptors[instance.metric];
-    return (history?.series ?? []).map((item,index) => ({
+    const items = history?.series ?? [];
+    const ids = items.map(item => JSON.stringify([item.group, item.scope ?? null]));
+    const assigned = assignTrendColors(group.kind, ids);
+    return items.map((item,index) => ({
       key:instance.metric, id:item.group, hidden:state.hiddenGroups.has(item.group), unit,
       label:item.name+(['host','container'].includes(item.scope)
         ? ' · '+t(item.scope === 'container' ? 'container_scope' : 'host_scope_label') : ''),
-      color:machineColors[index % machineColors.length],
-      dash:machineDashes[item.scope === 'container' ? 1+(index%3) : index%3],
+      color:assigned.get(ids[index]),
     }));
   }
   if (!state.machine) {
@@ -1206,11 +1313,11 @@ function chartSeries(instance, history) {
     });
     const labelCounts = countLabels(labels);
     const [,unit] = descriptors[instance.metric];
+    const assigned = assignTrendColors('machine', ids);
     return labels.map((label,index) => ({
       key:instance.metric,
       label:labelCounts.get(label) > 1 ? label+' · '+ids[index] : label,
-      unit, color:machineColors[index % machineColors.length],
-      dash:machineDashes[Math.floor(index / machineColors.length) % machineDashes.length]
+      unit, color:assigned.get(ids[index]),
     }));
   }
   const keys = history?.keys || [instance.metric];
@@ -1220,7 +1327,7 @@ function chartSeries(instance, history) {
       : key === 'power' && !state.gpu && !state.archive
         ? (historyScope(getHost()) === 'container' || getHost()?.scope === 'container' || getHost()?.sources?.length > 1
           ? t('visible_gpu_power') : t('total_gpu_power')) : title;
-    return {key,label,unit,color:colors[key],dash:[]};
+    return {key,label,unit,color:colors[key]};
   });
 }
 
@@ -1277,7 +1384,6 @@ function setSeriesStroke(ctx, series) {
   ctx.lineJoin = 'round';
   ctx.lineCap = 'round';
   ctx.strokeStyle = series.color;
-  ctx.setLineDash(series.dash);
 }
 
 function paintLegend(chart, series, bucket) {
@@ -2395,7 +2501,8 @@ localeSelect.addEventListener('change', () => {
   i18n.apply();
   localizeLabels();
   updateRail();
-  orderMessage = '';
+  updateRailOrder();
+  showOrderMessage('');
   renderPage(true);
   paint();
 });

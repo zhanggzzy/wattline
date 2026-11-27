@@ -20,6 +20,7 @@ from playwright.sync_api import sync_playwright, expect
 from wattline.app import create_app
 from wattline.archive_analysis import ArchiveAnalysis
 from wattline.config import Config, Machine, MachineSettings
+from wattline.groups import summarize_resources
 from wattline.history import History, WARM_MS
 from wattline.service import Monitor
 
@@ -455,6 +456,41 @@ def check_gpu_process_timing(browser):
             'timing_only_poll':True, 'missing_pair_poll':True, 'departed_processes_poll':True, 'page_errors':errors}
 
 
+def observe_trend_strokes(page):
+    # Observe real canvas strokes and segment lengths while leaving rendering in place.
+    page.add_init_script("""(() => {
+      const edges = new WeakMap();
+      const traces = new WeakMap();
+      const context = CanvasRenderingContext2D.prototype;
+      const wrap = (method, observe) => {
+        const original = context[method];
+        context[method] = function (...args) {
+          observe(this);
+          return original.apply(this,args);
+        };
+      };
+      wrap('beginPath', ctx => edges.set(ctx,0));
+      wrap('lineTo', ctx => edges.set(ctx,(edges.get(ctx) || 0)+1));
+      wrap('clearRect', ctx => traces.set(ctx.canvas,[]));
+      wrap('stroke', ctx => {
+        const trace = traces.get(ctx.canvas) || [];
+        trace.push({color:ctx.strokeStyle,dash:ctx.getLineDash(),edges:edges.get(ctx)});
+        traces.set(ctx.canvas,trace);
+      });
+      window.strokeTrace = canvas => traces.get(canvas);
+    })()""")
+
+def assert_solid_plot(chart):
+    swatches = chart.locator('.legend-line').evaluate_all('canvases => canvases.map(canvas => strokeTrace(canvas)[0])')
+    assert swatches and all(not swatch['dash'] for swatch in swatches), swatches
+    colors = {swatch['color'] for swatch in swatches}
+    assert len(colors) == len(swatches), swatches
+    strokes = chart.locator('.plot canvas').evaluate(
+        'canvas => strokeTrace(canvas).filter(stroke => stroke.color !== "#e9f0ec")')
+    assert strokes and all(not stroke['dash'] and stroke['color'] in colors for stroke in strokes), strokes
+    return swatches
+
+
 def check_focus_layout(browser):
     """AN-48 synthetic acceptance: navigation, metric comparisons, hardware and modal focus."""
     global machines, mode
@@ -469,6 +505,7 @@ def check_focus_layout(browser):
     page.on('pageerror',lambda error:errors.append(str(error)))
     page.on('request',lambda request:requests.append(request.url) if '/api/history?' in request.url else None)
     page.route('**/*',handle)
+    observe_trend_strokes(page)
     page.goto('http://wattline.test')
     expect(page.locator('#host-rows tr')).to_have_count(3)
     toggle_rail = page.locator('#rail-toggle')
@@ -486,6 +523,8 @@ def check_focus_layout(browser):
     expect(page.locator('[data-value="cores"]')).to_contain_text('64')
     expect(page.locator('[data-value="load"]')).to_have_text('12.00')
     expect(page.locator('[data-value="disk"]')).to_contain_text('500.0')
+    expect(page.locator('#chart-summary')).to_contain_text('11 个有效时段')
+    assert_solid_plot(page.locator('.chart-instance'))
     assert page.locator('.chart-panel').bounding_box()['width'] == page.locator('.hardware-panel').bounding_box()['width']
     assert page.locator('.hardware-panel').bounding_box()['y'] > page.locator('.chart-panel').bounding_box()['y']
     expect(page.locator('.hardware-table tbody tr')).to_have_count(2)
@@ -522,6 +561,8 @@ def check_focus_layout(browser):
     expect(page.locator('#gpu-dialog .process-table')).to_contain_text('Docker')
     page.get_by_role('button',name='查看此 GPU 趋势',exact=True).click()
     expect(page.locator('[data-metric="gpu"]')).to_have_attribute('aria-pressed','true')
+    expect(page.locator('#chart-summary')).to_contain_text('11 个有效时段')
+    assert_solid_plot(page.locator('.chart-instance'))
     # Inspecting another device must not overwrite the selected device's metric card.
     page.get_by_role('button',name='查看 GPU 1',exact=True).click()
     expect(page.locator('[data-value="selected-gpu-memory"]')).to_have_text('24.0 / 80.0 GiB')
@@ -538,6 +579,8 @@ def check_focus_layout(browser):
     expect(page.locator('.trend-stack .plot canvas')).to_have_count(2)
     for summary in page.locator('.chart-summary').all():
         expect(summary).to_contain_text('11 个有效时段')
+    for plot in page.locator('.trend-stack .chart-instance').all():
+        assert_solid_plot(plot)
     expect(page.locator('[data-range="24"]')).to_have_attribute('aria-pressed','true')
     assert page.evaluate('state.focusMetrics.join(",")') == 'power,gpu'
     assert page.evaluate('Object.values(state.histories).every(h => h.to-h.from === 24*3600000)')
@@ -681,70 +724,55 @@ def check_overview_regressions(browser):
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
     label = "<b>字面</b>&" + "W" * (80-len("<b>字面</b>&"))
-    active = [dict(node(1), id=f"trend-{i}", name=f"合成节点 {i}") for i in range(1,10)]
+    active = [dict(node(1), id=f"trend-{i}", name=f"合成节点 {i}") for i in range(1,19)]
     for host in (active[0],active[-1]):
         host.update(name=label, address="<i>合成地址</i>.invalid")
     slow = [0,11,22,None,33,44,55,None,66,77,None,90,91]
     now = int(time.time()*1000)
     start = now-86400000
     points = [
-        dict(time=start+i*216000, values=[i+5*j for j in range(1,9)]+[value],
-             breaks=[i == 0]*8+[i in (0,10,11)])
+        dict(time=start+i*216000, values=[i+4*j for j in range(1,18)]+[value],
+             breaks=[i == 0]*17+[i in (0,10,11)])
         for i,value in enumerate(slow)
     ]
     # Missing polls can also be signalled on the next observed bucket.
     points[4]["values"][1] = None
     points[5]["breaks"][1] = True
+    polling = False
     page.route("**/*", handle)
     page.route("**/api/snapshot", lambda route: route.fulfill(json=dict(
-        server_time=now, period_ms=10000, stale_ms=30000, machines=active)))
-    page.route("**/api/history?*", lambda route: route.fulfill(json={
-        "from":start, "to":now, "bucket_ms":216000, "gap_ms":324000, "keys":["gpu"],
-        "machines":[host["id"] for host in active], "points":points,
-    }))
-    # Observe real canvas strokes and segment lengths while leaving rendering in place.
-    page.add_init_script("""(() => {
-      const edges = new WeakMap();
-      const traces = new WeakMap();
-      const context = CanvasRenderingContext2D.prototype;
-      const wrap = (method, observe) => {
-        const original = context[method];
-        context[method] = function (...args) {
-          observe(this);
-          return original.apply(this,args);
-        };
-      };
-      wrap('beginPath', ctx => edges.set(ctx,0));
-      wrap('lineTo', ctx => edges.set(ctx,(edges.get(ctx) || 0)+1));
-      wrap('clearRect', ctx => traces.set(ctx.canvas,[]));
-      wrap('stroke', ctx => {
-        const trace = traces.get(ctx.canvas) || [];
-        trace.push({color:ctx.strokeStyle,dash:ctx.getLineDash(),edges:edges.get(ctx)});
-        traces.set(ctx.canvas,trace);
-      });
-      window.strokeTrace = canvas => traces.get(canvas);
-    })()""")
+        server_time=now+(6000 if polling else 0), period_ms=10000, stale_ms=30000, machines=active)))
+    def history(route):
+        metric = parse_qs(urlsplit(route.request.url).query)['metric'][0]
+        ids = [host['id'] for host in active]
+        ordered_points = points
+        if (metric == 'cpu') != polling:
+            ids.reverse()
+            ordered_points = [dict(point, values=point['values'][::-1], breaks=point['breaks'][::-1])
+                              for point in points]
+        route.fulfill(json={'from':start, 'to':now, 'bucket_ms':216000, 'gap_ms':324000,
+                            'keys':[metric], 'machines':ids, 'points':ordered_points})
+
+    page.route("**/api/history?*", history)
+    observe_trend_strokes(page)
     page.goto("http://wattline.test")
     expect(page.locator("#chart-summary")).to_contain_text("13 个有效时段")
     legend = page.locator("#chart-legend")
     tip = page.locator("#chart-tip")
     canvas = page.locator("#trend-chart")
     entries = legend.locator(".chart-legend-item")
-    expect(entries).to_have_count(9)
+    expect(entries).to_have_count(18)
     expected_labels = [f"{label} · {host['address']} · {host['id']}" for host in (active[0],active[-1])]
     for entry,expected in zip((entries.first,entries.last),expected_labels):
         expect(entry).to_have_text(expected)
     expect(legend.locator("b, i")).to_have_count(0)
 
-    swatches = entries.locator("canvas").evaluate_all("canvases => canvases.map(canvas => strokeTrace(canvas)[0])")
-    assert swatches[0]["color"] == swatches[-1]["color"]
-    assert swatches[0]["dash"] != swatches[-1]["dash"]
-    assert len({(item["color"],tuple(item["dash"])) for item in swatches}) == 9
+    swatches = assert_solid_plot(page.locator('.chart-instance'))
     strokes = canvas.evaluate("canvas => strokeTrace(canvas)")
     for index,swatch in enumerate(swatches):
         lengths = [stroke["edges"] for stroke in strokes
                    if (stroke["color"],stroke["dash"]) == (swatch["color"],swatch["dash"])]
-        assert lengths == {1:[3,7], 8:[7,1]}.get(index,[12]), (index, lengths)
+        assert lengths == {1:[3,7], 17:[7,1]}.get(index,[12]), (index, lengths)
 
     canvas.press("ArrowLeft")
     expect(tip).to_be_visible()
@@ -769,18 +797,86 @@ def check_overview_regressions(browser):
     canvas.hover(position={"x":41,"y":20})
     expect(tip).to_contain_text(expected_labels[-1]+" · 0%")
     page.locator('#locale-select').select_option('en')
-    expect(page.locator('#chart-summary')).to_have_text('13 valid periods · Machines: 9')
+    expect(page.locator('#chart-summary')).to_have_text('13 valid periods · Machines: 18')
     page.locator('#chart-data summary').click()
     headers = page.locator('#chart-data thead th')
-    expect(headers).to_have_count(10)
+    expect(headers).to_have_count(19)
     expect(headers.first).to_have_text('Sample time')
     expect(headers.last).to_have_text(expected_labels[-1]+' (%)')
     expect(page.locator('#chart-data b, #chart-data i')).to_have_count(0)
     expect(page.locator('#chart-data tbody tr').first.locator('td').last).to_have_text('0.0%')
     assert page.evaluate('document.documentElement.scrollWidth === innerWidth')
+    page.locator('[data-overview-metric=cpu]').click()
+    expect(entries.first).to_have_text(expected_labels[-1])
+    assert assert_solid_plot(page.locator('.chart-instance')) == swatches[::-1]
+    polling = True
+    expect(entries.first).to_have_text(expected_labels[0])
+    assert assert_solid_plot(page.locator('.chart-instance')) == swatches
     assert not errors, errors
     page.close()
-    return {"width":320,"machines":9,"slow_segment_edges":[7,1],"lapse_segment_edges":[3,7]}
+    return {"width":320,"machines":18,"slow_segment_edges":[7,1],"lapse_segment_edges":[3,7]}
+
+
+def check_group_trend_styles(browser):
+    page = browser.new_page()
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    summary = summarize_resources([])
+    groups = {kind+'s':[dict(id=f'{kind}-{index}', name=f'{kind} {index}',
+                             summary=summary, members=[], rooms=[]) for index in range(6)]
+              for kind in ('room','cluster')}
+    now = int(time.time()*1000)
+    start = now-86400000
+
+    def group_history(route):
+        query = parse_qs(urlsplit(route.request.url).query)
+        kind, metric = query['kind'][0], query['metric'][0]
+        requested = query.get('group', [])
+        selected = [group for group in groups[kind+'s'] if group['id'] in requested]
+        series = [dict(group=group['id'], name=group['name'], scope=scope)
+                  for group in selected for scope in ('host','container')]
+        if metric == 'memory':
+            series.reverse()
+        points = [dict(time=start+index*300000, values=[index+column for column in range(len(series))])
+                  for index in range(3)]
+        route.fulfill(json={'from':start, 'to':now, 'bucket_ms':300000, 'keys':[metric],
+                            'series':series, 'points':points})
+
+    page.route('**/*', handle)
+    page.route('**/api/snapshot', lambda route: route.fulfill(json=dict(
+        server_time=now, stale_ms=30000, machines=[], storage=[], groups=groups)))
+    page.route('**/api/group-history?*', group_history)
+    observe_trend_strokes(page)
+    page.goto('http://wattline.test')
+    chart = page.locator('.chart-instance')
+    entries = chart.locator('.chart-legend-item')
+    for kind in ('room','cluster'):
+        page.locator(f'#overview-tab-{kind}').click()
+        page.locator('[data-overview-metric=cpu]').click()
+        expect(entries).to_have_count(12)
+        expect(entries.first).to_have_text(f'{kind} 0 · 宿主')
+        expect(entries.nth(1)).to_have_text(f'{kind} 0 · 容器视角')
+        before = assert_solid_plot(chart)
+        group_legend = chart.locator(f'[data-legend-group={kind}-0]')
+        swatch_color = before[0]['color']
+        group_legend.first.press('Enter')
+        expect(group_legend.first).to_have_attribute('aria-pressed','false')
+        expect(group_legend.last).to_have_attribute('aria-pressed','false')
+        assert not chart.locator('.plot canvas').evaluate(
+            '(canvas,color) => strokeTrace(canvas).some(stroke => stroke.color === color)', swatch_color)
+        group_legend.first.press('Enter')
+        page.locator('[data-overview-metric=memory]').click()
+        expect(entries.first).to_have_text(f'{kind} 5 · 容器视角')
+        assert assert_solid_plot(chart) == before[::-1]
+        page.locator('#chart-data summary').click()
+        expect(page.locator('#chart-data thead th')).to_have_count(13)
+        page.locator('.group-summary').get_by_role('button',name=f'{kind} 0',exact=True).click()
+        expect(entries).to_have_count(2)
+        assert assert_solid_plot(chart) == before[:2][::-1]
+        page.locator('#breadcrumb [data-overview]').click()
+    assert not errors, errors
+    page.close()
+    return {'scoped_series_per_overview':12, 'surfaces':['room','cluster']}
 
 
 def check_machine_silhouettes(browser):
@@ -1768,7 +1864,8 @@ def check_archive_analysis(browser):
     with patch.dict(globals(), machines=[node(1), node(2), node(3, 'offline')], mode='normal'), TemporaryDirectory() as directory:
         hosts = tuple(Machine(id=f'demo-{index}', mode='ssh', ssh_alias=f'demo-{index}',
                               expected_host_id=str(index)*32, enabled=False) for index in (1, 2, 3))
-        config = Config(data_dir=Path(directory), machines=hosts, archive_timezone=zone.key)
+        config = Config(data_dir=Path(directory), machines=hosts, archive_timezone=zone.key,
+                        stale_seconds=300)
         store = History(config.data_dir)
         store.prepare()
 
@@ -1784,6 +1881,7 @@ def check_archive_analysis(browser):
             return store.cold_directory / exported.filename
 
         append(hosts[0], midnight, 21)
+        append(hosts[0], midnight + 240000, 22)
         append(hosts[1], midnight, 98)
         first = publish(midnight + 3600000)
         append(hosts[0], midnight + day - 1, 24)
@@ -1821,6 +1919,7 @@ def check_archive_analysis(browser):
                 response = client.request(method, url.path + ('?' + url.query if url.query else ''), **options)
                 route.fulfill(status=response.status_code, json=response.json())
 
+            observe_trend_strokes(page)
             page.route('**/*', route_archive)
             try:
                 page.goto('http://wattline.test')
@@ -1860,9 +1959,10 @@ def check_archive_analysis(browser):
                 apply = page.get_by_role('button', name='Apply filters')
                 apply.click()
                 expect(page.locator('#chart-summary')).to_contain_text('24.0%')
+                assert_solid_plot(page.locator('.chart-instance'))
                 page.get_by_text('View chart data', exact=True).click()
                 rows_on_page = page.locator('#chart-data tbody tr')
-                expect(rows_on_page).to_have_count(2)
+                expect(rows_on_page).to_have_count(3)
                 expect(rows_on_page.first).to_contain_text('10/02/2026, 00:00:00')
                 expect(rows_on_page.first).to_contain_text('21.0%')
                 expect(rows_on_page.last).to_contain_text('23:59:59')
@@ -1885,7 +1985,7 @@ def check_archive_analysis(browser):
                 expect(page.get_by_text('This machine has no archived history.')).to_be_visible()
                 assert not errors, errors
                 assert first.exists() and second.read_bytes() == original
-                return {'progress':partial, 'range_rows':2, 'timezone':zone.key, 'retry':True,
+                return {'progress':partial, 'range_rows':3, 'timezone':zone.key, 'retry':True,
                         'no_archive':True, 'no_samples':True, 'entry_only':True, 'requests':len(requests)}
             finally:
                 release.set()
@@ -2227,6 +2327,7 @@ with sync_playwright() as p:
     gpu_process_timing = check_gpu_process_timing(browser)
     focus_layout = check_focus_layout(browser)
     overview_regressions = check_overview_regressions(browser)
+    group_trend_styles = check_group_trend_styles(browser)
     silhouettes = check_machine_silhouettes(browser)
     rail_identity_edges = check_rail_identity_edges(browser)
     print(json.dumps({"archive_analysis":check_archive_analysis(browser)}, ensure_ascii=False))
@@ -2236,5 +2337,6 @@ with sync_playwright() as p:
                       "people_directory":people_directory, "assignee_responsive":assignee_responsive,
                       "unlimited_container":unlimited_container,"gpu_process_timing":gpu_process_timing,
                       "windows_processes":windows_processes, "gpu_tolerance":gpu_tolerance, "overview_regressions":overview_regressions,
+                      "group_trend_styles":group_trend_styles,
                       "silhouettes":silhouettes, "rail_identity_edges":rail_identity_edges}, ensure_ascii=False))
     browser.close()

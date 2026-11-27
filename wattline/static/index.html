@@ -15,7 +15,18 @@
     <div class="rail-inner">
       <div class="rail-brand"><div class="brand"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><span class="brand-name">Wattline</span></div><button type="button" id="rail-toggle" class="rail-toggle" aria-controls="rail-nav" aria-expanded="true"></button></div>
       <p class="brand-caption"><span data-i18n="compute_resource_workbench">计算资源管理工作台</span></p>
-      <nav aria-label="机器导航" data-i18n-aria-label="machine_navigation" id="rail-nav"></nav>
+      <nav aria-label="机器导航" data-i18n-aria-label="machine_navigation" id="rail-nav">
+        <div id="rail-links" class="rail-links"></div>
+        <div id="rail-order-control" class="rail-order">
+          <span aria-hidden="true"></span>
+          <select id="rail-order" data-i18n-aria-label="rail_order_label" aria-controls="rail-machines">
+            <option value="manual" data-i18n="rail_order_manual">拖拽排序</option>
+            <option value="cluster" data-i18n="rail_order_cluster">按集群组织</option>
+          </select>
+        </div>
+        <p id="rail-order-message" class="rail-order-message" role="status" hidden></p>
+        <div id="rail-machines"></div>
+      </nav>
     </div>
   </aside>
   <div class="top">

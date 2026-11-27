@@ -179,10 +179,118 @@ def check_machine_sources(browser):
             expect(page.locator('[data-value=card-cpu]')).to_have_text('60')
             page.goto(ORIGIN+'/#device/'+ids[1])
             expect(page.locator('#page-heading')).to_have_text(ids[0])
+            check_sidebar_order(page, client, ids, room)
             page.set_viewport_size({'width':390,'height':844})
             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
             assert not errors, errors
             page.close()
+
+
+def check_sidebar_order(page, client, ids, room):
+    rail = page.locator('#rail-nav')
+    mode = rail.locator('#rail-order')
+    entries = rail.locator('.rail-machine')
+    requests = []
+    page.on('request', lambda request: requests.append(request.post_data_json)
+            if request.method == 'PUT' and request.url.endswith('/api/resources/order') else None)
+
+    def saved_order():
+        return client.get('/api/snapshot').json()['resource_order']
+
+    def expect_order(ids):
+        expect(entries).to_have_count(len(ids))
+        page.wait_for_function(
+            'ids => [...document.querySelectorAll("#rail-nav .rail-machine")].map(entry => entry.dataset.host).join() === ids.join()',
+            arg=ids)
+
+    expect(mode).to_have_value('manual')
+    expect(mode).to_have_accessible_name('机器侧栏排序方式')
+    expect(mode.locator('option')).to_have_text(['拖拽排序','按集群组织'])
+    expect_order([ids[0],ids[3]])
+    handle = rail.locator(f'[data-sort-host="{ids[0]}"]')
+    source = handle.bounding_box()
+    target = entries.last.bounding_box()
+    page.mouse.move(source['x']+source['width']/2,source['y']+source['height']/2)
+    page.mouse.down()
+    page.mouse.move(target['x']+target['width']/2,target['y']+target['height']*0.75,steps=8)
+    page.mouse.up()
+    manual_order = [ids[3],ids[0]]
+    expect_order(manual_order)
+    assert saved_order() == manual_order
+    assert requests == [{'resources':manual_order}]
+
+    west_name = 'West <lab> & storage'
+    west = client.post('/api/rooms',json={'name':west_name}).json()['id']
+    client.put(f'/api/resources/{ids[1]}/room',json={'room_id':west}).raise_for_status()
+    cluster_name = 'Secondary & fleet'
+    cluster = client.post('/api/clusters',json={'name':cluster_name,'members':[ids[1]]}).json()['id']
+    mode.focus()
+    mode.select_option('cluster')
+    expect(mode).to_be_focused()
+    expect(rail.locator('[data-sort-host]')).to_have_count(0)
+    first_cluster = rail.get_by_role('region',name='Fixture cluster')
+    second_cluster = rail.get_by_role('region',name=cluster_name)
+    unassigned = rail.get_by_role('region',name='未入集群')
+    expect(unassigned.get_by_role('group',name='未设机房')).to_contain_text(ids[3])
+    first = first_cluster.locator(f'[data-host="{ids[0]}"]')
+    second = second_cluster.locator(f'[data-host="{ids[0]}"]')
+    expect(first_cluster.get_by_role('group',name='Fixture room')).to_contain_text(ids[0])
+    expect(second_cluster.get_by_role('group',name='Fixture room')).to_contain_text(ids[0])
+    expect(rail.locator(f'[data-host="{ids[1]}"], [data-host="{ids[2]}"]')).to_have_count(0)
+    expect(first).to_have_count(1)
+    expect(second).to_have_count(1)
+    second.press('Enter')
+    expect(page.locator('#page-heading')).to_have_text(ids[0])
+    expect(first).to_have_attribute('aria-current','page')
+    expect(second).to_have_attribute('aria-current','page')
+    second.focus()
+
+    # The page's normal snapshot poll handles membership and room updates.
+    client.put(f'/api/resources/{ids[3]}/room',json={'room_id':west}).raise_for_status()
+    client.put(f'/api/clusters/{cluster}',json={'name':cluster_name,'members':[ids[1],ids[3]]}).raise_for_status()
+    expect(second_cluster.get_by_role('group',name=west_name)).to_contain_text(ids[3])
+    expect(rail.locator('lab')).to_have_count(0)
+    expect(unassigned).to_have_count(0)
+    expect(second).to_be_focused()
+    assert requests == [{'resources':manual_order}]
+    assert saved_order() == manual_order
+
+    page.locator('#locale-select').select_option('en')
+    expect(mode).to_have_accessible_name('Machine sidebar order')
+    expect(mode.locator('option')).to_have_text(['Drag to reorder','Group by cluster'])
+    page.locator('.rail').screenshot(path=OUT/'an236-sidebar-cluster-desktop.png')
+    page.set_viewport_size({'width':320,'height':844})
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    expect(second_cluster).to_be_visible()
+    page.locator('#rail-nav').screenshot(path=OUT/'an236-sidebar-cluster-mobile.png')
+    page.locator('#rail-toggle').press('Space')
+    expect(page.locator('#rail-toggle')).to_have_attribute('aria-expanded','false')
+    page.reload()
+    expect(mode).to_have_value('cluster')
+    expect(second).to_have_accessible_name(f'{ids[0]} · Healthy · {cluster_name} · Fixture room')
+    expect(second.locator('.status-dot.normal')).to_be_visible()
+    expect(second.locator('.machine-icon')).to_be_visible()
+    second.press('Space')
+    expect(second).to_have_attribute('aria-current','page')
+    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    page.locator('.rail').screenshot(path=OUT/'an236-sidebar-cluster-compact.png')
+
+    second.focus()
+    client.put(f'/api/clusters/{cluster}',json={'name':cluster_name,'members':[ids[3]]}).raise_for_status()
+    expect(second).to_have_count(0)
+    expect(first).to_be_focused()
+
+    mode.focus()
+    mode.select_option('manual')
+    expect(mode).to_have_value('manual')
+    expect(mode).to_be_focused()
+    expect_order(manual_order)
+    assert requests == [{'resources':manual_order}]
+    handle.press('ArrowUp')
+    expect_order([ids[0],ids[3]])
+    expect(handle).to_be_focused()
+    assert saved_order() == [ids[0],ids[3]]
+    assert requests == [{'resources':manual_order},{'resources':[ids[0],ids[3]]}]
 
 
 def check_resources(browser):
@@ -313,8 +421,9 @@ def check_groups(page, client):
     page.locator('#device-kind').select_option('storage')
     expect(page.locator('#host-rows [data-machine-row]')).to_have_count(1)
     page.locator('#device-kind').select_option('')
-    page.locator(f'[data-sort-host="{storage}"]').press('ArrowUp')
-    expect(page.locator(f'[data-sort-host="{storage}"]')).to_be_focused()
+    handle = page.locator(f'#host-rows [data-sort-host="{storage}"]')
+    handle.press('ArrowUp')
+    expect(handle).to_be_focused()
     expect(page.locator('#host-rows [data-machine-row]').nth(2)).to_have_attribute('data-machine-row',storage)
     assert client.get('/api/snapshot').json()['resource_order'][-2] == storage
     page.locator('#overview-tab-machine').press('ArrowLeft')
@@ -435,4 +544,4 @@ if __name__ == '__main__':
         check_layered_configuration(browser)
         browser.close()
     print('PASS: three overview cards, deduplicated current and rated GPU power, verified machine and container source views, independent coverage, storage enrollment, synthetic capacity, persisted alerts, room/cluster management and navigation, '
-          '24-hour chart samples and coverage, keyboard tabs and sorting, filters, narrow layout, and localized layered configuration with explicit deletion confirmation')
+          '24-hour chart samples and coverage, keyboard tabs and sorting, filters, narrow layout, persistent sidebar modes, projected memberships, and localized layered configuration with explicit deletion confirmation')

@@ -51,8 +51,8 @@ The existing per-machine overview history API SHALL continue to return separate 
 - **THEN** 图例和提示按原字面显示名称，并在可用宽度内换行
 
 #### Scenario: More machines than palette colours
-- **WHEN** 同一图中的分组与观测范围序列数多于可用颜色
-- **THEN** 同色曲线以线型区分，图例使用对应的颜色和线型
+- **WHEN** 机房、集群或旧版逐机总览同时显示超过八条序列
+- **THEN** 各序列使用颜色不同的实线与对应图例，轮询、序列重排及切换指标时保留同一序列的颜色
 
 #### Scenario: No cross-machine average
 - **WHEN** 旧版总览历史接口返回数据

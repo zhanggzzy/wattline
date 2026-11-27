@@ -818,65 +818,288 @@ def check_overview_regressions(browser):
 
 
 def check_group_trend_styles(browser):
-    page = browser.new_page()
-    errors = []
-    page.on('pageerror', lambda error: errors.append(str(error)))
+    """AN-242 synthetic 24-hour room and cluster comparisons with 288 five-minute buckets."""
+    bucket = 300000
+    start = int(datetime(2026, 1, 2, tzinfo=timezone.utc).timestamp()*1000)
+    end = start+288*bucket
     summary = summarize_resources([])
-    groups = {kind+'s':[dict(id=f'{kind}-{index}', name=f'{kind} {index}',
-                             summary=summary, members=[], rooms=[]) for index in range(6)]
-              for kind in ('room','cluster')}
-    now = int(time.time()*1000)
-    start = now-86400000
+    names = ['Room Alpha', 'Room Beta', 'Room Gamma', 'Room Gamma',
+             'Room Epsilon', 'Room Zeta', 'Only matched by filter']
+    groups = {kind+'s': [
+        dict(id=f'{kind}-{index}', name=name, summary=summary, rooms=[],
+             members=['synthetic-shared'] if kind == 'cluster' else [])
+        for index,name in enumerate(names)] for kind in ('room','cluster')}
+    revision = 0
+    requests = []
+
+    def sample(column, scope, index):
+        if column == 0 and (40 <= index <= 52 or 91 <= index <= 99) and index != 95:
+            return None
+        if column == 2 and 105 <= index < 114:
+            return None
+        if column == 0 and scope == 'container':
+            return 10 + index%4
+        if column == 0:
+            return 100 if index >= 3 and index%7 < 3 else 0
+        if column == 1:
+            return 95 if index == 18 else (index*37)%66
+        if column == 2:
+            return [0,0,12.5,25][(index//12)%4]
+        return (column+index*7)%72
 
     def group_history(route):
         query = parse_qs(urlsplit(route.request.url).query)
         kind, metric = query['kind'][0], query['metric'][0]
-        requested = query.get('group', [])
-        selected = [group for group in groups[kind+'s'] if group['id'] in requested]
+        ids = query['group']
+        requests.append((metric,ids,query['view']))
+        assert len(ids) <= 6
+        selected = [group for group in groups[kind+'s'] if group['id'] in ids]
         series = [dict(group=group['id'], name=group['name'], scope=scope)
-                  for group in selected for scope in ('host','container')]
+                  for group in selected for scope in (('host','container') if group['id'].endswith('-0') else ('machine',))]
         if metric == 'memory':
             series.reverse()
-        points = [dict(time=start+index*300000, values=[index+column for column in range(len(series))])
-                  for index in range(3)]
-        route.fulfill(json={'from':start, 'to':now, 'bucket_ms':300000, 'keys':[metric],
-                            'series':series, 'points':points})
+        factor = 12 if metric == 'power' else 1024**3 if metric == 'memory_used' else 1
+        points = []
+        for index in range(288):
+            values = [sample(int(item['group'].rsplit('-',1)[1]),item['scope'],index) for item in series]
+            points.append(dict(time=start+(index+1)*bucket,
+                               values=[value*factor if value is not None else None for value in values],
+                               breaks=[value is None or index == 200 for value in values],
+                               coverage=[[0 if value is None else 1+index%3,4] for value in values]))
+        route.fulfill(json={'from':start, 'to':end, 'bucket_ms':bucket, 'keys':[metric]*len(series),
+                            'series':series, 'points':points, 'membership':'current'})
 
-    page.route('**/*', handle)
-    page.route('**/api/snapshot', lambda route: route.fulfill(json=dict(
-        server_time=now, stale_ms=30000, machines=[], storage=[], groups=groups)))
-    page.route('**/api/group-history?*', group_history)
-    observe_trend_strokes(page)
-    page.goto('http://wattline.test')
-    chart = page.locator('.chart-instance')
-    entries = chart.locator('.chart-legend-item')
-    for kind in ('room','cluster'):
-        page.locator(f'#overview-tab-{kind}').click()
-        page.locator('[data-overview-metric=cpu]').click()
-        expect(entries).to_have_count(12)
-        expect(entries.first).to_have_text(f'{kind} 0 · 宿主')
-        expect(entries.nth(1)).to_have_text(f'{kind} 0 · 容器视角')
-        before = assert_solid_plot(chart)
-        group_legend = chart.locator(f'[data-legend-group={kind}-0]')
-        swatch_color = before[0]['color']
-        group_legend.first.press('Enter')
-        expect(group_legend.first).to_have_attribute('aria-pressed','false')
-        expect(group_legend.last).to_have_attribute('aria-pressed','false')
-        assert not chart.locator('.plot canvas').evaluate(
-            '(canvas,color) => strokeTrace(canvas).some(stroke => stroke.color === color)', swatch_color)
-        group_legend.first.press('Enter')
-        page.locator('[data-overview-metric=memory]').click()
-        expect(entries.first).to_have_text(f'{kind} 5 · 容器视角')
-        assert assert_solid_plot(chart) == before[::-1]
-        page.locator('#chart-data summary').click()
-        expect(page.locator('#chart-data thead th')).to_have_count(13)
-        page.locator('.group-summary').get_by_role('button',name=f'{kind} 0',exact=True).click()
-        expect(entries).to_have_count(2)
-        assert assert_solid_plot(chart) == before[:2][::-1]
-        page.locator('#breadcrumb [data-overview]').click()
+    def open_fixture(*, touch=False, storage_blocked=False):
+        page = browser.new_page(viewport={'width':320 if touch else 1440,'height':900},
+                                timezone_id='UTC',has_touch=touch,is_mobile=touch)
+        errors = []
+        page.on('pageerror', lambda error: errors.append(str(error)))
+        page.route('**/*', handle)
+        page.route('**/api/snapshot', lambda route: route.fulfill(json=dict(
+            server_time=end+6000*revision, stale_ms=30000, machines=[], storage=[], groups=groups)))
+        page.route('**/api/group-history?*', group_history)
+        if storage_blocked:
+            page.add_init_script("Object.defineProperty(window,'localStorage',{get(){throw new Error('blocked')}})")
+        # Observe actual Canvas geometry, including observed zeros, isolated points, gaps and ruler positions.
+        page.add_init_script("""(() => {
+          const details = new WeakMap();
+          const paths = new WeakMap();
+          const context = CanvasRenderingContext2D.prototype;
+          const wrap = (method, observe) => {
+            const original = context[method];
+            context[method] = function (...args) {
+              if (this.canvas.matches('.group-trend-surface canvas')) observe(this,args);
+              return original.apply(this,args);
+            };
+          };
+          wrap('clearRect', ctx => details.set(ctx.canvas, {strokes:[],arcs:[],labels:[]}));
+          wrap('beginPath', ctx => paths.set(ctx,[]));
+          for (const method of ['moveTo','lineTo','rect']) wrap(method, (ctx,args) => paths.get(ctx)?.push([method,...args]));
+          wrap('arc', (ctx,args) => details.get(ctx.canvas).arcs.push(args));
+          wrap('fillText', (ctx,args) => details.get(ctx.canvas).labels.push(args));
+          wrap('stroke', ctx => details.get(ctx.canvas).strokes.push({
+            color:ctx.strokeStyle, alpha:ctx.globalAlpha, width:ctx.lineWidth, dash:ctx.getLineDash(),
+            path:paths.get(ctx),
+          }));
+          window.groupPlotTrace = canvas => details.get(canvas);
+        })()""")
+        page.goto('http://wattline.test')
+        return page, errors
+
+    page, errors = open_fixture()
+    page.locator('#locale-select').select_option('en')
+    page.locator('[data-overview-metric=gpu]').click()
+    surface = page.locator('#trend-chart')
+    lanes = surface.locator('.group-trend-lane:visible')
+    alpha = surface.locator('[data-trend-group=room-0]')
+    beta = surface.locator('[data-trend-group=room-1]')
+    gamma = surface.locator('[data-trend-group=room-2]')
+    expect(surface).to_have_attribute('data-view','split')
+    expect(lanes).to_have_count(6)
+    expect(page.locator('#chart-summary')).to_contain_text('first 6 of 7')
+    assert requests[-1] == ('gpu',[f'room-{index}' for index in range(6)],['machine'])
+    expect(alpha.locator('h3')).to_have_text('Room Alpha')
+    expect(surface.locator('h3').nth(2)).to_have_text('Room Gamma · room-2')
+    expect(surface.locator('h3').nth(3)).to_have_text('Room Gamma · room-3')
+    stats = alpha.locator('.stat-values').first
+    peak_time = datetime.fromtimestamp((start+8*bucket)/1000,timezone.utc).strftime('%H:%M')
+    expected_mean = sum(value for i in range(288) if (value := sample(0,'host',i)) is not None) / 267
+    expect(stats).to_contain_text('Peak 100.0%')
+    expect(stats).to_contain_text(peak_time)
+    expect(stats).to_contain_text(f'Mean {expected_mean:.1f}%')
+    expect(stats).to_contain_text('Missing buckets: 21')
+    expect(alpha.locator('.scope')).to_have_count(2)
+    expect(page.locator('#group-trend-scale')).to_have_text('Shared scale 0%–100%')
+    expect(gamma.locator('.stat-values')).to_contain_text('Missing buckets: 9')
+
+    def trace(locator):
+        return locator.evaluate('canvas => groupPlotTrace(canvas)')
+
+    geometry = [trace(lane)['labels'] for lane in lanes.all()]
+    assert all(labels == geometry[0] for labels in geometry)
+    assert [label[0] for label in geometry[0]] == ['100%','50%','0%']
+    bounds = [(lane.bounding_box()['x'],lane.bounding_box()['width']) for lane in lanes.all()]
+    axis = surface.locator('.group-trend-axis').bounding_box()
+    assert all(rect == (axis['x'],axis['width']) for rect in bounds)
+    swatch = alpha.locator('.group-trend-swatch').first.evaluate(
+        "el => getComputedStyle(el).getPropertyValue('--series-color')")
+    alpha_plot = trace(lanes.first)
+    alpha_strokes = [stroke for stroke in alpha_plot['strokes'] if stroke['color'] == swatch]
+    assert len(alpha_strokes) == 4 and all(not stroke['dash'] for stroke in alpha_strokes), alpha_strokes
+    baseline = geometry[0][-1][2]
+    assert any(sum(command[2] == baseline for command in stroke['path']) > 1 for stroke in alpha_strokes)
+    assert any(arc[2] == 2 for arc in alpha_plot['arcs'])
+    assert any(stroke['color'] == '#aebcce' for stroke in trace(lanes.nth(2))['strokes'])
+
+    surface.press('Home')
+    expect(alpha.locator('output').first).to_have_text('0.0% · 1/4 valid')
+    expect(alpha.locator('output').last).to_have_text('10.0% · 1/4 valid')
+    surface.press('Shift+ArrowRight')
+    expect(page.locator('#group-trend-time')).to_contain_text('01:05')
+    surface.press('PageUp')
+    expect(page.locator('#group-trend-time')).to_contain_text('00:05')
+    surface.press('End')
+    expect(page.locator('#chart-announcement')).to_contain_text('Room Beta')
+    surface.press('ArrowLeft')
+    expect(page.locator('#group-trend-time')).to_contain_text('23:55')
+    height = lanes.nth(2).bounding_box()['height']
+    x = 48 + 108/288*(bounds[2][1]-60)
+    lanes.nth(2).hover(position={'x':x,'y':height/2})
+    expect(gamma.locator('output')).to_have_text('— · 0/4 valid')
+    ruler_positions = [next(stroke['path'][0][1] for stroke in trace(lane)['strokes']
+                            if stroke['color'] == '#496781') for lane in lanes.all()]
+    assert len(set(ruler_positions)) == 1
+    lanes.nth(2).click(position={'x':x,'y':height/2})
+    expect(page.locator('#group-trend-time')).to_contain_text('09:00')
+    page.locator('#chart-data summary').click()
+    table = page.locator('#chart-data table')
+    expect(table.locator('tbody tr')).to_have_count(288)
+    expect(table.locator('thead th')).to_have_count(8)
+    expect(table.locator('tbody tr').first.locator('td').first).to_have_text('0.0% · 1/4 valid')
+    assert table.locator('tbody tr td:nth-child(2)').filter(has_text='—').count() == 21
+
+    page.locator('[data-overview-metric=power]').click()
+    expect(page.locator('#group-trend-scale')).to_have_text('Shared scale 0 W–1200 W')
+    expect(lanes).to_have_count(6)
+    assert [label[0] for label in trace(lanes.first)['labels']] == ['1200','600','0']
+    assert trace(lanes.first)['labels'] == trace(lanes.last)['labels']
+    page.locator('[data-overview-metric=memory_used]').click()
+    expect(page.locator('#group-trend-scale')).to_have_text('Shared scale 0 GiB–112 GiB')
+    expect(stats).to_contain_text('Peak 100.0 GiB')
+
+    page.locator('[data-overview-metric=gpu]').click()
+    expect(lanes).to_have_count(6)
+    surface.press('Home')
+    page.locator('.chart-instance').screenshot(path=OUT/'an242-group-split-desktop.png')
+    page.locator('#trend-layout-overlay').press('Enter')
+    overlay = surface.locator('.group-trend-overlay')
+    expect(overlay).to_be_visible()
+    expect(lanes).to_have_count(0)
+    legend = page.locator('#chart-legend')
+    gamma_visibility = legend.locator('[data-trend-action=visibility][data-legend-group=room-2]')
+    alpha_visibility = legend.locator('[data-trend-action=visibility][data-legend-group=room-0]')
+    gamma_visibility.press('Enter')
+    expect(gamma_visibility).to_have_attribute('aria-pressed','false')
+    expect(table.locator('thead th')).to_have_count(7)
+    alpha_visibility.focus()
+    assert any(stroke['alpha'] == 0.18 for stroke in trace(overlay)['strokes'])
+    assert any(abs(stroke['width']-2.4) < 0.001 and stroke['alpha'] == 1 for stroke in trace(overlay)['strokes'])
+    assert all(not stroke['dash'] for stroke in trace(overlay)['strokes'])
+    highlight = legend.get_by_role('button',name='Highlight Room Alpha',exact=True)
+    highlight.press('Enter')
+    expect(highlight).to_have_attribute('aria-pressed','true')
+    expect(page.locator('#group-trend-gaps')).to_contain_text('the highlighted group, Room Alpha')
+    page.locator('.chart-instance').screenshot(path=OUT/'an242-group-overlay-desktop.png')
+    solo = legend.get_by_role('button',name='Only show Room Alpha',exact=True)
+    solo.press('Space')
+    restore = legend.get_by_role('button',name='Restore groups',exact=True)
+    expect(restore).to_be_focused()
+    expect(alpha_visibility).to_have_attribute('aria-disabled','true')
+    alpha_visibility.press('Space')
+    expect(alpha_visibility).to_be_focused()
+    expect(alpha_visibility).to_have_attribute('aria-pressed','true')
+    expect(table.locator('thead th')).to_have_count(3)
+    expect(beta).to_be_hidden()
+
+    # Trigger a real polling redraw with a renamed group and a new history response.
+    revision += 1
+    groups['rooms'][1]['name'] = 'Room Beta Updated'
+    expect(legend.get_by_role('button',name='Room Beta Updated',exact=True)).to_have_count(1)
+    expect(alpha_visibility).to_be_focused()
+    expect(alpha.locator('output').first).to_have_text('0.0% · 1/4 valid')
+    expect(table.locator('thead th')).to_have_count(3)
+    expect(surface).to_have_attribute('data-view','overlay')
+    restore.press('Enter')
+    expect(beta).to_be_visible()
+    expect(gamma).to_be_hidden()
+    expect(table.locator('thead th')).to_have_count(7)
+
+    page.locator('#focus-trends').click()
+    page.locator('[data-metric=power]').click()
+    expect(page.locator('.trend-stack .group-trend-overlay:visible')).to_have_count(2)
+    page.locator('#trend-layout-split-power').press('Enter')
+    expect(page.locator('.trend-stack .group-trend-lane:visible')).to_have_count(10)
+    power = page.locator('#trend-chart-power')
+    power.press('Home')
+    power.press('Escape')
+    expect(page.locator('#exit-trends')).to_be_visible()
+    power.press('Escape')
+    expect(page.locator('#focus-trends')).to_be_focused()
+    page.locator('#locale-select').select_option('zh-CN')
+    expect(page.locator('#trend-layout-split')).to_have_text('按组分图')
+    expect(page.locator('#chart-summary')).to_contain_text('前 6 组')
+    for width in (1440,975,730,390,320):
+        page.set_viewport_size({'width':width,'height':900})
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth'), width
+        assert page.locator('.group-trend-ruler').bounding_box()['y'] < surface.bounding_box()['y']
+    expect(page.locator('#trend-layout-overlay')).to_be_visible()
+    assert page.locator('#trend-layout-overlay').bounding_box()['height'] >= 44
+    page.emulate_media(forced_colors='active')
+    page.wait_for_function("""() => {
+      const plot = document.querySelector('.group-trend-lane');
+      return matchMedia('(forced-colors: active)').matches &&
+        groupPlotTrace(plot).strokes.some(stroke => Math.abs(stroke.width-1.8) < 0.001 && stroke.color === '#000000');
+    }""")
+    assert page.locator('#trend-layout-split').evaluate("el => getComputedStyle(el).outlineStyle") == 'solid'
+    page.emulate_media(forced_colors='none')
+    page.locator('#trend-layout-overlay').click()
+    page.reload()
+    expect(surface).to_have_attribute('data-view','overlay')
+    page.locator('#overview-tab-cluster').click()
+    page.locator('#trend-layout-split').click()
+    expect(lanes).to_have_count(6)
+    expect(page.locator('#chart-legend')).to_contain_text('共有成员会分别计入其所属各组')
+    page.locator('#group-search').fill('Only matched')
+    expect(page.locator('#chart-legend [data-legend-group]')).to_have_text('Only matched by filter')
+    expect(page.locator('.group-trend-surface')).to_have_count(0)
+    page.locator('#group-search').fill('Room Gamma')
+    expect(lanes).to_have_count(2)
+    expect(surface).to_have_attribute('data-view','split')
+    page.locator('#group-search').fill('')
+    page.locator('[data-overview-metric=memory]').click()
+    expect(lanes).to_have_count(6)
+    expect(surface.locator('h3').first).to_have_text('Room Alpha')
     assert not errors, errors
     page.close()
-    return {'scoped_series_per_overview':12, 'surfaces':['room','cluster']}
+
+    mobile, errors = open_fixture(touch=True,storage_blocked=True)
+    mobile.locator('[data-overview-metric=gpu]').tap()
+    mobile_plot = mobile.locator('.group-trend-lane:visible').first
+    expect(mobile_plot).to_be_visible()
+    mobile_plot.tap(position={'x':56,'y':30})
+    expect(mobile.locator('.group-trend-reading:visible').first).to_contain_text('%')
+    assert mobile.evaluate("matchMedia('(pointer: coarse)').matches && document.documentElement.scrollWidth <= innerWidth")
+    assert mobile.locator('#trend-clear').bounding_box()['height'] >= 44
+    mobile.locator('.chart-instance').screenshot(path=OUT/'an242-group-split-mobile.png')
+    mobile.locator('#trend-layout-overlay').tap()
+    expect(mobile.locator('.group-trend-overlay')).to_be_visible()
+    mobile.locator('#trend-clear').tap()
+    expect(mobile.locator('#group-trend-time')).to_contain_text('选择一个')
+    assert not errors, errors
+    mobile.close()
+    return {'buckets':288,'max_groups':6,'surfaces':['room','cluster'],
+            'locales':['en','zh-CN'],'widths':[1440,975,730,390,320],
+            'forced_colors':True,'touch':True,'storage_blocked':True,'screenshots':3}
 
 
 def check_machine_silhouettes(browser):

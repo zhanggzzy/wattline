@@ -141,7 +141,8 @@ function groupChartContext() {
   if (!groupedOverview() || state.machine || state.page === 'alerts' || state.page === 'manage') return null;
   if (state.page === 'group') return {kind:state.group.kind,groups:[detailGroup()].filter(Boolean)};
   if (state.tab === 'machine') return null;
-  return {kind:state.tab,groups:groupRows(state.tab).slice(0,6)};
+  const matches = groupRows(state.tab);
+  return {kind:state.tab,groups:matches.slice(0,6),total:matches.length};
 }
 
 function summaryReading(value,suffix) {

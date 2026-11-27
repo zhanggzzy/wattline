@@ -637,12 +637,14 @@ function chartControls(host, device) {
 
 function chartPlot(host, key = null, index = 0) {
   const suffix = index ? '-'+key : '';
+  const group = groupChartContext();
+  const compareGroups = group?.total >= 2;
   return `<section class="chart-instance" data-chart-metric="${key || ''}" data-chart-suffix="${suffix}">
     ${key ? `<h2 class="chart-title">${descriptors[key][0]} <small>${descriptors[key][1].trim()}</small></h2>` : ''}
-    <div class="plot ${host ? 'large' : ''}"><canvas id="trend-chart${suffix}" tabindex="0" role="img"
-      aria-label="${key ? descriptors[key][0]+' · ' : ''}${t('resource_timeline_focus_and_use_left_and_right_arrows_to_inspect_')}" aria-describedby="chart-summary${suffix}"></canvas><div class="chart-tip" id="chart-tip${suffix}" hidden></div></div>
+    ${compareGroups ? groupTrendPlot(suffix, key || state.groupMetric) : `<div class="plot ${host ? 'large' : ''}"><canvas id="trend-chart${suffix}" tabindex="0" role="img"
+      aria-label="${key ? descriptors[key][0]+' · ' : ''}${t('resource_timeline_focus_and_use_left_and_right_arrows_to_inspect_')}" aria-describedby="chart-summary${suffix}"></canvas><div class="chart-tip" id="chart-tip${suffix}" hidden></div></div>`}
     <p class="chart-summary" id="chart-summary${suffix}"></p><div class="sr-only" id="chart-announcement${suffix}" role="status"></div><div class="chart-legend" id="chart-legend${suffix}"></div><p class="chart-error" id="chart-error${suffix}" hidden>${t(state.archive ? 'archive_chart_failed' : 'historical_metrics_unavailable')}</p>
-    <details class="chart-values" id="chart-data${suffix}"><summary>${t('view_chart_data')}</summary><div class="scroll" tabindex="0" role="region" aria-label="${t('view_chart_data')}"></div></details>
+    <details class="chart-values" id="chart-data${suffix}"><summary id="chart-data-toggle${suffix}">${t('view_chart_data')}</summary><div class="scroll" id="chart-data-scroll${suffix}" tabindex="0" role="region" aria-label="${t('view_chart_data')}"></div></details>
   </section>`;
 }
 
@@ -1212,6 +1214,7 @@ async function refreshHistory(reset = false) {
 async function refresh() {
   const previousHost = getHost();
   const previousScope = historyScope(previousHost);
+  const previousGroups = groupChartContext()?.groups.map(group => group.id).join(',');
   const revision = snapshotRevision;
   try {
     const snapshot = await get('/api/snapshot');
@@ -1250,8 +1253,9 @@ async function refresh() {
   const lastQuery = state.history?.to ?? 0;
   const liveTrendDue = historyHours() <= 24 && state.snapshot?.server_time-lastQuery >= 5000;
   const scopeChanged = previousHost?.id !== host?.id || previousScope !== historyScope(host);
-  if (replaced || resetSource || scopeChanged || !state.history || liveTrendDue || Object.values(state.historyErrors).some(Boolean)) {
-    void refreshHistory(Boolean(replaced || resetSource || scopeChanged));
+  const groupsChanged = previousGroups !== groupChartContext()?.groups.map(group => group.id).join(',');
+  if (replaced || resetSource || scopeChanged || groupsChanged || !state.history || liveTrendDue || Object.values(state.historyErrors).some(Boolean)) {
+    void refreshHistory(Boolean(replaced || resetSource || scopeChanged || groupsChanged));
   }
   window.setTimeout(refresh,2000);
 }
@@ -1295,7 +1299,7 @@ function chartSeries(instance, history) {
     const ids = items.map(item => JSON.stringify([item.group, item.scope ?? null]));
     const assigned = assignTrendColors(group.kind, ids);
     return items.map((item,index) => ({
-      key:instance.metric, id:item.group, hidden:state.hiddenGroups.has(item.group), unit,
+      key:instance.metric, id:item.group, scope:item.scope, hidden:group.total >= 2 && state.hiddenGroups.has(item.group), unit,
       label:item.name+(['host','container'].includes(item.scope)
         ? ' · '+t(item.scope === 'container' ? 'container_scope' : 'host_scope_label') : ''),
       color:assigned.get(ids[index]),
@@ -1333,10 +1337,16 @@ function chartSeries(instance, history) {
 
 function bindChart() {
   for (const element of document.querySelectorAll('.chart-instance')) {
-    const canvas = element.querySelector('canvas');
-    const instance = {canvas, suffix:element.dataset.chartSuffix,
+    const instance = {suffix:element.dataset.chartSuffix,
       metric:element.dataset.chartMetric || activeMetrics()[0],
       pointer:null,keyboardAt:null,points:[]};
+    const surface = element.querySelector('.group-trend-surface');
+    if (surface) {
+      charts.push(instance);
+      bindGroupTrend(instance, element, surface);
+      continue;
+    }
+    const canvas = instance.canvas = element.querySelector('canvas');
     const observer = new ResizeObserver(() => drawChart(instance));
     instance.observer = observer;
     charts.push(instance);
@@ -1434,9 +1444,25 @@ function paintLegend(chart, series, bucket) {
   legend.replaceChildren(...entries);
 }
 
+function paintChartTable(data, chart, history, visible, points) {
+  // Build the accessible alternative only on demand, never on every pointer move.
+  if (!data.open || (chart.tableHistory === history && chart.tableLegendKey === chart.legendKey)) return;
+  chart.tableHistory = history;
+  chart.tableLegendKey = chart.legendKey;
+  data.querySelector('.scroll').innerHTML = visible.length ? `<table><caption>${visible.map(({item}) => escape(item.label)).join(' / ')}</caption>
+    <thead><tr><th scope="col">${t('sample_time')}</th>${visible.map(({item}) => `<th scope="col">${escape(item.label)} (${item.unit.trim()})</th>`).join('')}</tr></thead>
+    <tbody>${points.map(point => `<tr><th scope="row">${tooltipTime.format(point.time)}</th>${visible.map(({item,index}) => `<td>${chartReading(point,index,item,1)}</td>`).join('')}</tr>`).join('')}</tbody></table>` : '';
+}
+
+function chartPoints(history) {
+  return (history?.points ?? []).map(point => ({...point, values:point.values.map((value,i) =>
+    history.keys?.[i] === 'vram' ? vram(value) : history.keys?.[i] === 'memory_used' ? gib(value) : value)}));
+}
+
 function drawChart(instance) {
   if (!instance) { charts.forEach(item => drawChart(item)); return; }
   const chart = instance;
+  if (chart.groupTrend) { drawGroupTrend(chart); return; }
   const {canvas} = chart;
   const width = canvas.clientWidth;
   const height = canvas.clientHeight;
@@ -1457,21 +1483,12 @@ function drawChart(instance) {
   const end = history?.to ?? state.snapshot?.server_time ?? Date.now();
   const hours = state.archive && history ? (history.to-history.from)/3600000 : historyHours();
   const start = history?.from ?? end-hours*3600000;
-  const points = (history?.points || []).map(point => ({...point, values:point.values.map((value,i) =>
-    history.keys?.[i] === 'vram' ? vram(value) : history.keys?.[i] === 'memory_used' ? gib(value) : value)}));
+  const points = chartPoints(history);
   chart.points = points;
   const series = chartSeries(chart,history);
   paintLegend(chart,series,history?.bucket_ms);
-  const data = byId('chart-data'+chart.suffix);
-  // Build the accessible alternative only on demand, never on every pointer move.
   const visible = series.map((item,index) => ({item,index})).filter(({item}) => !item.hidden);
-  if (data.open && (chart.tableHistory !== history || chart.tableLegendKey !== chart.legendKey)) {
-    chart.tableHistory = history;
-    chart.tableLegendKey = chart.legendKey;
-    data.querySelector('.scroll').innerHTML = visible.length ? `<table><caption>${visible.map(({item}) => escape(item.label)).join(' / ')}</caption>
-      <thead><tr><th scope="col">${t('sample_time')}</th>${visible.map(({item}) => `<th scope="col">${escape(item.label)} (${item.unit.trim()})</th>`).join('')}</tr></thead>
-      <tbody>${points.map(point => `<tr><th scope="row">${tooltipTime.format(point.time)}</th>${visible.map(({item,index}) => `<td>${chartReading(point,index,item,1)}</td>`).join('')}</tr>`).join('')}</tbody></table>` : '';
-  }
+  paintChartTable(byId('chart-data'+chart.suffix),chart,history,visible,points);
   byId('chart-error'+chart.suffix).hidden = !historyError;
   const summary = byId('chart-summary'+chart.suffix);
   if (!series.length) {
@@ -2198,23 +2215,28 @@ document.addEventListener('submit',event => {
   void refreshArchiveChart(archive);
 });
 
-function paintSeries(ctx, points, layout, series) {
+function paintSeries(ctx, points, layout, series, {highlight, solid, alignedGroup = false} = {}) {
   const { bottom, left, right, top, x, y } = layout;
-  const overview = !state.machine;
+  const bridgeSparse = !alignedGroup && !state.machine;
   ctx.save();
   ctx.beginPath();
-  ctx.rect(left, top - 1, right - left, bottom - top + 2);
+  const padding = alignedGroup ? 3 : 1;
+  const horizontalPadding = alignedGroup ? padding : 0;
+  ctx.rect(left - horizontalPadding, top - padding, right - left + 2*horizontalPadding, bottom - top + 2*padding);
   ctx.clip();
 
-  series.forEach((metric, index) => {
-    if (metric.hidden) return;
+  const visible = series.map((metric,index) => ({metric,index})).filter(({metric}) => metric && !metric.hidden);
+  if (highlight) visible.sort((a,b) => Number(a.metric.id === highlight)-Number(b.metric.id === highlight));
+  for (const {metric,index} of visible) {
+    const color = solid ?? metric.color;
+    ctx.globalAlpha = highlight && metric.id !== highlight ? 0.18 : 1;
     const segments = [];
     let segment = [];
     for (const point of points) {
       const value = point.values[index];
       const valid = Number.isFinite(value);
       const discontinuity = point.breaks?.[index];
-      if (overview && !valid && discontinuity === false) continue;
+      if (bridgeSparse && !valid && discontinuity === false) continue;
       if (segment.length && (!valid || discontinuity)) {
         segments.push(segment);
         segment = [];
@@ -2226,13 +2248,13 @@ function paintSeries(ctx, points, layout, series) {
     for (const part of segments) {
       const [firstX, firstY] = part[0];
       if (part.length === 1) {
-        ctx.fillStyle = metric.color;
+        ctx.fillStyle = color;
         ctx.beginPath();
         ctx.arc(firstX, firstY, 2, 0, 2 * Math.PI);
         ctx.fill();
         continue;
       }
-      if (series.length === 1) {
+      if ((alignedGroup ? visible.length : series.length) === 1 && !solid) {
         const gradient = ctx.createLinearGradient(0, top, 0, bottom);
         gradient.addColorStop(0, metric.color + '33');
         gradient.addColorStop(1, metric.color + '05');
@@ -2245,12 +2267,14 @@ function paintSeries(ctx, points, layout, series) {
         ctx.fill();
       }
       setSeriesStroke(ctx,metric);
+      ctx.strokeStyle = color;
+      if (highlight && metric.id === highlight) ctx.lineWidth = 2.4;
       ctx.beginPath();
       ctx.moveTo(firstX, firstY);
       for (const [px, py] of part.slice(1)) ctx.lineTo(px, py);
       ctx.stroke();
     }
-  });
+  }
   ctx.restore();
 }
 

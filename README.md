@@ -138,12 +138,14 @@ stays selected. Use **返回工作台 / Return to dashboard** or Escape to retur
 Escape first clears an active chart reading. Each chart also offers a sample
 table under **查看图表数据 / View chart data**.
 
-From machine details, choose **历史归档分析 / Archive analysis** to see older
-samples already stored in gzip archives. The workbench shows decompression
-progress, then opens the archived trend. Choose a metric and inclusive start
-and end dates, then apply the filters. Dates and chart times follow
-`archive_timezone`. The temporary analysis expires after 15 minutes of
-inactivity. Open it again to rebuild it.
+From machine details, choose **历史归档分析 / Archive analysis** to see the
+machine's available history, including the last seven days, older samples still
+in the local metrics database, and gzip archives. The workbench shows progress
+while it prepares the analysis. The start and end dates default to the first
+and last days with samples. Choose a metric and inclusive dates, then apply the
+filters. Dates and chart times follow `archive_timezone`. The view uses the
+samples available when the analysis was prepared. The temporary analysis expires
+after 15 minutes of inactivity. Open it again to rebuild it.
 
 The hardware table below trends combines each GPU’s status and measurements
 with current process PID, account, ownership evidence, VRAM, start time and

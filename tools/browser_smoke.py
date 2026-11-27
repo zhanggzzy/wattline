@@ -1882,23 +1882,26 @@ def check_archive_analysis(browser):
 
         append(hosts[0], midnight, 21)
         append(hosts[0], midnight + 240000, 22)
-        append(hosts[1], midnight, 98)
         first = publish(midnight + 3600000)
         append(hosts[0], midnight + day - 1, 24)
         append(hosts[0], midnight + day, 35)
         second = publish(midnight + 2 * day)
+        append(hosts[0], midnight + 2 * day, 45)
+        assert store.pack(midnight + 3 * day) == 1
+        append(hosts[0], midnight + 3 * day, 54)
+        append(hosts[1], midnight + 4 * day, 98)
         store.close()
         original = second.read_bytes()
         second.write_bytes(original[:-4])
         release = Event()
         rows = ArchiveAnalysis.rows
 
-        def hold_first_progress(job, files, identity, notify):
+        def hold_first_progress(job, files, sources, notify):
             def progress(value):
                 notify(value)
                 if not release.is_set():
                     assert release.wait(10)
-            yield from rows(job, files, identity, progress)
+            yield from rows(job, files, sources, progress)
 
         monitor = Monitor(config, clock=lambda: midnight + 2 * day + WARM_MS)
         app = create_app(config, monitor=monitor)
@@ -1941,27 +1944,31 @@ def check_archive_analysis(browser):
                 expect(entry).to_have_accessible_name('Archive analysis')
                 entry.click()
                 expect(page.get_by_role('heading', name='Archive analysis')).to_be_focused()
-                bar = page.get_by_role('progressbar', name='Decompressing history archives')
+                bar = page.get_by_role('progressbar', name='Preparing history data')
                 partial = first.stat().st_size * 100 // (first.stat().st_size + second.stat().st_size)
                 expect(bar).to_have_attribute('value', str(partial))
                 expect(page.locator('#archive-percent')).to_have_text(f'{partial}%')
                 release.set()
 
-                expect(page.get_by_text('The archive could not be prepared. You can retry.')).to_be_visible()
+                expect(page.get_by_text('History data could not be prepared. You can retry.')).to_be_visible()
                 assert second.read_bytes() == original[:-4]
                 second.write_bytes(original)
-                page.get_by_role('button', name='Decompress again').click()
+                page.get_by_role('button', name='Prepare again').click()
                 expect(page.locator('#archive-start')).to_have_value('2026-10-02')
-                expect(page.locator('#archive-end')).to_have_value('2026-10-03')
+                expect(page.locator('#archive-end')).to_have_value('2026-10-05')
                 expect(page.get_by_text('Archive time zone Asia/Shanghai')).to_be_visible()
-                expect(page.locator('#chart-summary')).to_contain_text('35.0%')
+                expect(page.locator('#chart-summary')).to_contain_text('54.0%')
+                page.get_by_text('View chart data', exact=True).click()
+                rows_on_page = page.locator('#chart-data tbody tr')
+                expect(rows_on_page).to_have_count(5)
+                for value in ('22.0%', '24.0%', '35.0%', '45.0%', '54.0%'):
+                    expect(rows_on_page.filter(has_text=value)).to_have_count(1)
                 page.locator('#archive-end').fill('2026-10-02')
                 apply = page.get_by_role('button', name='Apply filters')
                 apply.click()
                 expect(page.locator('#chart-summary')).to_contain_text('24.0%')
                 assert_solid_plot(page.locator('.chart-instance'))
                 page.get_by_text('View chart data', exact=True).click()
-                rows_on_page = page.locator('#chart-data tbody tr')
                 expect(rows_on_page).to_have_count(3)
                 expect(rows_on_page.first).to_contain_text('10/02/2026, 00:00:00')
                 expect(rows_on_page.first).to_contain_text('21.0%')
@@ -1971,22 +1978,29 @@ def check_archive_analysis(browser):
                 page.screenshot(path=str(OUT/'archive-analysis.png'), full_page=True)
                 assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
 
-                page.locator('#archive-start').fill('2026-10-04')
+                page.locator('#archive-start').fill('2026-10-06')
                 apply.click()
                 expect(page.get_by_text('The start date must be on or before the end date.')).to_be_visible()
-                page.locator('#archive-end').fill('2026-10-04')
+                page.locator('#archive-end').fill('2026-10-06')
                 apply.click()
                 expect(page.locator('#chart-summary')).to_have_text('No valid samples in this window.')
                 page.get_by_role('button', name='Back to machine').click()
                 expect(entry).to_be_focused()
                 expect(page.locator('#chart-summary')).to_contain_text('CPU')
+                page.locator('#rail-nav [data-host="demo-2"]').click()
+                entry.click()
+                expect(page.locator('#archive-start')).to_have_value('2026-10-06')
+                expect(page.locator('#archive-end')).to_have_value('2026-10-06')
+                expect(page.locator('#chart-summary')).to_contain_text('98.0%')
+                page.get_by_role('button', name='Back to machine').click()
                 page.locator('#rail-nav [data-host="demo-3"]').click()
                 entry.click()
-                expect(page.get_by_text('This machine has no archived history.')).to_be_visible()
+                expect(page.get_by_text('No history is available for this selection.')).to_be_visible()
                 assert not errors, errors
                 assert first.exists() and second.read_bytes() == original
-                return {'progress':partial, 'range_rows':3, 'timezone':zone.key, 'retry':True,
-                        'no_archive':True, 'no_samples':True, 'entry_only':True, 'requests':len(requests)}
+                return {'progress':partial, 'combined_range_rows':5, 'single_day_rows':3, 'timezone':zone.key,
+                        'retry':True, 'local_only':True, 'empty_history':True, 'empty_range':True,
+                        'entry_only':True, 'requests':len(requests)}
             finally:
                 release.set()
                 context.close()

@@ -808,7 +808,7 @@ class Monitor:
         if not self.registry_loaded:
             raise OSError('指标库暂不可读')
         job = self.archive_analyses.get(identity)
-        if start and (job is None or job.status == 'failed'):
+        if start and (job is None or job.status in ('empty','failed')):
             self.discard_archive_analysis(identity)
             job = self.archive_analyses[identity] = ArchiveAnalysis()
             job.task = asyncio.create_task(self.prepare_archive_analysis(identity, job))

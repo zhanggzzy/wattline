@@ -193,18 +193,23 @@ async def test_machine_history_and_cold_archive_keep_source_provenance(tmp_path)
             assert hosts_only['points'][-1]['coverage'] == [[1,1]]
 
             path = '/api/machines/host/archive-analysis'
+            days = ('2026-04-01','2026-04-08','2026-04-10')
             for source_id, scope, expected in [(None,None,[21]),(None,'container',[0,76]),
                                                ('container',None,[99,88,0,76])]:
                 select = {'source':source_id} if source_id else {}
                 assert (await client.post(path,params=select,json={})).status_code == 200
                 await monitor.archive_analyses[monitor.archive_selection(host.id,source_id)].task
-                params = dict(select, start='2026-04-01', end='2026-04-01', metric='cpu')
-                if scope:
-                    params['scope'] = scope
-                assert values(await client.get(path+'/series',params=params)) == expected
-            for metric, expected in [('cpu',[0,21]), ('memory',[0]), ('memory_used',[8,0])]:
-                params = {'start':'2026-04-01','end':'2026-04-01','metric':metric,'view':'machine'}
-                assert values(await client.get(path+'/series',params=params)) == expected
+                info = (await client.get(path,params=select)).json()
+                assert (info['first_date'], info['last_date']) == (days[0], days[-1])
+                for day in days:
+                    params = dict(select, start=day, end=day, metric='cpu')
+                    if scope:
+                        params['scope'] = scope
+                    assert values(await client.get(path+'/series',params=params)) == expected
+            for day in days:
+                for metric, expected in [('cpu',[0,21]), ('memory',[0]), ('memory_used',[8,0])]:
+                    params = {'start':day,'end':day,'metric':metric,'view':'machine'}
+                    assert values(await client.get(path+'/series',params=params)) == expected
             assert archive_file.read_bytes() == original
     finally:
         await monitor.close()

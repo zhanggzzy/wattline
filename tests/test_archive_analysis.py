@@ -22,9 +22,9 @@ def millis(day, hour=0):
     return int(datetime(2026, 3, day, hour, tzinfo=ZONE).timestamp()) * 1000
 
 
-def tick(history, identity, at, value, boot='boot'):
+def tick(history, identity, at, value, boot='boot', **metrics):
     history.append(identity, 'epoch', {'observed_at':at, 'received_at':at, 'source':'ssh', 'boot':boot,
-                                      'status':'normal', 'metrics':{'cpu_percent':value}})
+                                      'status':'normal', 'metrics':dict(metrics, cpu_percent=value)})
 
 
 def publish(history, cutoff):
@@ -83,13 +83,13 @@ async def test_archive_progress_dates_and_machine_isolation(analysis, monkeypatc
     entered, release = Event(), Event()
     read_rows = ArchiveAnalysis.rows
 
-    def held_rows(job, files, identity, notify):
+    def held_rows(job, files, sources, notify):
         def progress(value):
             notify(value)
-            if identity == alpha.history_key and not entered.is_set():
+            if sources == ((alpha.history_key, None),) and not entered.is_set():
                 entered.set()
                 assert release.wait(5)
-        yield from read_rows(job, files, identity, progress)
+        yield from read_rows(job, files, sources, progress)
 
     monkeypatch.setattr(ArchiveAnalysis, 'rows', held_rows)
     assert (await client.get(ARCHIVE)).status_code == 404
@@ -112,7 +112,7 @@ async def test_archive_progress_dates_and_machine_isolation(analysis, monkeypatc
     await asyncio.gather(job.task, beta_job.task)
     assert (await client.get(ARCHIVE)).json() == {
         'status':'ready', 'progress':100, 'timezone':ZONE.key,
-        'first_date':'2026-03-07', 'last_date':'2026-03-09'}
+        'first_date':'2026-03-07', 'last_date':'2026-03-19'}
     assert await start(monitor, client) is job
     data = (await series(client)).json()
     assert (data['from'], data['to']) == (millis(8), millis(9))
@@ -130,6 +130,66 @@ async def test_archive_progress_dates_and_machine_isolation(analysis, monkeypatc
     await empty.task
     assert empty.status == 'empty' and empty.progress == 100 and empty.workspace is None
     assert original == {path:path.read_bytes() for path in original}
+
+
+async def test_local_history_without_any_archives(analysis):
+    monitor, client = analysis
+    history = monitor.history
+    alpha, beta, _ = monitor.config.machines
+    empty = await start(monitor, client)
+    await empty.task
+    assert empty.status == 'empty'
+
+    tick(history, alpha.history_key, millis(11), 11)
+    assert history.pack(millis(12)) == 1
+    tick(history, alpha.history_key, millis(13), 13)
+    tick(history, alpha.history_key, millis(20), 20)
+    tick(history, beta.history_key, millis(8), 98)
+    assert history.published_archives() == []
+    job = await start(monitor, client)
+    await job.task
+    assert job is not empty
+    assert (await client.get(ARCHIVE)).json() == {
+        'status':'ready', 'progress':100, 'timezone':ZONE.key,
+        'first_date':'2026-03-11', 'last_date':'2026-03-20'}
+    data = (await series(client, '2026-03-11', '2026-03-19')).json()
+    assert [(p['time'], p['values']) for p in data['points']] == [
+        (millis(11), [11]), (millis(13), [13])]
+
+
+async def test_cross_tier_buckets_and_archive_rotation(analysis):
+    monitor, client = analysis
+    identity = monitor.config.machines[0].history_key
+    history = monitor.history
+    at = millis(8)
+
+    def power_tick(offset, watts, generation='one'):
+        tick(history, identity, at+offset, watts, gpu_power_w=watts,
+             gpu_generation=generation, gpu_power_kind='average')
+
+    power_tick(0, 100)
+    power_tick(500, 40)
+    first_file = publish(history, at+1000)
+    original = first_file.read_bytes()
+    power_tick(0, 20)
+    power_tick(1000, 40)
+    assert history.pack(at+2000) == 2
+    power_tick(2000, 60)
+    power_tick(300_000, 80, generation='two')
+
+    job = await start(monitor, client)
+    await job.task
+    before = (await series(client, metric='power')).json()
+    assert [(p['time'], p['values'], p['samples'], p['valid'], p['breaks']) for p in before['points']] == [
+        (at+2000, [40], 4, [4], [True]), (at+300_000, [80], 1, [1], [True])]
+    publish(history, at+301_000)
+    assert (await series(client, metric='power')).json() == before
+
+    monitor.expire_archive_analysis(identity, job)
+    rebuilt = await start(monitor, client)
+    await rebuilt.task
+    assert (await series(client, metric='power')).json() == before
+    assert first_file.read_bytes() == original
 
 
 async def test_failed_gzip_closes_partial_workspace_and_can_retry(analysis, monkeypatch):
@@ -241,12 +301,12 @@ async def test_shutdown_stops_preparation_and_preserves_archives(analysis, monke
     started = Event()
     read_rows = ArchiveAnalysis.rows
 
-    def held_rows(job, files, identity, notify):
+    def held_rows(job, files, sources, notify):
         def progress(value):
             notify(value)
             started.set()
             assert job.stopped.wait(5)
-        yield from read_rows(job, files, identity, progress)
+        yield from read_rows(job, files, sources, progress)
 
     monkeypatch.setattr(ArchiveAnalysis, 'rows', held_rows)
     job = await start(monitor, client)

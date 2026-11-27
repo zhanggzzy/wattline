@@ -44,8 +44,10 @@ class ArchiveAnalysis:
 
     def prepare(self, history, identity, zone, notify):
         files = history.published_archives()
-        if not files or self.stopped.is_set():
+        if self.stopped.is_set():
             return
+        sources = identity if isinstance(identity, tuple) else ((identity, None),)
+        self.source_count = len(sources)
         # SQLite owns this private temporary database and deletes its file on Unix.
         db = sqlite3.connect('', check_same_thread=False)
         try:
@@ -53,22 +55,24 @@ class ArchiveAnalysis:
             db.execute("""CREATE TABLE ticks(
                 source INTEGER, at INTEGER, boot TEXT, epoch TEXT, metrics TEXT,
                 PRIMARY KEY(source,at)) WITHOUT ROWID""")
-            db.executemany('INSERT OR REPLACE INTO ticks VALUES (?,?,?,?,?)',
-                           self.rows(files, identity, notify))
+            # Write cold, warm, then hot so a copy still in the metrics database wins.
+            insert = 'INSERT OR REPLACE INTO ticks VALUES (?,?,?,?,?)'
+            db.executemany(insert, self.rows(files, sources, notify))
+            with history.connect(read=True) as local:
+                for index, (key, boot) in enumerate(sources):
+                    db.executemany(insert, self.local_rows(history, local, index, key, boot))
             if self.stopped.is_set():
                 return
             first, last = db.execute('SELECT min(at),max(at) FROM ticks').fetchone()
             if first is not None:
-                self.dates = tuple(datetime.fromtimestamp(at / 1000, zone).date().isoformat() for at in (first, last))
+                self.dates = tuple(datetime.fromtimestamp(at // 1000, zone).date().isoformat() for at in (first, last))
                 db.commit()
                 self.workspace = db
         finally:
             if self.workspace is not db:
                 db.close()
 
-    def rows(self, files, identity, notify):
-        sources = identity if isinstance(identity, tuple) else ((identity,None),)
-        self.source_count = len(sources)
+    def rows(self, files, sources, notify):
         source_map = {key:(index,boot) for index,(key,boot) in enumerate(sources)}
         total = sum(size for _, size in files)
         completed = progress = 0
@@ -95,6 +99,12 @@ class ArchiveAnalysis:
                             raise ValueError('无效的冷归档样本')
                         yield index, at, row['boot'], row['epoch'], json.dumps(metrics, allow_nan=False)
             completed += size
+
+    def local_rows(self, history, db, index, key, boot):
+        for row in history.archive_local_rows(db, key, boot):
+            if self.stopped.is_set():
+                return
+            yield (index, *row)
 
     def series(self, metric, start, end, stale, scope=None, machine_view=False):
         bucket = max(1, (end - start + MAX_POINTS - 1) // MAX_POINTS)

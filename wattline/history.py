@@ -451,6 +451,22 @@ class History:
             files.append((path, path.stat().st_size))
         return files
 
+    def archive_local_rows(self, db, identity, boot):
+        # Preserve the generation stored separately during warm compaction.
+        yield from db.execute("""
+            SELECT h.at,h.boot,h.epoch,
+                   CASE WHEN g.signature IS NULL THEN h.metrics
+                        ELSE json_set(h.metrics,'$.gpu_generation',g.signature) END
+            FROM warm_host_ticks h JOIN history_machines m ON m.id=h.machine
+            LEFT JOIN gpu_generations g ON g.id=h.generation
+            WHERE m.identity=?
+            AND (? IS NULL OR h.boot=? OR (h.boot IS NULL AND h.status NOT IN ('normal','warning')))
+            """, (identity,boot,boot))
+        yield from db.execute("""
+            SELECT at,boot,epoch,metrics FROM host_ticks
+            WHERE machine=? AND (? IS NULL OR boot=? OR (boot IS NULL AND status NOT IN ('normal','warning')))
+            """, (identity,boot,boot))
+
     def finish_archive(self, slot, cutoff, exported):
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
